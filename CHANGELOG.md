@@ -4,6 +4,13 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+## 0.9.0
+
+- Add packaged sandbox helper bundles for `gondolin build`, allowing published installs to build images without a local Zig toolchain #99
+- Add QEMU CPU model override support for architecture/host compatibility #96
+- Fix HTTP hook secret scoping so secret host rules no longer implicitly depend on the global allowlist #93
+- Upgrade guest and krun runner builds to Zig 0.16.0
+
 ## 0.8.1
 
 - Fixed CommonJS consumers by restoring the `require` export entrypoint #97
