@@ -165,7 +165,7 @@ export XDG_CACHE_HOME=/tmp/.cache
 export XDG_CONFIG_HOME=/tmp/.config
 export XDG_DATA_HOME=/tmp/.local/share
 export UV_CACHE_DIR=/tmp/.cache/uv
-export UV_NATIVE_TLS=true
+export UV_SYSTEM_CERTS=true
 
 log "[init] /dev entries:"
 log_cmd ls -l /dev

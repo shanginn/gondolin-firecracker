@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Replace deprecated `UV_NATIVE_TLS` with `UV_SYSTEM_CERTS` in guest init environments #98
+
 ## 0.9.0
 
 - Add packaged sandbox helper bundles for `gondolin build`, allowing published installs to build images without a local Zig toolchain #99
