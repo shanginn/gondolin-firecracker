@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -36,7 +37,22 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.linkSystemLibrary("krun", .{});
 
-    b.installArtifact(exe);
+    const install_exe = b.addInstallArtifact(exe, .{});
+    if (target.result.os.tag == .macos and builtin.os.tag == .macos) {
+        const codesign = b.addSystemCommand(&.{
+            "codesign",
+            "--force",
+            "--sign",
+            "-",
+            "--entitlements",
+            b.pathFromRoot("gondolin-krun-runner.entitlements"),
+            b.getInstallPath(.bin, "gondolin-krun-runner"),
+        });
+        codesign.step.dependOn(&install_exe.step);
+        b.getInstallStep().dependOn(&codesign.step);
+    } else {
+        b.getInstallStep().dependOn(&install_exe.step);
+    }
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| {

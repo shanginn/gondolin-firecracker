@@ -171,11 +171,44 @@ export class SandboxServer extends EventEmitter {
     }
   }
 
+  private isLowValueQemuHintLine(line: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+    if (trimmed === "^") return true;
+    if (trimmed === "(additional stack frames may have been skipped...)") {
+      return true;
+    }
+    if (/^\?\?\?:\?\?:\?:/.test(trimmed)) return true;
+    if (/^error\(DebugAllocator\): memory address .* leaked:/.test(trimmed)) {
+      return true;
+    }
+    if (/^error: [A-Z][A-Za-z0-9_]*$/.test(trimmed)) return true;
+    if (/\.zig:\d+:\d+:\s+0x[0-9a-f]+ in /.test(trimmed)) {
+      return true;
+    }
+    if (trimmed === "}") return true;
+    if (trimmed.startsWith("_ =")) return true;
+    if (/^(return|try|const|var|if|defer)\b/.test(trimmed)) return true;
+    if (trimmed.startsWith("std.")) {
+      return true;
+    }
+    return false;
+  }
+
+  private selectQemuHintLine(): string | null {
+    for (let i = this.qemuLogTail.length - 1; i >= 0; i -= 1) {
+      const line = this.qemuLogTail[i]!;
+      if (!this.isLowValueQemuHintLine(line)) return line;
+    }
+    return this.qemuLogTail[this.qemuLogTail.length - 1] ?? null;
+  }
+
   private formatQemuLogHint(): string {
-    if (this.qemuLogTail.length === 0) return "";
-    const last = this.qemuLogTail[this.qemuLogTail.length - 1]!;
-    const truncated = last.length > 300 ? last.slice(0, 300) + "…" : last;
-    return ` (qemu: ${truncated})`;
+    const hint = this.selectQemuHintLine();
+    if (!hint) return "";
+    const truncated = hint.length > 300 ? hint.slice(0, 300) + "…" : hint;
+    const label = this.options.vmm === "krun" ? "krun" : "qemu";
+    return ` (${label}: ${truncated})`;
   }
 
   private readonly debugFlags: ReadonlySet<DebugFlag>;
@@ -255,6 +288,11 @@ export class SandboxServer extends EventEmitter {
   private vfsReady = false;
   private vfsReadyTimer: NodeJS.Timeout | null = null;
   private bootConfig: SandboxFsConfig | null = null;
+
+  /** @internal resolved VM backend name */
+  getVmmBackend(): "qemu" | "krun" {
+    return this.options.vmm;
+  }
 
   /** @internal resolved VM backend binary path */
   getVmmPath(): string {

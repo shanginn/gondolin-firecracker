@@ -32,6 +32,7 @@ import {
   type ClientMessage,
 } from "../sandbox/control-protocol.ts";
 import { SandboxServer } from "../sandbox/server.ts";
+import { assertMacHypervisorEntitlement } from "../sandbox/krun-controller.ts";
 import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
@@ -1201,7 +1202,11 @@ fi
       throw new Error("sandbox server is not available");
     }
 
-    execFileSync(server.getVmmPath(), ["--version"], { stdio: "ignore" });
+    const vmmPath = server.getVmmPath();
+    execFileSync(vmmPath, ["--version"], { stdio: "ignore" });
+    if (server.getVmmBackend() === "krun") {
+      assertMacHypervisorEntitlement(vmmPath);
+    }
     this.vmmChecked = true;
   }
 
@@ -1851,6 +1856,18 @@ fi
   private handleError(message: ErrorMessage) {
     const error = new Error(`error ${message.code}: ${message.message}`);
     if (message.id === undefined) {
+      if (this.statusReject) {
+        this.statusReject(error);
+        this.statusReject = null;
+        this.statusResolve = null;
+        this.statusPromise = null;
+      }
+      if (this.stateWaiters.length > 0) {
+        for (const waiter of this.stateWaiters) {
+          waiter.reject(error);
+        }
+        this.stateWaiters = [];
+      }
       this.rejectAll(error);
       return;
     }

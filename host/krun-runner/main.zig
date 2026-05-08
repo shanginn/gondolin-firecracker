@@ -43,7 +43,17 @@ const CliConfig = struct {
     configPath: []const u8,
 };
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) void {
+    mainInner(init) catch |err| {
+        switch (err) {
+            error.InvalidArguments, error.KrunError => {},
+            else => std.log.err("fatal: {s}", .{@errorName(err)}),
+        }
+        std.process.exit(1);
+    };
+}
+
+fn mainInner(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
@@ -83,6 +93,10 @@ fn parseArgs(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u
 fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
     _ = c.krun_init_log(c.KRUN_LOG_TARGET_DEFAULT, c.KRUN_LOG_LEVEL_WARN, c.KRUN_LOG_STYLE_NEVER, 0);
 
+    var c_string_arena = std.heap.ArenaAllocator.init(allocator);
+    defer c_string_arena.deinit();
+    const c_allocator = c_string_arena.allocator();
+
     const ctx_raw = c.krun_create_ctx();
     if (ctx_raw < 0) return krunError("krun_create_ctx", ctx_raw);
     const ctx: u32 = @intCast(ctx_raw);
@@ -91,9 +105,9 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
     const vm_cfg = c.krun_set_vm_config(ctx, cfg.cpus, cfg.memoryMiB);
     if (vm_cfg < 0) return krunError("krun_set_vm_config", vm_cfg);
 
-    const kernel_path_z = try allocator.dupeZ(u8, cfg.kernelPath);
-    const initrd_path_z = try allocator.dupeZ(u8, cfg.initrdPath);
-    const append_z = try allocator.dupeZ(u8, cfg.append);
+    const kernel_path_z = try c_allocator.dupeZ(u8, cfg.kernelPath);
+    const initrd_path_z = try c_allocator.dupeZ(u8, cfg.initrdPath);
+    const append_z = try c_allocator.dupeZ(u8, cfg.append);
 
     const kernel_format: u32 = try detectKernelFormat(cfg.kernelPath);
 
@@ -110,17 +124,17 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
         .none => "/dev/null",
         .stdio => "/dev/stdout",
     };
-    const console_output_z = try allocator.dupeZ(u8, console_output_path);
+    const console_output_z = try c_allocator.dupeZ(u8, console_output_path);
     const console_rc = c.krun_set_console_output(ctx, console_output_z.ptr);
     if (console_rc < 0) return krunError("krun_set_console_output", console_rc);
 
     if (cfg.rootDiskPath) |root_disk_path| {
-        const root_disk_path_z = try allocator.dupeZ(u8, root_disk_path);
+        const root_disk_path_z = try c_allocator.dupeZ(u8, root_disk_path);
         const disk_format: u32 = switch (cfg.rootDiskFormat orelse .raw) {
             .raw => c.KRUN_DISK_FORMAT_RAW,
             .qcow2 => c.KRUN_DISK_FORMAT_QCOW2,
         };
-        const block_id = try allocator.dupeZ(u8, "root");
+        const block_id = try c_allocator.dupeZ(u8, "root");
         const disk_rc = c.krun_add_disk2(
             ctx,
             block_id.ptr,
@@ -132,7 +146,7 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
     }
 
     if (cfg.netSocketPath) |net_socket_path| {
-        const net_path_z = try allocator.dupeZ(u8, net_socket_path);
+        const net_path_z = try c_allocator.dupeZ(u8, net_socket_path);
         var mac = try parseMac(cfg.netMac orelse "02:00:00:00:00:01");
         const net_rc = c.krun_add_net_unixstream(
             ctx,
@@ -149,10 +163,10 @@ fn runVm(allocator: std.mem.Allocator, cfg: Config) !void {
     if (console_id_raw < 0) return krunError("krun_add_virtio_console_multiport", console_id_raw);
     const console_id: u32 = @intCast(console_id_raw);
 
-    try addConsolePort(allocator, ctx, console_id, "virtio-port", cfg.virtioSocketPath);
-    try addConsolePort(allocator, ctx, console_id, "virtio-fs", cfg.virtioFsSocketPath);
-    try addConsolePort(allocator, ctx, console_id, "virtio-ssh", cfg.virtioSshSocketPath);
-    try addConsolePort(allocator, ctx, console_id, "virtio-ingress", cfg.virtioIngressSocketPath);
+    try addConsolePort(c_allocator, ctx, console_id, "virtio-port", cfg.virtioSocketPath);
+    try addConsolePort(c_allocator, ctx, console_id, "virtio-fs", cfg.virtioFsSocketPath);
+    try addConsolePort(c_allocator, ctx, console_id, "virtio-ssh", cfg.virtioSshSocketPath);
+    try addConsolePort(c_allocator, ctx, console_id, "virtio-ingress", cfg.virtioIngressSocketPath);
 
     const start_rc = c.krun_start_enter(ctx);
     if (start_rc < 0) return krunError("krun_start_enter", start_rc);
@@ -181,7 +195,11 @@ fn addConsolePort(
         fd,
         output_fd,
     );
-    if (rc < 0) return krunError("krun_add_console_port_inout", rc);
+    if (rc < 0) {
+        _ = c.close(fd);
+        _ = c.close(output_fd);
+        return krunError("krun_add_console_port_inout", rc);
+    }
 }
 
 fn connectUnixStream(socket_path: []const u8) !c_int {

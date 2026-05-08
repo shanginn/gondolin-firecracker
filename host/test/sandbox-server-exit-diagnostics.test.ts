@@ -8,7 +8,9 @@ function makeResolvedOptions(
   overrides: Partial<ResolvedSandboxServerOptions> = {},
 ): ResolvedSandboxServerOptions {
   return {
+    vmm: "qemu",
     qemuPath: "/bin/false",
+    krunRunnerPath: "/bin/false",
     kernelPath: "/tmp/vmlinuz",
     initrdPath: "/tmp/initramfs.cpio",
     rootfsPath: "/tmp/rootfs.ext4",
@@ -132,6 +134,85 @@ test("SandboxServer: QEMU hint does not include stdout (guest console) and strip
   assert.ok(!msg.includes("SECRET"));
   assert.ok(!msg.includes("\u001b"));
   assert.ok(msg.includes("qemu: oops red"));
+});
+
+test("SandboxServer: boot start failure closes client and rejects later messages", async () => {
+  const server = new SandboxServer(makeResolvedOptions());
+  const captured: any[] = [];
+  let closed = 0;
+
+  const connection = server.connect((data, isBinary) => {
+    if (isBinary) return;
+    captured.push(JSON.parse(String(data)));
+  }, () => {
+    closed += 1;
+  });
+
+  const controller = (server as any).controller;
+  controller.start = async () => {
+    throw new Error("no hypervisor entitlement");
+  };
+
+  connection.send({ type: "boot" });
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.equal(closed, 1);
+  assert.deepEqual(captured.at(-1), {
+    type: "error",
+    code: "sandbox_start_failed",
+    message: "no hypervisor entitlement",
+  });
+  assert.equal((server as any).bootConfig, null);
+
+  const capturedCount = captured.length;
+  connection.send(execMessage(99));
+  await flushMicrotasks();
+
+  assert.equal(captured.length, capturedCount);
+  assert.equal((server as any).inflight.size, 0);
+
+  await (server as any).close();
+});
+
+test("SandboxServer: krun hint skips low-value Zig stack frames", async () => {
+  const server = new SandboxServer(makeResolvedOptions({ vmm: "krun" }));
+  (server as any).bridge.send = () => true;
+
+  const { client, captured } = makeClient();
+  (server as any).handleExec(client, execMessage(1));
+
+  const controller = (server as any).controller;
+
+  controller.emit("log", "error: krun_start_enter failed: rc=-22\n", "stderr");
+  controller.emit("log", "error: KrunError\n", "stderr");
+  controller.emit(
+    "log",
+    "/tmp/gondolin/host/krun-runner/main.zig:158:23: 0x100393f7f in runVm\n",
+    "stderr",
+  );
+  controller.emit(
+    "log",
+    "    if (start_rc < 0) return krunError(\"krun_start_enter\", start_rc);\n",
+    "stderr",
+  );
+  controller.emit("log", "                       ^\n", "stderr");
+  controller.emit(
+    "log",
+    "(additional stack frames may have been skipped...)\n",
+    "stderr",
+  );
+
+  controller.emit("state", "stopped");
+  controller.emit("exit", { code: 1, signal: null });
+
+  await flushMicrotasks();
+
+  assert.equal(captured.json.length, 1);
+  assert.equal(
+    captured.json[0].message,
+    "sandbox exited (code=1) (krun: error: krun_start_enter failed: rc=-22)",
+  );
 });
 
 test("SandboxServer: QEMU hint tail is cleared on starting", async () => {

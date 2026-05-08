@@ -802,6 +802,8 @@ export class SandboxServerOps {
   }
 
   handleClientMessage(client: SandboxClient, message: ClientMessage) {
+    if (!this.clients.has(client)) return;
+
     if (this.hasDebug("protocol")) {
       const extra =
         message.type === "exec"
@@ -876,15 +878,33 @@ export class SandboxServerOps {
     this.controller.setAppend(append);
 
     const state = this.controller.getState();
-    if (changed) {
-      if (state === "running" || state === "starting") {
-        await this.controller.restart();
-        return;
+    try {
+      if (changed) {
+        if (state === "running" || state === "starting") {
+          await this.controller.restart();
+          return;
+        }
       }
-    }
 
-    if (state === "stopped") {
-      await this.controller.start();
+      if (state === "stopped") {
+        await this.controller.start();
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.bootConfig = null;
+      sendError(client, {
+        type: "error",
+        code: "sandbox_start_failed",
+        message: error.message,
+      });
+      this.emit("error", error);
+      this.closeClient(client);
+      void this.close().catch((closeErr: unknown) => {
+        const closeError =
+          closeErr instanceof Error ? closeErr : new Error(String(closeErr));
+        this.emit("error", closeError);
+      });
+      return;
     }
 
     sendJson(client, { type: "status", state: this.status });

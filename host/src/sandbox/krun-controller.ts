@@ -39,6 +39,52 @@ function trackChild(child: ChildProcess) {
   child.once("error", cleanup);
 }
 
+function resolveExecutableForInspection(executable: string): string {
+  if (path.isAbsolute(executable) || executable.includes(path.sep)) {
+    return executable;
+  }
+
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, executable);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // try next PATH entry
+    }
+  }
+
+  return executable;
+}
+
+function hasMacHypervisorEntitlement(executable: string): boolean {
+  const inspectPath = resolveExecutableForInspection(executable);
+  try {
+    const entitlements = child_process.execFileSync(
+      "/usr/bin/codesign",
+      ["-d", "--entitlements", ":-", inspectPath],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    return entitlements.includes("com.apple.security.hypervisor");
+  } catch {
+    return false;
+  }
+}
+
+export function assertMacHypervisorEntitlement(executable: string) {
+  if (process.platform !== "darwin") return;
+  if (hasMacHypervisorEntitlement(executable)) return;
+
+  const inspectPath = resolveExecutableForInspection(executable);
+  throw new Error(
+    "krun runner is not signed with the macOS Hypervisor entitlement " +
+      `(com.apple.security.hypervisor): ${inspectPath}\n` +
+      "Fix: rebuild the local runner with `make krun-runner` or set " +
+      "GONDOLIN_KRUN_RUNNER to a signed runner binary.",
+  );
+}
+
 export type KrunConfig = {
   /** krun runner binary path */
   krunRunnerPath: string;
@@ -125,6 +171,7 @@ export class KrunController extends EventEmitter {
     this.setState("starting");
 
     try {
+      assertMacHypervisorEntitlement(this.config.krunRunnerPath);
       const runnerConfig = buildRunnerConfig(this.config);
       const configPath = writeRunnerConfig(runnerConfig);
       this.activeConfigPath = configPath;
