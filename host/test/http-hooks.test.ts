@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createHttpHooks } from "../src/http/hooks.ts";
+import { createHttpHooks, makePlaceholderFunc } from "../src/http/hooks.ts";
 import { HttpRequestBlockedError } from "../src/http/utils.ts";
 import { Request as UndiciRequest, Response as UndiciResponse } from "undici";
 
@@ -465,6 +465,194 @@ test("http hooks replace secret placeholders", async () => {
   );
 
   assert.equal(request.headers.get("authorization"), "Bearer secret-value");
+});
+
+test("http hooks support custom secret placeholder strings", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+        placeholder: "ghp_placeholder",
+      },
+    },
+  });
+
+  assert.equal(env.API_KEY, "ghp_placeholder");
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {
+        authorization: `Bearer ${env.API_KEY}`,
+      },
+    }),
+  );
+
+  assert.equal(request.headers.get("authorization"), "Bearer secret-value");
+});
+
+test("http hooks support generated secret placeholders", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "secret-value",
+        placeholder: makePlaceholderFunc({
+          prefix: "ghp_",
+          length: 8,
+          suffix: "_x",
+        }),
+      },
+    },
+  });
+
+  assert.match(env.API_KEY, /^ghp_[0-9a-f]{8}_x$/);
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {
+        authorization: `Bearer ${env.API_KEY}`,
+      },
+    }),
+  );
+
+  assert.equal(request.headers.get("authorization"), "Bearer secret-value");
+});
+
+test("http hooks reject duplicate secret placeholders", () => {
+  assert.throws(
+    () =>
+      createHttpHooks({
+        secrets: {
+          FIRST: {
+            hosts: ["example.com"],
+            value: "first-value",
+            placeholder: "same-placeholder",
+          },
+          SECOND: {
+            hosts: ["example.com"],
+            value: "second-value",
+            placeholder: "same-placeholder",
+          },
+        },
+      }),
+    /duplicate secret placeholder/,
+  );
+});
+
+test("http hooks reject placeholders that equal secret values", () => {
+  assert.throws(
+    () =>
+      createHttpHooks({
+        secrets: {
+          API_KEY: {
+            hosts: ["example.com"],
+            value: "secret-value",
+            placeholder: "secret-value",
+          },
+        },
+      }),
+    /must not equal placeholder/,
+  );
+});
+
+test("http hooks do not rewrite placeholders inside already-substituted secret values", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      API_KEY: {
+        hosts: ["example.com"],
+        value: "ghp_real",
+        placeholder: "ghp_",
+      },
+    },
+  });
+
+  const fromPlaceholder = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {
+        authorization: `Bearer ${env.API_KEY}`,
+      },
+    }),
+  );
+  assert.equal(fromPlaceholder.headers.get("authorization"), "Bearer ghp_real");
+
+  const alreadySubstituted = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {
+        authorization: "Bearer ghp_real",
+      },
+    }),
+  );
+  assert.equal(
+    alreadySubstituted.headers.get("authorization"),
+    "Bearer ghp_real",
+  );
+});
+
+test("http hooks do not cascade placeholder replacements", async () => {
+  const { httpHooks, env } = createHttpHooks({
+    secrets: {
+      FIRST: {
+        hosts: ["example.com"],
+        value: "second-placeholder",
+        placeholder: "first-placeholder",
+      },
+      SECOND: {
+        hosts: ["example.com"],
+        value: "second-value",
+        placeholder: "second-placeholder",
+      },
+    },
+  });
+
+  const request = await runRequestHook(
+    httpHooks.onRequest!,
+    makeRequest({
+      method: "GET",
+      url: "https://example.com/data",
+      headers: {
+        authorization: `Bearer ${env.FIRST}`,
+      },
+    }),
+  );
+
+  assert.equal(
+    request.headers.get("authorization"),
+    "Bearer second-placeholder",
+  );
+});
+
+test("http hooks reject overlapping secret placeholders", () => {
+  assert.throws(
+    () =>
+      createHttpHooks({
+        secrets: {
+          PREFIX: {
+            hosts: ["example.com"],
+            value: "prefix-value",
+            placeholder: "ghp_",
+          },
+          TOKEN: {
+            hosts: ["example.com"],
+            value: "token-value",
+            placeholder: "ghp_abcd",
+          },
+        },
+      }),
+    /overlaps with secret placeholder/,
+  );
 });
 
 test("http hooks update existing secrets after creation", async () => {

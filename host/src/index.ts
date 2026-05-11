@@ -78,8 +78,17 @@ export {
 // HTTP hooks for network policy
 export {
   createHttpHooks,
+  makePlaceholderFunc,
+  BASE32_ALPHABET,
+  BASE32_HEX_ALPHABET,
+  BASE62_ALPHABET,
+  BASE64URL_ALPHABET,
+  HEX_ALPHABET,
+  LOWERCASE_ALPHABET,
+  UPPERCASE_ALPHABET,
   type CreateHttpHooksOptions,
   type CreateHttpHooksResult,
+  type MakePlaceholderFuncOptions,
   type SecretDefinition,
   type SecretManager,
   type SecretManagerEntry,

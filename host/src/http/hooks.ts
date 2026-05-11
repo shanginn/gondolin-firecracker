@@ -14,7 +14,37 @@ export type SecretDefinition = {
   hosts: string[];
   /** secret value */
   value: string;
+  /** guest-visible placeholder value or generator */
+  placeholder?: string | (() => string);
 };
+
+export type MakePlaceholderFuncOptions = {
+  /** literal prefix before random characters */
+  prefix?: string;
+  /** literal suffix after random characters */
+  suffix?: string;
+  /** random character count */
+  length: number;
+  /** random character alphabet (default: `HEX_ALPHABET`) */
+  alphabet?: string;
+};
+
+/** hexadecimal lowercase alphabet */
+export const HEX_ALPHABET = "0123456789abcdef";
+/** lowercase ASCII alphabet */
+export const LOWERCASE_ALPHABET = "abcdefghijklmnopqrstuvwxyz";
+/** uppercase ASCII alphabet */
+export const UPPERCASE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+/** RFC 4648 base32 alphabet without padding */
+export const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+/** RFC 4648 base32hex alphabet without padding */
+export const BASE32_HEX_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+/** uppercase, lowercase, and digit alphabet */
+export const BASE62_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+/** base64url alphabet without padding */
+export const BASE64URL_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 export type CreateHttpHooksOptions = {
   /** allowed host patterns (omitted = allow all, explicit empty = deny all) */
@@ -86,17 +116,49 @@ type SecretEntry = {
   deleted: boolean;
 };
 
+export function makePlaceholderFunc(
+  options: MakePlaceholderFuncOptions,
+): () => string {
+  const prefix = options.prefix ?? "";
+  const suffix = options.suffix ?? "";
+  const length = options.length;
+  const alphabet = options.alphabet ?? HEX_ALPHABET;
+
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new Error("placeholder length must be a non-negative integer");
+  }
+  if (alphabet.length === 0) {
+    throw new Error("placeholder alphabet must not be empty");
+  }
+
+  return () => {
+    let random = "";
+    for (let i = 0; i < length; i++) {
+      random += alphabet[crypto.randomInt(alphabet.length)];
+    }
+    return `${prefix}${random}${suffix}`;
+  };
+}
+
 export function createHttpHooks(
   options: CreateHttpHooksOptions = {},
 ): CreateHttpHooksResult {
   const env: Record<string, string> = {};
   const blockInternalRanges = options.blockInternalRanges ?? true;
   const configuredAllowedHosts =
-    options.allowedHosts === undefined ? ["*"] : uniqueHosts(options.allowedHosts);
+    options.allowedHosts === undefined
+      ? ["*"]
+      : uniqueHosts(options.allowedHosts);
   const secretEntries = new Map<string, SecretEntry>();
 
   for (const [name, secret] of Object.entries(options.secrets ?? {})) {
-    const placeholder = `GONDOLIN_SECRET_${crypto.randomBytes(24).toString("hex")}`;
+    const placeholder = resolveSecretPlaceholder(name, secret);
+    assertSecretPlaceholderIsSafe(
+      name,
+      placeholder,
+      secret.value,
+      secretEntries.values(),
+    );
     env[name] = placeholder;
     secretEntries.set(name, {
       name,
@@ -114,7 +176,8 @@ export function createHttpHooks(
     allowedInternalHosts,
   );
 
-  const getSecretEntries = (): SecretEntry[] => Array.from(secretEntries.values());
+  const getSecretEntries = (): SecretEntry[] =>
+    Array.from(secretEntries.values());
 
   const getSecretEntry = (name: string): SecretEntry => {
     const entry = secretEntries.get(name);
@@ -137,6 +200,9 @@ export function createHttpHooks(
       const entry = getSecretEntry(name);
       if (entry.deleted) {
         throw new Error(`secret deleted: ${name}`);
+      }
+      if (update.value === entry.placeholder) {
+        throw new Error(`secret value must not equal placeholder: ${name}`);
       }
       if (update.hosts !== undefined) {
         entry.hosts = uniqueHosts(update.hosts);
@@ -256,6 +322,53 @@ export function createHttpHooks(
   };
 
   return { httpHooks, env, allowedHosts, secretManager };
+}
+
+function resolveSecretPlaceholder(
+  name: string,
+  secret: SecretDefinition,
+): string {
+  const placeholder =
+    secret.placeholder === undefined
+      ? makeDefaultSecretPlaceholder()
+      : typeof secret.placeholder === "function"
+        ? secret.placeholder()
+        : secret.placeholder;
+
+  if (typeof placeholder !== "string" || placeholder.length === 0) {
+    throw new Error(`invalid placeholder for secret: ${name}`);
+  }
+
+  return placeholder;
+}
+
+function makeDefaultSecretPlaceholder(): string {
+  return `GONDOLIN_SECRET_${crypto.randomBytes(24).toString("hex")}`;
+}
+
+function assertSecretPlaceholderIsSafe(
+  name: string,
+  placeholder: string,
+  value: string,
+  existingEntries: Iterable<SecretEntry>,
+): void {
+  if (value === placeholder) {
+    throw new Error(`secret value must not equal placeholder: ${name}`);
+  }
+
+  for (const entry of existingEntries) {
+    if (placeholder === entry.placeholder) {
+      throw new Error(`duplicate secret placeholder: ${placeholder}`);
+    }
+    if (
+      placeholder.includes(entry.placeholder) ||
+      entry.placeholder.includes(placeholder)
+    ) {
+      throw new Error(
+        `secret placeholder for ${name} overlaps with secret placeholder for ${entry.name}`,
+      );
+    }
+  }
 }
 
 function cloneRequestWith(
@@ -416,7 +529,10 @@ function assertSecretValuesAllowedForHost(
       );
     }
 
-    if (checkQuery && requestContainsSecretValuesInQuery(request.url, [entry.value])) {
+    if (
+      checkQuery &&
+      requestContainsSecretValuesInQuery(request.url, [entry.value])
+    ) {
       throw new HttpRequestBlockedError(
         `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`,
       );
@@ -654,7 +770,8 @@ function isRangeCoveredByAllowedValue(
   allowedRanges: Array<{ start: number; end: number }>,
 ): boolean {
   return allowedRanges.some(
-    (allowed) => allowed.start <= candidate.start && allowed.end >= candidate.end,
+    (allowed) =>
+      allowed.start <= candidate.start && allowed.end >= candidate.end,
   );
 }
 
@@ -777,20 +894,45 @@ function replaceSecretPlaceholdersInString(
   hostname: string,
   entries: SecretEntry[],
 ): string {
-  let updated = value;
+  const secretValueRanges = entries.flatMap((entry) =>
+    collectStringMatchRanges(value, entry.value),
+  );
+  const replacements: Array<{
+    start: number;
+    end: number;
+    entry: SecretEntry;
+  }> = [];
 
   for (const entry of entries) {
-    if (!updated.includes(entry.placeholder)) continue;
-    if (entry.deleted) {
-      updated = replaceAll(updated, entry.placeholder, "");
-      continue;
+    for (const range of collectStringMatchRanges(value, entry.placeholder)) {
+      if (isRangeCoveredByAllowedValue(range, secretValueRanges)) continue;
+      replacements.push({ ...range, entry });
     }
-
-    assertSecretAllowedForHost(entry, hostname);
-    updated = replaceAll(updated, entry.placeholder, entry.value);
   }
 
-  return updated;
+  if (replacements.length === 0) return value;
+
+  replacements.sort((a, b) => a.start - b.start || b.end - a.end);
+
+  let updated = "";
+  let offset = 0;
+
+  for (const replacement of replacements) {
+    if (replacement.start < offset) continue;
+
+    updated += value.slice(offset, replacement.start);
+
+    if (replacement.entry.deleted) {
+      updated += "";
+    } else {
+      assertSecretAllowedForHost(replacement.entry, hostname);
+      updated += replacement.entry.value;
+    }
+
+    offset = replacement.end;
+  }
+
+  return updated + value.slice(offset);
 }
 
 function assertSecretAllowedForHost(
@@ -880,13 +1022,4 @@ function addUniqueString(values: string[], value: string): string[] {
     return values;
   }
   return [...values, value];
-}
-
-function replaceAll(
-  value: string,
-  search: string,
-  replacement: string,
-): string {
-  if (!search) return value;
-  return value.split(search).join(replacement);
 }

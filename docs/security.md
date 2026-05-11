@@ -219,7 +219,7 @@ ICMP ECHOs are synthetic in this model; any IP can be pinged.
 
 Gondolin's secret strategy is:
 
-- The guest receives **random placeholders** as environment variables (e.g.
+- The guest receives **placeholders** as environment variables (by default,
   `GONDOLIN_SECRET_<random>`).
 - When the guest makes an HTTP request, the host request hook
   (`createHttpHooks().httpHooks.onRequest`) scans outbound headers and **replaces
@@ -372,8 +372,13 @@ These are rules to not compromise the security guarantees of the system:
       `username:password` are replaced before the header is sent.
 
 3. **Don't rely on placeholders being "unguessable"**
-    - Placeholders are random and not the secret, but the guest can still transmit them.
+    - Placeholders are not the secret, but the guest can still transmit them.
     - Your security relies on the fact that placeholders are useless without host substitution.
+
+4. **Make custom placeholders high entropy**
+    - Placeholder matching is exact substring matching in mediated request data.
+    - Low-entropy placeholders can collide with normal request data or secret values, causing unintended substitution, request blocking, or skipped substitution.
+    - Prefer generated, token-shaped placeholders with enough random characters.
 
 ### Filesystem Mounts
 

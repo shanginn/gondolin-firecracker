@@ -311,7 +311,7 @@ been parsed into structured HTTP requests, not on raw packets.
 
 Secrets are handled as part of the HTTP mediation pipeline:
 
-- The guest receives **placeholders** (random values) in its environment.
+- The guest receives **placeholders** in its environment.
 - When the guest sends an HTTP request, the host scans headers for placeholders.
 - If the destination host is allowed for that secret, the host substitutes the
   real secret value into the outbound request.
