@@ -1,4 +1,12 @@
-import cbor from "cbor";
+import { Buffer } from "node:buffer";
+
+import { TypeEncoderMap, decode, encode } from "cbor2";
+
+const cborEncoderTypes = new TypeEncoderMap();
+cborEncoderTypes.registerEncoder(Buffer, (value) => [
+  NaN,
+  new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
+]);
 
 export const MAX_FRAME = 4 * 1024 * 1024;
 
@@ -453,7 +461,7 @@ export function normalize(value: unknown): unknown {
 }
 
 export function decodeMessage(frame: Buffer): IncomingMessage {
-  const raw = cbor.decodeFirstSync(frame);
+  const raw = decode(frame);
   return normalize(raw) as IncomingMessage;
 }
 
@@ -591,7 +599,9 @@ export function buildFileDeleteRequest(
 }
 
 export function encodeFrame(message: object): Buffer {
-  const payload = cbor.encode(message);
+  const payload = Buffer.from(
+    encode(message, { rejectUndefined: true, types: cborEncoderTypes }),
+  );
   const header = Buffer.alloc(4);
   header.writeUInt32BE(payload.length, 0);
   return Buffer.concat([header, payload]);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import cbor from "cbor";
+import { encode as encodeCbor } from "cbor2";
 
 import {
   FrameReader,
@@ -76,7 +76,7 @@ test("virtio-protocol: normalize converts Maps to plain objects and Uint8Array t
 });
 
 test("virtio-protocol: decodeMessage normalizes CBOR decoded values", () => {
-  // Force cbor.decodeFirstSync() to return a Map (not a plain object) by using
+  // Force the CBOR decoder to return a Map (not a plain object) by using
   // non-string keys. decodeMessage() should normalize Maps to objects and
   // Uint8Array byte strings to Buffers.
   const raw = new Map<any, any>([
@@ -89,7 +89,7 @@ test("virtio-protocol: decodeMessage normalizes CBOR decoded values", () => {
     ],
   ]);
 
-  const decoded = decodeMessage(cbor.encode(raw)) as any;
+  const decoded = decodeMessage(Buffer.from(encodeCbor(raw))) as any;
   assert.ok(decoded);
   assert.ok(decoded["1"]);
   assert.ok(Buffer.isBuffer(decoded["1"]["2"]));
@@ -109,6 +109,15 @@ test("virtio-protocol: encodeFrame prefixes payload length and roundtrips", () =
 
   const payload = framed.subarray(4);
   assert.deepEqual(decodeMessage(payload), msg);
+});
+
+test("virtio-protocol: encodeFrame encodes Buffers as byte strings", () => {
+  const msg = buildStdinData(1, Buffer.from("hi"), true);
+  const framed = encodeFrame(msg);
+  const decoded = decodeMessage(framed.subarray(4)) as any;
+
+  assert.ok(Buffer.isBuffer(decoded.p.data));
+  assert.deepEqual(decoded, msg);
 });
 
 test("virtio-protocol: buildExecRequest drops undefined optional fields", () => {

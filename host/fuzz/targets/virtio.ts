@@ -1,4 +1,3 @@
-import cbor from "cbor";
 import {
   FrameReader,
   MAX_FRAME,
@@ -44,7 +43,7 @@ export const virtioTarget: FuzzTarget = {
       p: { host: "127.0.0.1", port: 80 },
     }),
     // Some random-but-valid CBOR
-    encodeFrame(cbor.encode({ hello: "world", n: 1 })),
+    encodeFrame({ hello: "world", n: 1 }),
   ],
 
   runOne(input: Buffer, rng: XorShift32): boolean {
