@@ -4,6 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+## 0.10.0
+
 - Added runtime rootfs sizing via `rootfs.size` / `--rootfs-size`, growing the writable disk and running `resize2fs` in the guest. #94
 
 ## 0.9.1
