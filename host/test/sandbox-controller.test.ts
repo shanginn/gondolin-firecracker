@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test, { afterEach, mock } from "node:test";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import * as child_process from "child_process";
 
 import {
@@ -50,6 +54,18 @@ function makeConfig(overrides?: Partial<SandboxConfig>): SandboxConfig {
 
 async function flush(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 1000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(predicate(), true);
 }
 
 afterEach(() => {
@@ -115,6 +131,91 @@ test("buildQemuArgs: rootDiskVolatileMode=snapshot enables qemu snapshot mode", 
   const driveIndex = args.indexOf("-drive");
   assert.notEqual(driveIndex, -1);
   assert.match(args[driveIndex + 1]!, /snapshot=on/);
+});
+
+test("SandboxController: idle pause uses a short QMP socket", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-qmp-test-"));
+  const seenCommands: string[] = [];
+  const child = new FakeChildProcess();
+  let spawnedArgs: string[] = [];
+
+  mock.method(cp, "spawn", (_cmd: string, args: string[]) => {
+    spawnedArgs = args;
+    return child as any;
+  });
+
+  const controller = new SandboxController(
+    makeConfig({
+      qemuIdlePauseMs: 1,
+      virtioSocketPath: path.join(tmpDir, "virtio.sock"),
+    }),
+  );
+
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.write(
+      JSON.stringify({ QMP: { version: {}, capabilities: [] } }) + "\r\n",
+    );
+
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) break;
+        const raw = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!raw) continue;
+        const message = JSON.parse(raw) as { execute?: string };
+        if (message.execute) seenCommands.push(message.execute);
+        socket.write(JSON.stringify({ return: {} }) + "\r\n");
+      }
+    });
+  });
+
+  try {
+    await controller.start();
+    child.emit("spawn");
+
+    const qmpIndex = spawnedArgs.indexOf("-qmp");
+    assert.notEqual(qmpIndex, -1);
+    const match = /^unix:(.*),server=on,wait=off$/.exec(
+      spawnedArgs[qmpIndex + 1]!,
+    );
+    assert.ok(match);
+    const qmpSocketPath = match[1]!;
+    assert.equal(path.dirname(qmpSocketPath), tmpDir);
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(qmpSocketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    controller.scheduleIdlePause();
+    await waitFor(() => seenCommands.includes("stop"));
+
+    const resume = controller.resumeForActivity();
+    if (resume) await resume;
+
+    assert.deepEqual(
+      seenCommands.filter(
+        (command) => command === "stop" || command === "cont",
+      ),
+      ["stop", "cont"],
+    );
+
+    const closing = controller.close();
+    child.emit("exit", 0, null);
+    await closing;
+  } finally {
+    if (server.listening) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test("SandboxController: start is idempotent while running", async () => {
