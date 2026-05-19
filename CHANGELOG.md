@@ -4,6 +4,10 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+## 0.12.0
+
+- Add `VM.getHostPid()` to allow callers to collect host-side process metrics of the VM runner. #114
+
 ## 0.11.0
 
 - Add conservative QEMU auto-pause for idle macOS/HVF sandboxes, with guest activity tracking and configurable `qemuIdlePauseMs`. #112
