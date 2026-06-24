@@ -3,7 +3,7 @@
 See also: [SDK Overview](./sdk.md), [Networking, Ingress, and SSH](./sdk-network.md)
 
 When working with the SDK you create a `VM` object, use it, then close it.
-If you do not close it, the QEMU instance keeps running.
+If you do not close it, the Firecracker VM keeps running.
 
 ## Creating, Starting, and Closing
 

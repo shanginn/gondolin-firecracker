@@ -6,7 +6,7 @@ import http from "http";
 import net from "net";
 import path from "path";
 
-import type { SandboxLogStream, SandboxState } from "./controller.ts";
+import type { SandboxLogStream, SandboxState } from "./state.ts";
 
 const activeChildren = new Set<ChildProcess>();
 let exitHookRegistered = false;
@@ -51,10 +51,10 @@ export type FirecrackerConfig = {
   /** root disk image path */
   rootDiskPath?: string;
   /** root disk image format */
-  rootDiskFormat?: "raw" | "qcow2";
+  rootDiskFormat?: "raw";
   /** readonly mode for the root disk */
   rootDiskReadOnly?: boolean;
-  /** vm memory size (qemu syntax, e.g. "1G") */
+  /** vm memory size (e.g. "1G") */
   memory: string;
   /** vm cpu count */
   cpus: number;
@@ -104,12 +104,6 @@ export class FirecrackerController extends EventEmitter {
     if (this.child) return;
 
     validateFirecrackerRuntimePreconditions(this.config);
-
-    if (this.config.rootDiskFormat && this.config.rootDiskFormat !== "raw") {
-      throw new Error(
-        `Firecracker backend supports raw root disks only (got ${this.config.rootDiskFormat}).`,
-      );
-    }
 
     this.manualStop = false;
     this.setState("starting");

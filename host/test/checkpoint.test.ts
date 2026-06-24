@@ -4,548 +4,111 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ensureGuestAssets, loadAssetManifest } from "../src/assets.ts";
-import { VmCheckpoint } from "../src/checkpoint.ts";
-import { getQcow2BackingFilename } from "../src/qemu/img.ts";
+import { VmCheckpoint, type VmCheckpointData } from "../src/checkpoint.ts";
 import { VM } from "../src/vm/core.ts";
 import {
-  shouldSkipVmTests,
   scheduleForceExit,
-  getKrunRuntimeSkipReason,
-  resolveKrunRunnerPath,
+  shouldSkipVmTests,
 } from "./helpers/vm-fixture.ts";
 
 const skipVmTests = shouldSkipVmTests();
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
 
-async function skipIfKrunUnavailable(t: test.TestContext): Promise<boolean> {
-  const reason = await getKrunRuntimeSkipReason();
-  if (reason) {
-    t.skip(reason);
-    return true;
-  }
-  return false;
-}
-
 test.after(() => {
   scheduleForceExit();
 });
 
+function writeCheckpointTrailer(
+  checkpointPath: string,
+  overrides: Partial<VmCheckpointData> = {},
+): VmCheckpoint {
+  fs.writeFileSync(checkpointPath, "raw-disk");
+  VmCheckpoint.writeTrailer(checkpointPath, {
+    version: 1,
+    name: path.basename(checkpointPath, path.extname(checkpointPath)),
+    createdAt: "2026-03-01T00:00:00.000Z",
+    diskFile: path.basename(checkpointPath),
+    guestAssetBuildId: "15e98966-a559-55ee-8d57-9f4c3f0346c7",
+    snapshotKind: "disk",
+    diskFormat: "raw",
+    createdWithVmm: "firecracker",
+    compatibleVmm: ["firecracker"],
+    ...overrides,
+  });
+  return VmCheckpoint.load(checkpointPath);
+}
+
 test(
-  "disk checkpoints can be resumed (qcow2 backing)",
+  "disk checkpoints can be resumed from raw files",
   { skip: skipVmTests, timeout: timeoutMs },
   async () => {
-    let base: VM | null = null;
-    let checkpoint: any = null;
-    let checkpointPath: string | null = null;
-    let clone1: VM | null = null;
-    let clone2: VM | null = null;
-    let fresh: VM | null = null;
-
-    try {
-      base = await VM.create({
-        vfs: null,
-        sandbox: {
-          console: "none",
-          netEnabled: false,
-        },
-      });
-
-      // Materialize a recognizable file on the root disk.
-      const write = await base!.exec([
-        "/bin/sh",
-        "-c",
-        "echo base > /etc/checkpoint.txt",
-      ]);
-      assert.equal(write.exitCode, 0);
-
-      checkpointPath = path.join(
-        os.tmpdir(),
-        `gondolin-checkpoint-${Date.now()}.qcow2`,
-      );
-      checkpoint = await base!.checkpoint(checkpointPath);
-      base = null;
-
-      const metadata = checkpoint.toJSON();
-      assert.equal(metadata.snapshotKind, "disk");
-      assert.equal(metadata.createdWithVmm, "qemu");
-      assert.ok(metadata.compatibleVmm?.includes("qemu"));
-
-      // Ensure checkpoints can be reloaded from disk.
-      checkpoint = VmCheckpoint.load(checkpointPath);
-
-      // Resume 1 sees the base file
-      clone1 = await checkpoint.resume({
-        vfs: null,
-        sandbox: {
-          console: "none",
-          netEnabled: false,
-        },
-      });
-      const r1 = await clone1.exec(["/bin/cat", "/etc/checkpoint.txt"]);
-      assert.equal(r1.stdout.trim(), "base");
-
-      // Modify clone 1
-      const m1 = await clone1.exec([
-        "/bin/sh",
-        "-c",
-        "echo clone1 > /etc/checkpoint.txt",
-      ]);
-      assert.equal(m1.exitCode, 0);
-      await clone1.close();
-      clone1 = null;
-
-      // Resume 2 should not see clone1's change
-      clone2 = await checkpoint.resume({
-        vfs: null,
-        sandbox: {
-          console: "none",
-          netEnabled: false,
-        },
-      });
-      const r2 = await clone2.exec(["/bin/cat", "/etc/checkpoint.txt"]);
-      assert.equal(r2.stdout.trim(), "base");
-      await clone2.close();
-      clone2 = null;
-
-      // A fresh VM must not see checkpoint writes (base image stays clean)
-      fresh = await VM.create({
-        vfs: null,
-        sandbox: { console: "none", netEnabled: false },
-      });
-      const r3 = await fresh.exec([
-        "/bin/sh",
-        "-c",
-        "test ! -f /etc/checkpoint.txt",
-      ]);
-      assert.equal(r3.exitCode, 0);
-      await fresh.close();
-      fresh = null;
-
-      checkpoint.delete();
-      checkpoint = null;
-    } finally {
-      if (base) await base.close().catch(() => undefined);
-      if (clone1) await clone1.close().catch(() => undefined);
-      if (clone2) await clone2.close().catch(() => undefined);
-      if (fresh) await fresh.close().catch(() => undefined);
-      if (checkpoint) {
-        try {
-          checkpoint.delete();
-        } catch {
-          // ignore
-        }
-      }
-    }
-  },
-);
-
-test(
-  "checkpoint resume rebases qcow2 backing to resolved rootfs",
-  { skip: skipVmTests, timeout: timeoutMs },
-  async (t) => {
-    let base: VM | null = null;
-    let checkpointPath: string | null = null;
-    let checkpoint: VmCheckpoint | null = null;
-    let resumed: VM | null = null;
-
-    const assets = await ensureGuestAssets();
-
-    const sourceDir = path.dirname(assets.kernelPath);
-    const sourceManifest = loadAssetManifest(sourceDir);
-    if (!sourceManifest?.buildId) {
-      (t as any).skip?.(
-        "guest assets have no manifest buildId; checkpointing is unsupported",
-      );
-      return;
-    }
-
-    const kernelName = sourceManifest.assets?.kernel ?? "vmlinuz-virt";
-    const initrdName = sourceManifest.assets?.initramfs ?? "initramfs.cpio.lz4";
-    const rootfsName = sourceManifest.assets?.rootfs ?? "rootfs.ext4";
-
-    const mkAssetDir = (label: string) => {
-      const dir = fs.mkdtempSync(
-        path.join(os.tmpdir(), `gondolin-assets-${label}-`),
-      );
-      fs.symlinkSync(assets.kernelPath, path.join(dir, kernelName));
-      fs.symlinkSync(assets.initrdPath, path.join(dir, initrdName));
-      fs.symlinkSync(assets.rootfsPath, path.join(dir, rootfsName));
-
-      if (sourceManifest.assets?.krunKernel) {
-        const sourceKrunKernel = path.join(
-          sourceDir,
-          sourceManifest.assets.krunKernel,
-        );
-        fs.symlinkSync(
-          sourceKrunKernel,
-          path.join(dir, sourceManifest.assets.krunKernel),
-        );
-      }
-
-      if (sourceManifest.assets?.krunInitrd) {
-        const sourceKrunInitrd = path.join(
-          sourceDir,
-          sourceManifest.assets.krunInitrd,
-        );
-        fs.symlinkSync(
-          sourceKrunInitrd,
-          path.join(dir, sourceManifest.assets.krunInitrd),
-        );
-      }
-
-      if (sourceManifest.assets?.firecrackerKernel) {
-        const sourceFirecrackerKernel = path.join(
-          sourceDir,
-          sourceManifest.assets.firecrackerKernel,
-        );
-        fs.symlinkSync(
-          sourceFirecrackerKernel,
-          path.join(dir, sourceManifest.assets.firecrackerKernel),
-        );
-      }
-
-      if (sourceManifest.assets?.firecrackerInitrd) {
-        const sourceFirecrackerInitrd = path.join(
-          sourceDir,
-          sourceManifest.assets.firecrackerInitrd,
-        );
-        fs.symlinkSync(
-          sourceFirecrackerInitrd,
-          path.join(dir, sourceManifest.assets.firecrackerInitrd),
-        );
-      }
-
-      fs.writeFileSync(
-        path.join(dir, "manifest.json"),
-        JSON.stringify(sourceManifest, null, 2),
-      );
-      return dir;
-    };
-
-    const dirA = mkAssetDir("a");
-    const dirB = mkAssetDir("b");
-
-    const expectedA = path.join(dirA, rootfsName);
-    const expectedB = path.join(dirB, rootfsName);
-
-    try {
-      base = await VM.create({
-        vfs: null,
-        sandbox: {
-          imagePath: dirA,
-          console: "none",
-          netEnabled: false,
-        },
-      });
-
-      checkpointPath = path.join(
-        os.tmpdir(),
-        `gondolin-checkpoint-rebase-${Date.now()}.qcow2`,
-      );
-      checkpoint = await base.checkpoint(checkpointPath);
-      base = null;
-
-      // Validate the checkpoint initially points at dirA.
-      const backing1 = getQcow2BackingFilename(checkpointPath);
-      assert.equal(backing1, expectedA);
-
-      // Resume while pointing to dirB and ensure resume updates the backing path.
-      resumed = await checkpoint.resume({
-        autoStart: false,
-        vfs: null,
-        sandbox: {
-          imagePath: dirB,
-          console: "none",
-          netEnabled: false,
-        },
-      });
-
-      const backing2 = getQcow2BackingFilename(checkpointPath);
-      assert.equal(backing2, expectedB);
-
-      await resumed.close();
-      resumed = null;
-
-      checkpoint.delete();
-      checkpoint = null;
-    } finally {
-      if (base) await base.close().catch(() => undefined);
-      if (resumed) await resumed.close().catch(() => undefined);
-      if (checkpoint) {
-        try {
-          checkpoint.delete();
-        } catch {
-          // ignore
-        }
-      }
-      fs.rmSync(dirA, { recursive: true, force: true });
-      fs.rmSync(dirB, { recursive: true, force: true });
-    }
-  },
-);
-
-test(
-  "checkpoint overwrite after resume preserves canonical backing and data",
-  { skip: skipVmTests, timeout: timeoutMs },
-  async () => {
-    let base: VM | null = null;
-    let resumed: VM | null = null;
-    let resumedAgain: VM | null = null;
-    let checkpoint: VmCheckpoint | null = null;
-
     const checkpointPath = path.join(
       os.tmpdir(),
-      `gondolin-checkpoint-overwrite-${Date.now()}.qcow2`,
+      `gondolin-checkpoint-${Date.now()}.raw`,
     );
 
+    let vm: VM | null = null;
+    let resumed: VM | null = null;
     try {
-      base = await VM.create({
-        vfs: null,
-        sandbox: {
-          console: "none",
-          netEnabled: false,
-        },
+      vm = await VM.create({
+        startTimeoutMs: timeoutMs,
+        rootfs: { mode: "cow" },
+        sandbox: { console: "none" },
       });
+      await vm.start();
+      await vm.exec("echo checkpoint-ok > /etc/checkpoint-smoke.txt");
 
-      const writeBase = await base.exec([
-        "/bin/sh",
-        "-c",
-        "echo hello > /etc/checkpoint-overwrite.txt",
-      ]);
-      assert.equal(writeBase.exitCode, 0);
+      const checkpoint = await vm.checkpoint(checkpointPath);
+      vm = null;
 
-      checkpoint = await base.checkpoint(checkpointPath);
-      base = null;
+      const metadata = checkpoint.toJSON();
+      assert.equal(metadata.diskFormat, "raw");
+      assert.equal(metadata.createdWithVmm, "firecracker");
+      assert.deepEqual(metadata.compatibleVmm, ["firecracker"]);
 
-      const initialBacking = getQcow2BackingFilename(checkpointPath);
-      assert.ok(
-        initialBacking,
-        "expected first checkpoint to preserve a qcow2 backing file",
-      );
-      const initialBackingAbs = path.isAbsolute(initialBacking)
-        ? path.resolve(initialBacking)
-        : path.resolve(path.dirname(checkpointPath), initialBacking);
-
-      resumed = await checkpoint.resume({
-        vfs: null,
-        sandbox: {
-          console: "none",
-          netEnabled: false,
-        },
+      resumed = await checkpoint.resume<VM>({
+        startTimeoutMs: timeoutMs,
+        sandbox: { console: "none" },
       });
-      checkpoint = null;
+      await resumed.start();
 
-      const writeResumed = await resumed.exec([
-        "/bin/sh",
-        "-c",
-        "echo world >> /etc/checkpoint-overwrite.txt",
-      ]);
-      assert.equal(writeResumed.exitCode, 0);
-
-      checkpoint = await resumed.checkpoint(checkpointPath);
-      resumed = null;
-
-      const backing = getQcow2BackingFilename(checkpointPath);
-      assert.ok(
-        backing,
-        "expected overwritten checkpoint to preserve a qcow2 backing file",
-      );
-
-      const backingAbs = path.isAbsolute(backing)
-        ? path.resolve(backing)
-        : path.resolve(path.dirname(checkpointPath), backing);
-      assert.equal(backingAbs, initialBackingAbs);
-      assert.notEqual(backingAbs, path.resolve(checkpointPath));
-
-      resumedAgain = await checkpoint.resume({
-        vfs: null,
-        sandbox: {
-          console: "none",
-          netEnabled: false,
-        },
-      });
-
-      const read = await resumedAgain.exec([
-        "/bin/cat",
-        "/etc/checkpoint-overwrite.txt",
-      ]);
-      assert.equal(read.exitCode, 0);
-      assert.equal(read.stdout, "hello\nworld\n");
+      const read = await resumed.exec("cat /etc/checkpoint-smoke.txt");
+      assert.equal(read.stdout.trim(), "checkpoint-ok");
     } finally {
-      if (base) await base.close().catch(() => undefined);
-      if (resumed) await resumed.close().catch(() => undefined);
-      if (resumedAgain) await resumedAgain.close().catch(() => undefined);
-      if (checkpoint) {
-        try {
-          checkpoint.delete();
-        } catch {
-          // ignore
-        }
-      }
+      await resumed?.close();
+      await vm?.close();
+      fs.rmSync(checkpointPath, { force: true });
     }
   },
 );
 
-test("checkpoint resume rejects incompatible backend metadata", async () => {
-  const checkpoint = new VmCheckpoint(
-    path.join(os.tmpdir(), "gondolin-missing-checkpoint.qcow2"),
-    {
-      version: 1,
-      name: "incompatible",
-      createdAt: "2026-03-01T00:00:00.000Z",
-      diskFile: "incompatible.qcow2",
-      guestAssetBuildId: "15e98966-a559-55ee-8d57-9f4c3f0346c7",
-      snapshotKind: "disk",
-      createdWithVmm: "qemu",
-      compatibleVmm: ["qemu"],
-    },
+test("checkpoint resume rejects incompatible metadata", async () => {
+  const checkpointPath = path.join(
+    os.tmpdir(),
+    `gondolin-incompatible-checkpoint-${Date.now()}.raw`,
   );
 
-  await assert.rejects(
-    () => checkpoint.resume({ sandbox: { vmm: "krun" } }),
-    /checkpoint is not compatible with vmm=krun/,
-  );
+  try {
+    const checkpoint = writeCheckpointTrailer(checkpointPath, {
+      compatibleVmm: [],
+      createdWithVmm: "removed" as any,
+    });
+
+    await assert.rejects(
+      () => checkpoint.resume(),
+      /checkpoint is not compatible with Firecracker/,
+    );
+  } finally {
+    fs.rmSync(checkpointPath, { force: true });
+  }
 });
 
-test(
-  "checkpoint compatibility: qemu -> krun resume",
-  { skip: skipVmTests, timeout: timeoutMs },
-  async (t) => {
-    if (await skipIfKrunUnavailable(t)) return;
-
-    let base: VM | null = null;
-    let resumed: VM | null = null;
-    let checkpoint: VmCheckpoint | null = null;
-
-    const checkpointPath = path.join(
-      os.tmpdir(),
-      `gondolin-checkpoint-qemu-to-krun-${Date.now()}.qcow2`,
-    );
-
-    try {
-      base = await VM.create({
-        vfs: null,
-        sandbox: {
-          vmm: "qemu",
-          console: "none",
-          netEnabled: false,
-        },
-      });
-
-      const write = await base.exec([
-        "/bin/sh",
-        "-c",
-        "echo qemu-to-krun > /etc/checkpoint-cross.txt",
-      ]);
-      assert.equal(write.exitCode, 0);
-
-      checkpoint = await base.checkpoint(checkpointPath);
-      base = null;
-
-      const metadata = checkpoint.toJSON();
-      if (!metadata.compatibleVmm?.includes("krun")) {
-        t.skip(
-          "current guest assets do not advertise krun-compatible checkpoint resume",
-        );
-        return;
-      }
-
-      resumed = await checkpoint.resume({
-        vfs: null,
-        sandbox: {
-          vmm: "krun",
-          krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
-          console: "none",
-          netEnabled: false,
-        },
-      });
-
-      const read = await resumed.exec([
-        "/bin/cat",
-        "/etc/checkpoint-cross.txt",
-      ]);
-      assert.equal(read.exitCode, 0, read.stderr);
-      assert.equal(read.stdout.trim(), "qemu-to-krun");
-    } finally {
-      if (base) await base.close().catch(() => undefined);
-      if (resumed) await resumed.close().catch(() => undefined);
-      if (checkpoint) {
-        try {
-          checkpoint.delete();
-        } catch {
-          // ignore
-        }
-      }
-    }
-  },
-);
-
-test(
-  "checkpoint compatibility: krun -> qemu resume",
-  { skip: skipVmTests, timeout: timeoutMs },
-  async (t) => {
-    if (await skipIfKrunUnavailable(t)) return;
-
-    let base: VM | null = null;
-    let resumed: VM | null = null;
-    let checkpoint: VmCheckpoint | null = null;
-
-    const checkpointPath = path.join(
-      os.tmpdir(),
-      `gondolin-checkpoint-krun-to-qemu-${Date.now()}.qcow2`,
-    );
-
-    try {
-      base = await VM.create({
-        vfs: null,
-        sandbox: {
-          vmm: "krun",
-          krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
-          console: "none",
-          netEnabled: false,
-        },
-      });
-
-      const write = await base.exec([
-        "/bin/sh",
-        "-c",
-        "echo krun-to-qemu > /etc/checkpoint-cross.txt",
-      ]);
-      assert.equal(write.exitCode, 0);
-
-      checkpoint = await base.checkpoint(checkpointPath);
-      base = null;
-
-      const metadata = checkpoint.toJSON();
-      assert.equal(metadata.createdWithVmm, "krun");
-      assert.ok(metadata.compatibleVmm?.includes("qemu"));
-
-      resumed = await checkpoint.resume({
-        vfs: null,
-        sandbox: {
-          vmm: "qemu",
-          console: "none",
-          netEnabled: false,
-        },
-      });
-
-      const read = await resumed.exec([
-        "/bin/cat",
-        "/etc/checkpoint-cross.txt",
-      ]);
-      assert.equal(read.exitCode, 0, read.stderr);
-      assert.equal(read.stdout.trim(), "krun-to-qemu");
-    } finally {
-      if (base) await base.close().catch(() => undefined);
-      if (resumed) await resumed.close().catch(() => undefined);
-      if (checkpoint) {
-        try {
-          checkpoint.delete();
-        } catch {
-          // ignore
-        }
-      }
-    }
-  },
-);
+test("checkpoint load rejects missing raw file", () => {
+  assert.throws(
+    () =>
+      VmCheckpoint.load(
+        path.join(os.tmpdir(), "gondolin-missing-checkpoint.raw"),
+      ),
+    /ENOENT/,
+  );
+});

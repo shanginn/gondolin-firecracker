@@ -19,7 +19,7 @@ const ALL_DEBUG_FLAGS: ReadonlyArray<DebugFlag> = [
 /**
  * Component identifier passed to debug log callbacks
  */
-export type DebugComponent = DebugFlag | "qemu" | "error";
+export type DebugComponent = DebugFlag | "vmm" | "error";
 
 /**
  * Debug log callback invoked with component + message

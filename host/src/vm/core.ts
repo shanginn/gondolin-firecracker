@@ -9,16 +9,12 @@ import { Duplex, Readable } from "stream";
 import { AsyncSingleflight } from "../utils/async.ts";
 
 import {
-  createTempQcow2Overlay,
+  assertRawDiskImage,
   createTempRawCopy,
   ensureDiskImageMinimumSize,
-  ensureQemuImgAvailable,
-  inferDiskFormatFromPath,
   moveFile,
   parseDiskSizeToBytes,
-  rebaseQcow2InPlace,
-  resolveQcow2BackingPath,
-} from "../qemu/img.ts";
+} from "../disk/image.ts";
 import {
   VmCheckpoint,
   registerVmCreate,
@@ -35,23 +31,20 @@ import {
   type ClientMessage,
 } from "../sandbox/control-protocol.ts";
 import { SandboxServer } from "../sandbox/server.ts";
-import { assertMacHypervisorEntitlement } from "../sandbox/krun-controller.ts";
 import {
   type ResolvedSandboxServerOptions,
   type SandboxServerOptions,
-  type SandboxVmm,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
 } from "../sandbox/server-options.ts";
 import type { SandboxConnection } from "../sandbox/client.ts";
-import type { SandboxState } from "../sandbox/controller.ts";
+import type { SandboxState } from "../sandbox/state.ts";
 import {
   SessionIpcServer,
   gcSessions,
   registerSession,
   unregisterSession,
 } from "../session-registry.ts";
-import { createMitmCaProvider, resolveMitmMounts } from "./mitm-vfs.ts";
 import type { EnvInput, VMOptions, VmVfsOptions } from "./types.ts";
 import {
   buildShellEnv,
@@ -130,6 +123,25 @@ function normalizeStartTimeoutMs(
 
   return Math.max(0, Math.trunc(value));
 }
+
+function rejectRemovedEgressOptions(options: VMOptions): void {
+  const raw = options as Record<string, unknown>;
+  const unsupported = [
+    "httpHooks",
+    "dns",
+    "ssh",
+    "tcp",
+    "maxHttpBodyBytes",
+    "maxHttpResponseBodyBytes",
+    "allowWebSockets",
+  ].filter((key) => Object.hasOwn(raw, key));
+
+  if (unsupported.length === 0) return;
+  throw new Error(
+    `Firecracker runtime does not support mediated guest egress; remove ${unsupported.join(", ")}. Use vm.enableIngress({ allowWebSockets }) for ingress WebSocket policy.`,
+  );
+}
+
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
 const VFS_READY_SLEEP_SECONDS = resolveEnvNumber(
   "GONDOLIN_VFS_READY_SLEEP_SECONDS",
@@ -209,7 +221,7 @@ type RootDiskState = {
   /** root disk image path */
   path: string;
   /** root disk image format */
-  format: "raw" | "qcow2";
+  format: "raw";
   /** backend-native ephemeral snapshot mode */
   snapshot: boolean;
   /** readonly mode for the root disk */
@@ -284,6 +296,7 @@ export class VM {
    * @returns A configured VM instance
    */
   static async create(options: VMOptions = {}): Promise<VM> {
+    rejectRemovedEgressOptions(options);
     if (options.rootfs?.size !== undefined) {
       parseDiskSizeToBytes(options.rootfs.size);
     }
@@ -294,37 +307,6 @@ export class VM {
     // Build the combined sandbox options
     if (options.fetch && sandboxOptions.fetch === undefined) {
       sandboxOptions.fetch = options.fetch;
-    }
-    if (options.httpHooks && sandboxOptions.httpHooks === undefined) {
-      sandboxOptions.httpHooks = options.httpHooks;
-    }
-    if (options.dns && sandboxOptions.dns === undefined) {
-      sandboxOptions.dns = options.dns;
-    }
-    if (options.ssh && sandboxOptions.ssh === undefined) {
-      sandboxOptions.ssh = options.ssh;
-    }
-    if (
-      options.maxHttpBodyBytes !== undefined &&
-      sandboxOptions.maxHttpBodyBytes === undefined
-    ) {
-      sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
-    }
-    if (
-      options.maxHttpResponseBodyBytes !== undefined &&
-      (sandboxOptions as any).maxHttpResponseBodyBytes === undefined
-    ) {
-      (sandboxOptions as any).maxHttpResponseBodyBytes =
-        options.maxHttpResponseBodyBytes;
-    }
-    if (
-      options.allowWebSockets !== undefined &&
-      sandboxOptions.allowWebSockets === undefined
-    ) {
-      sandboxOptions.allowWebSockets = options.allowWebSockets;
-    }
-    if (options.tcp && sandboxOptions.tcp === undefined) {
-      sandboxOptions.tcp = options.tcp;
     }
     if (options.memory && sandboxOptions.memory === undefined) {
       sandboxOptions.memory = options.memory;
@@ -355,6 +337,7 @@ export class VM {
     options: VMOptions = {},
     resolvedSandboxOptions?: ResolvedSandboxServerOptions,
   ) {
+    rejectRemovedEgressOptions(options);
     this.id = randomUUID();
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
@@ -364,18 +347,6 @@ export class VM {
       options.rootfs?.size === undefined
         ? null
         : parseDiskSizeToBytes(options.rootfs.size);
-    const requestedVmm = String(
-      options.sandbox?.vmm ?? process.env.GONDOLIN_VMM ?? "",
-    )
-      .trim()
-      .toLowerCase();
-    const defaultNetEnabled = requestedVmm !== "firecracker";
-    const mitmMounts = resolveMitmMounts(
-      options.vfs,
-      options.sandbox?.mitmCertDir,
-      options.sandbox?.netEnabled ?? defaultNetEnabled,
-    );
-
     // Inject a guarded /etc/gondolin mount (host-authoritative ingress configuration)
     let gondolinMounts: Record<string, VirtualProvider> = {};
     let gondolinHooks: VfsHooks = {};
@@ -404,7 +375,6 @@ export class VM {
           };
 
     const resolvedVfs = resolveVmVfs(vfsOptions, {
-      ...mitmMounts,
       ...gondolinMounts,
     });
     this.vfs = resolvedVfs.provider;
@@ -419,22 +389,8 @@ export class VM {
       throw new Error("VM cannot specify both vfs and sandbox.vfsProvider");
     }
     if (sandboxOptions.vfsProvider) {
-      const injectedMounts = resolveMitmMounts(
-        undefined,
-        sandboxOptions.mitmCertDir,
-        sandboxOptions.netEnabled ?? defaultNetEnabled,
-      );
-      if (Object.keys(injectedMounts).length > 0) {
-        const normalized = normalizeMountMap({
-          "/": sandboxOptions.vfsProvider,
-          ...injectedMounts,
-        });
-        this.vfs = wrapProvider(new MountRouterProvider(normalized), {});
-        fuseMounts = { "/": sandboxOptions.vfsProvider, ...injectedMounts };
-      } else {
-        this.vfs = wrapProvider(sandboxOptions.vfsProvider, {});
-        fuseMounts = { "/": sandboxOptions.vfsProvider };
-      }
+      this.vfs = wrapProvider(sandboxOptions.vfsProvider, {});
+      fuseMounts = { "/": sandboxOptions.vfsProvider };
       fuseConfig = resolveFuseConfig(options.vfs, fuseMounts);
       this.fuseMount = fuseConfig.fuseMount;
       this.fuseBinds = fuseConfig.fuseBinds;
@@ -446,37 +402,6 @@ export class VM {
 
     if (options.fetch && sandboxOptions.fetch === undefined) {
       sandboxOptions.fetch = options.fetch;
-    }
-    if (options.httpHooks && sandboxOptions.httpHooks === undefined) {
-      sandboxOptions.httpHooks = options.httpHooks;
-    }
-    if (options.dns && sandboxOptions.dns === undefined) {
-      sandboxOptions.dns = options.dns;
-    }
-    if (options.ssh && sandboxOptions.ssh === undefined) {
-      sandboxOptions.ssh = options.ssh;
-    }
-    if (
-      options.maxHttpBodyBytes !== undefined &&
-      sandboxOptions.maxHttpBodyBytes === undefined
-    ) {
-      sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
-    }
-    if (
-      options.maxHttpResponseBodyBytes !== undefined &&
-      (sandboxOptions as any).maxHttpResponseBodyBytes === undefined
-    ) {
-      (sandboxOptions as any).maxHttpResponseBodyBytes =
-        options.maxHttpResponseBodyBytes;
-    }
-    if (
-      options.allowWebSockets !== undefined &&
-      sandboxOptions.allowWebSockets === undefined
-    ) {
-      sandboxOptions.allowWebSockets = options.allowWebSockets;
-    }
-    if (options.tcp && sandboxOptions.tcp === undefined) {
-      sandboxOptions.tcp = options.tcp;
     }
     if (this.vfs && sandboxOptions.vfsProvider === undefined) {
       sandboxOptions.vfsProvider = this.vfs;
@@ -505,11 +430,11 @@ export class VM {
       sandboxOptions.rootDiskDeleteOnClose !== undefined;
 
     const manifestRootfsMode = resolveManifestRootfsMode(resolved);
-    const defaultRootfsMode = resolved.vmm === "firecracker" ? "readonly" : "cow";
-    const rootfsMode =
-      options.rootfs?.mode ?? manifestRootfsMode ?? defaultRootfsMode;
-    const supportsSnapshotRootDisk = (resolved.vmm ?? "qemu") === "qemu";
-    const requiresRawWritableRootDisk = resolved.vmm === "firecracker";
+    const needsWritableRoot = needsWritableRootForVfsBinds(this.fuseBinds);
+    const defaultRootfsMode = needsWritableRoot
+      ? "cow"
+      : (manifestRootfsMode ?? "readonly");
+    const rootfsMode = options.rootfs?.mode ?? defaultRootfsMode;
 
     try {
       // Prepare root disk:
@@ -523,19 +448,9 @@ export class VM {
           snapshot: false,
         });
       } else if (rootfsMode === "memory") {
-        this.rootDisk =
-          supportsSnapshotRootDisk && rootfsSizeBytes === null
-            ? prepareBaseRootDisk(resolved, {
-                readOnly: false,
-                snapshot: true,
-              })
-            : requiresRawWritableRootDisk
-              ? prepareRawCopyRootDisk(resolved)
-              : prepareOverlayRootDisk(resolved);
+        this.rootDisk = prepareRawCopyRootDisk(resolved);
       } else if (rootfsMode === "cow") {
-        this.rootDisk = requiresRawWritableRootDisk
-          ? prepareRawCopyRootDisk(resolved)
-          : prepareOverlayRootDisk(resolved);
+        this.rootDisk = prepareRawCopyRootDisk(resolved);
       } else {
         throw new Error(`unsupported rootfs mode: ${String(rootfsMode)}`);
       }
@@ -554,11 +469,7 @@ export class VM {
     }
 
     this.resolvedSandboxOptions = resolved;
-    this.server = new SandboxServer(resolved, {
-      qemuRootDiskVolatileMode: this.rootDisk?.snapshot
-        ? "snapshot"
-        : undefined,
-    });
+    this.server = new SandboxServer(resolved);
     this.fs = new VmFsController({
       start: () => this.start(),
       exec: (command, fsOptions = {}) => this.exec(command, fsOptions),
@@ -808,8 +719,17 @@ EOF
 chown "$SSH_UID:$SSH_GID" "$SSH_HOME/.ssh/authorized_keys" || true
 chmod 600 "$SSH_HOME/.ssh/authorized_keys"
 
-# Generate host keys if missing
-ssh-keygen -A >/dev/null 2>&1 || true
+# Generate an ephemeral host key in writable guest storage. Default images may
+# run with a read-only /etc/ssh, so do not rely on ssh-keygen -A.
+HOST_KEY=/tmp/gondolin_ssh_host_ed25519_key
+if [ ! -s "$HOST_KEY" ]; then
+  rm -f "$HOST_KEY" "$HOST_KEY.pub"
+  ssh-keygen -q -t ed25519 -N "" -f "$HOST_KEY" >/dev/null 2>&1 || {
+    echo "failed to generate ssh host key" 1>&2
+    exit 124
+  }
+fi
+chmod 600 "$HOST_KEY" || true
 
 # Start sandboxssh if it's not already running (required for host-side TCP forwarding)
 if ! ps | grep -q '[s]andboxssh'; then
@@ -822,6 +742,7 @@ fi
 # accidentally match our own command line. Starting twice is harmless (it will fail
 # to bind), and we validate by probing the port from the host.
 /usr/sbin/sshd -D -e -p 22 \
+  -h "$HOST_KEY" \
   -o ListenAddress=127.0.0.1 \
   -o PasswordAuthentication=no \
   -o KbdInteractiveAuthentication=no \
@@ -1168,9 +1089,6 @@ fi
 
     const vmmPath = server.getVmmPath();
     execFileSync(vmmPath, ["--version"], { stdio: "ignore" });
-    if (server.getVmmBackend() === "krun") {
-      assertMacHypervisorEntitlement(vmmPath);
-    }
     this.vmmChecked = true;
   }
 
@@ -1270,8 +1188,9 @@ fi
         taskFactory(),
         new Promise<T>((_, reject) => {
           timer = setTimeout(() => {
+            const diagnostic = this.server?.getStartupDiagnostic?.() ?? "";
             const timeoutError = new Error(
-              `vm startup timed out after ${timeoutMs}ms while waiting for ${stage}`,
+              `vm startup timed out after ${timeoutMs}ms while waiting for ${stage}${diagnostic}`,
             ) as Error & { code?: string };
             timeoutError.code = "vm_start_timeout";
             reject(timeoutError);
@@ -1910,10 +1829,10 @@ fi
   /**
    * Create a disk-only checkpoint of the VM root disk.
    *
-   * This stops the VM and materializes its writable qcow2 overlay at
+   * This stops the VM and materializes its writable raw root disk at
    * `checkpointPath`.
    *
-   * The checkpoint metadata is stored as a JSON trailer appended to the qcow2
+   * The checkpoint metadata is stored as a JSON trailer appended to the raw disk
    * file so the checkpoint is a single file.
    */
   async checkpoint(checkpointPath: string): Promise<VmCheckpoint> {
@@ -1947,17 +1866,16 @@ fi
         "cannot checkpoint: root disk is running in ephemeral snapshot mode",
       );
     }
-    if (rootDisk.format !== "qcow2") {
+    if (rootDisk.format !== "raw") {
       throw new Error(
-        `cannot checkpoint: root disk must be qcow2 (got ${rootDisk.format})`,
+        `cannot checkpoint: Firecracker root disk must be raw (got ${rootDisk.format})`,
       );
     }
 
     // Ensure the disk isn't deleted by close().
     rootDisk.deleteOnClose = false;
 
-    // Best-effort flush of guest filesystem buffers so the checkpoint captures
-    // recent writes even though we currently stop QEMU abruptly.
+    // Best-effort flush of guest filesystem buffers before stopping the VM.
     if (this.server && this.server.getState() === "running") {
       try {
         await this.exec(["/bin/sh", "-c", "sync; sync"]);
@@ -1978,27 +1896,6 @@ fi
     }
 
     const resolvedCheckpointPath = path.resolve(checkpointPath);
-
-    const rootfsPath = path.resolve(this.resolvedSandboxOptions.rootfsPath);
-    const backingPath = resolveQcow2BackingPath(rootDisk.path);
-    if (backingPath && backingPath !== rootfsPath) {
-      // Collapse resume-generated checkpoint ancestry before we publish this
-      // overlay as the new checkpoint file.
-      ensureQemuImgAvailable();
-      rebaseQcow2InPlace(
-        rootDisk.path,
-        rootfsPath,
-        inferDiskFormatFromPath(rootfsPath),
-        "safe",
-      );
-
-      const rebasedBackingPath = resolveQcow2BackingPath(rootDisk.path);
-      if (rebasedBackingPath === resolvedCheckpointPath) {
-        throw new Error(
-          `cannot checkpoint: rebased overlay still points to destination checkpoint path (${resolvedCheckpointPath})`,
-        );
-      }
-    }
 
     fs.mkdirSync(path.dirname(resolvedCheckpointPath), { recursive: true });
     fs.rmSync(resolvedCheckpointPath, { force: true });
@@ -2034,10 +1931,6 @@ fi
     }
 
     const createdWithVmm = this.resolvedSandboxOptions.vmm;
-    const compatibleVmm: SandboxVmm[] =
-      manifest?.assets?.krunKernel || createdWithVmm === "krun"
-        ? ["qemu", "krun"]
-        : ["qemu"];
 
     const data: VmCheckpointData = {
       version: 1,
@@ -2047,8 +1940,9 @@ fi
       diskFile: path.basename(resolvedCheckpointPath),
       guestAssetBuildId,
       snapshotKind: "disk",
+      diskFormat: rootDisk.format,
       createdWithVmm,
-      compatibleVmm,
+      compatibleVmm: ["firecracker"],
     };
 
     VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);
@@ -2078,6 +1972,7 @@ function installRootDisk(
   resolved: ResolvedSandboxServerOptions,
   rootDisk: RootDiskState,
 ): RootDiskState {
+  assertRawDiskImage(rootDisk.path);
   resolved.rootDiskPath = rootDisk.path;
   resolved.rootDiskFormat = rootDisk.format;
   resolved.rootDiskReadOnly = rootDisk.readOnly;
@@ -2103,10 +1998,7 @@ function prepareConfiguredRootDisk(
 
   return installRootDisk(resolved, {
     path: rootDiskPath,
-    format:
-      options.rootDiskFormat ??
-      resolved.rootDiskFormat ??
-      inferDiskFormatFromPath(rootDiskPath),
+    format: "raw",
     snapshot: false,
     readOnly: options.rootDiskReadOnly ?? resolved.rootDiskReadOnly ?? false,
     deleteOnClose,
@@ -2119,26 +2011,10 @@ function prepareBaseRootDisk(
 ): RootDiskState {
   return installRootDisk(resolved, {
     path: resolved.rootfsPath,
-    format: inferDiskFormatFromPath(resolved.rootfsPath),
+    format: "raw",
     snapshot: opts.snapshot,
     readOnly: opts.readOnly,
     deleteOnClose: false,
-  });
-}
-
-function prepareOverlayRootDisk(
-  resolved: ResolvedSandboxServerOptions,
-): RootDiskState {
-  ensureQemuImgAvailable();
-  return installRootDisk(resolved, {
-    path: createTempQcow2Overlay(
-      resolved.rootfsPath,
-      inferDiskFormatFromPath(resolved.rootfsPath),
-    ),
-    format: "qcow2",
-    snapshot: false,
-    readOnly: false,
-    deleteOnClose: true,
   });
 }
 
@@ -2188,9 +2064,11 @@ function prepareRootDiskResize(
   }
 
   if (rootDisk.format !== "raw") {
-    ensureQemuImgAvailable();
+    throw new Error(
+      `rootfs.size requires a raw Firecracker root disk (got ${rootDisk.format})`,
+    );
   }
-  ensureDiskImageMinimumSize(rootDisk.path, sizeBytes, rootDisk.format);
+  ensureDiskImageMinimumSize(rootDisk.path, sizeBytes);
 }
 
 function resolveManifestRootfsMode(
@@ -2206,6 +2084,10 @@ function resolveManifestRootfsMode(
   const manifest = loadAssetManifest(kernelDir);
   const mode = manifest?.runtimeDefaults?.rootfsMode;
   return isRootfsMode(mode) ? mode : undefined;
+}
+
+function needsWritableRootForVfsBinds(fuseBinds: string[]): boolean {
+  return fuseBinds.some((mountPath) => mountPath !== "/etc/gondolin");
 }
 
 type ResolvedVfs = {
@@ -2265,8 +2147,6 @@ export const __test = {
   normalizeCommand,
   resolveVmVfs,
   resolveFuseConfig,
-  resolveMitmMounts,
-  createMitmCaProvider,
   composeVfsHooks,
   buildShellEnv,
   mergeEnvInputs,

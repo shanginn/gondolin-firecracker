@@ -299,7 +299,7 @@ function sendError(
 }
 
 type SessionSnapshotResult = {
-  /** absolute path to the checkpoint `.qcow2` file */
+  /** absolute path to the checkpoint `.raw` file */
   path: string;
   /** snapshot name */
   name: string;

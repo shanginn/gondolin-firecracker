@@ -42,8 +42,6 @@ export interface AlpineConfig {
   rootfsPackages?: string[];
   /** extra packages to install in the initramfs */
   initramfsPackages?: string[];
-  /** libkrunfw release version used for krun boot artifacts */
-  krunfwVersion?: string;
 }
 
 /**
@@ -208,7 +206,6 @@ export function getDefaultBuildConfig(): BuildConfig {
         "openssh",
       ],
       initramfsPackages: [],
-      krunfwVersion: "v5.2.1",
     },
     rootfs: {
       label: "gondolin-root",
@@ -434,9 +431,6 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
         return false;
       }
       if (!isOptionalStringArray(alpine.initramfsPackages)) {
-        return false;
-      }
-      if (!isOptionalString(alpine.krunfwVersion)) {
         return false;
       }
     }

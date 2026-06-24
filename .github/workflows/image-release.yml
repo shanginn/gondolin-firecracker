@@ -136,11 +136,9 @@ jobs:
       matrix:
         include:
           - arch: aarch64
-            qemu: qemu-system-arm
             zig_target: aarch64-linux-musl
             archive_arch: aarch64
           - arch: x86_64
-            qemu: qemu-system-x86
             zig_target: x86_64-linux-musl
             archive_arch: x86_64
     steps:
@@ -151,7 +149,7 @@ jobs:
 
       - uses: pnpm/action-setup@v2
         with:
-          version: 8
+          version: 9.15.9
 
       - uses: actions/setup-node@v4
         with:
@@ -164,7 +162,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.qemu }} lz4
+          sudo apt-get install -y lz4
           curl -LsSf https://astral.sh/uv/install.sh | sh
 
           UV_BIN_DIR=""
@@ -201,7 +199,7 @@ jobs:
         run: |
           ARCHIVE="gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz"
           cd guest/image/out
-          tar -czvf "../../../${ARCHIVE}" manifest.json vmlinuz-virt initramfs.cpio.lz4 rootfs.ext4 krun-kernel krun-empty-initrd
+          tar -czvf "../../../${ARCHIVE}" manifest.json vmlinuz-virt firecracker-kernel initramfs.cpio.lz4 rootfs.ext4
 
       - name: Compute sha256 + metadata
         run: |

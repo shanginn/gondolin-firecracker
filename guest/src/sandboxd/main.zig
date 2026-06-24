@@ -386,13 +386,18 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn parseVsockPort(args: []const [:0]const u8) !?u32 {
-    var i: usize = 1;
+    var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--vsock-port") and i + 1 < args.len) {
             return try std.fmt.parseInt(u32, args[i + 1], 10);
         }
     }
     return null;
+}
+
+test "parseVsockPort accepts minimal argv" {
+    const args = [_][:0]const u8{ "--vsock-port", "1024" };
+    try std.testing.expectEqual(@as(?u32, 1024), try parseVsockPort(&args));
 }
 
 fn startExecSession(

@@ -103,19 +103,8 @@ export type {
   HttpIpAllowInfo,
   HttpHooks,
   HttpFetch,
-  TcpOptions,
-} from "./qemu/net.ts";
-export type {
-  SshOptions,
-  SshCredential,
-  SshExecRequest,
-  SshExecDecision,
-  SshExecPolicy,
-} from "./qemu/ssh.ts";
+} from "./http/contracts.ts";
 export { HttpRequestBlockedError } from "./http/utils.ts";
-
-// SSH helpers
-export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh/exec.ts";
 
 // Debug helpers
 export {

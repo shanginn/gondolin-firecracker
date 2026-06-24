@@ -19,8 +19,7 @@
       "python3",
       "openssh"
     ],
-    "initramfsPackages": [],
-    "krunfwVersion": "v5.2.1"
+    "initramfsPackages": []
   },
   "rootfs": {
     "label": "gondolin-root"

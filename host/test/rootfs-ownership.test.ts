@@ -51,6 +51,13 @@ function captureDebugfsCommandFileScript(): string {
   ].join("\n");
 }
 
+function differentOwner(st: fs.Stats): { uid: number; gid: number } {
+  return {
+    uid: st.uid === 0 ? 12345 : 0,
+    gid: st.gid === 0 ? 12345 : 0,
+  };
+}
+
 test("rootfs image: applies OCI ownership metadata with debugfs for non-root builds", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-rootfs-owners-"));
   const binDir = path.join(tmp, "bin");
@@ -84,12 +91,15 @@ test("rootfs image: applies OCI ownership metadata with debugfs for non-root bui
   );
 
   const st = fs.lstatSync(path.join(rootfsDir, "etc", "same-owner"));
+  const owner = differentOwner(
+    fs.lstatSync(path.join(rootfsDir, "etc", "test")),
+  );
 
   const ownershipEntries: RootfsOwnershipEntry[] = [
-    { path: "etc/test", uid: 0, gid: 0 },
-    { path: "etc/test space", uid: 0, gid: 0 },
+    { path: "etc/test", uid: owner.uid, gid: owner.gid },
+    { path: "etc/test space", uid: owner.uid, gid: owner.gid },
     { path: "etc/same-owner", uid: st.uid, gid: st.gid },
-    { path: "etc/does-not-exist", uid: 0, gid: 0 },
+    { path: "etc/does-not-exist", uid: owner.uid, gid: owner.gid },
   ];
 
   const oldGetuid = process.getuid;
@@ -115,10 +125,22 @@ test("rootfs image: applies OCI ownership metadata with debugfs for non-root bui
     assert.equal(fs.existsSync(debugfsLog), true);
 
     const debugfsCommands = fs.readFileSync(debugfsLog, "utf8");
-    assert.match(debugfsCommands, /sif "\/etc\/test" uid 0/);
-    assert.match(debugfsCommands, /sif "\/etc\/test" gid 0/);
-    assert.match(debugfsCommands, /sif "\/etc\/test space" uid 0/);
-    assert.match(debugfsCommands, /sif "\/etc\/test space" gid 0/);
+    assert.match(
+      debugfsCommands,
+      new RegExp(`sif "/etc/test" uid ${owner.uid}`),
+    );
+    assert.match(
+      debugfsCommands,
+      new RegExp(`sif "/etc/test" gid ${owner.gid}`),
+    );
+    assert.match(
+      debugfsCommands,
+      new RegExp(`sif "/etc/test space" uid ${owner.uid}`),
+    );
+    assert.match(
+      debugfsCommands,
+      new RegExp(`sif "/etc/test space" gid ${owner.gid}`),
+    );
     assert.equal(debugfsCommands.includes("same-owner"), false);
     assert.equal(debugfsCommands.includes("does-not-exist"), false);
   } finally {
@@ -165,8 +187,11 @@ test("rootfs image: ignores large debugfs stdout while applying OCI ownership me
     ].join("\n"),
   );
 
+  const owner = differentOwner(
+    fs.lstatSync(path.join(rootfsDir, "etc", "test")),
+  );
   const ownershipEntries: RootfsOwnershipEntry[] = [
-    { path: "etc/test", uid: 0, gid: 0 },
+    { path: "etc/test", uid: owner.uid, gid: owner.gid },
   ];
 
   const oldGetuid = process.getuid;
@@ -187,8 +212,14 @@ test("rootfs image: ignores large debugfs stdout while applying OCI ownership me
 
     assert.equal(fs.existsSync(imagePath), true);
     const debugfsCommands = fs.readFileSync(debugfsLog, "utf8");
-    assert.match(debugfsCommands, /sif "\/etc\/test" uid 0/);
-    assert.match(debugfsCommands, /sif "\/etc\/test" gid 0/);
+    assert.match(
+      debugfsCommands,
+      new RegExp(`sif "/etc/test" uid ${owner.uid}`),
+    );
+    assert.match(
+      debugfsCommands,
+      new RegExp(`sif "/etc/test" gid ${owner.gid}`),
+    );
   } finally {
     process.getuid = oldGetuid;
     if (oldDebugfsLog === undefined) {
@@ -227,8 +258,11 @@ test("rootfs image: includes debugfs stderr when ownership metadata fails", () =
     ].join("\n"),
   );
 
+  const owner = differentOwner(
+    fs.lstatSync(path.join(rootfsDir, "etc", "test")),
+  );
   const ownershipEntries: RootfsOwnershipEntry[] = [
-    { path: "etc/test", uid: 0, gid: 0 },
+    { path: "etc/test", uid: owner.uid, gid: owner.gid },
   ];
 
   const oldGetuid = process.getuid;

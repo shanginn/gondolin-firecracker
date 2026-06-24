@@ -321,16 +321,11 @@ Recommended starting points:
 
 ## Gotchas
 
-### Do Not Hide CA Certificates By Accident
+### Do Not Hide System Files By Accident
 
-Gondolin injects its MITM CA certificate at `/etc/gondolin/mitm/ca.crt` unless
-you explicitly mount your own provider at `/etc/gondolin` or
-`/etc/gondolin/mitm`.
-
-Guest init scripts use that cert to build a merged runtime trust bundle at
-`/run/gondolin/ca-certificates.crt`. If you mount a custom provider at `/` that
-hides distro CA bundles, public TLS verification may still fail unless you
-provide your own trust store.
+If you mount a custom provider at `/`, it replaces the visible root tree for VFS
+lookups. Provide the system files your workload needs, or prefer narrower mounts
+such as `/workspace`.
 
 ### Disk Checkpoints Do Not Include VFS Data
 

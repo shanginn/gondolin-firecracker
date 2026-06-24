@@ -78,7 +78,7 @@ export type SnapshotCommandMessage = {
   type: "snapshot";
   /** request id */
   id: number;
-  /** absolute output path for the checkpoint `.qcow2` file */
+  /** absolute output path for the checkpoint `.raw` file */
   path: string;
 };
 
@@ -133,7 +133,7 @@ export type SnapshotResponseMessage = {
   type: "snapshot_response";
   /** request id */
   id: number;
-  /** absolute path to the checkpoint `.qcow2` file */
+  /** absolute path to the checkpoint `.raw` file */
   path: string;
   /** snapshot name */
   name: string;

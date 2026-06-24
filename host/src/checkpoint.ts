@@ -1,13 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-import {
-  createTempQcow2Overlay,
-  ensureQemuImgAvailable,
-  inferDiskFormatFromPath,
-  rebaseQcow2InPlace,
-  resolveQcow2BackingPath,
-} from "./qemu/img.ts";
+import { assertRawDiskImage, createTempRawCopy } from "./disk/image.ts";
 
 import {
   loadAssetManifest,
@@ -24,13 +18,11 @@ import type { VMOptions } from "./vm/types.ts";
 
 const CHECKPOINT_SCHEMA_VERSION = 1 as const;
 
-// Trailer format (appended to the end of the qcow2 file):
+// Trailer format (appended to the end of the disk file):
 //   [utf8 json bytes][8-byte magic][u64be json length]
 //
-// QEMU/qemu-img tolerate trailing bytes after the qcow2 image. We use that to
-// store the checkpoint metadata in the same file.
-//
-// Note: The magic is a file-format marker for "qcow2 + JSON trailer".
+// Firecracker ignores trailing bytes in the raw block device image. We use that
+// to store the checkpoint metadata in the same file.
 // It is intentionally *not* tied to the JSON schema version.
 const TRAILER_MAGIC = Buffer.from("GONDCPT1"); // 8 bytes
 const TRAILER_SIZE = 16;
@@ -62,7 +54,7 @@ export type VmCheckpointData = {
   /** creation timestamp (`iso 8601`) */
   createdAt: string;
 
-  /** qcow2 disk filename (`basename` of checkpoint file path) */
+  /** disk filename (`basename` of checkpoint file path) */
   diskFile: string;
 
   /** deterministic guest asset build identifier (uuid) */
@@ -70,6 +62,9 @@ export type VmCheckpointData = {
 
   /** checkpoint payload kind */
   snapshotKind?: "disk";
+
+  /** checkpoint disk format */
+  diskFormat?: "raw";
 
   /** backend used when the checkpoint was created */
   createdWithVmm?: SandboxVmm;
@@ -81,61 +76,24 @@ export type VmCheckpointData = {
 function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
-  if (
-    normalized === "qemu" ||
-    normalized === "krun" ||
-    normalized === "firecracker"
-  ) {
+  if (normalized === "firecracker") {
     return normalized;
   }
   return null;
 }
 
-function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm {
-  const explicitRaw = options.sandbox?.vmm;
-  if (explicitRaw !== undefined) {
-    const explicit = normalizeSandboxVmm(explicitRaw);
-    if (!explicit) {
-      throw new Error(
-        `invalid sandbox vmm backend: ${String(explicitRaw)} (expected "qemu", "krun", or "firecracker")`,
-      );
-    }
-    return explicit;
-  }
-
-  return normalizeSandboxVmm(process.env.GONDOLIN_VMM) ?? "qemu";
-}
-
 function resolveCheckpointCompatibleVmm(data: VmCheckpointData): SandboxVmm[] {
-  let qemu = false;
-  let krun = false;
-  let sawCompatibilityMetadata = false;
-
   if (Array.isArray(data.compatibleVmm)) {
     for (const entry of data.compatibleVmm) {
-      const normalized = normalizeSandboxVmm(entry);
-      if (normalized === "qemu") qemu = true;
-      if (normalized === "krun") krun = true;
-      if (normalized) sawCompatibilityMetadata = true;
+      if (normalizeSandboxVmm(entry) === "firecracker") return ["firecracker"];
     }
   }
 
-  if (!qemu && !krun && !sawCompatibilityMetadata) {
-    const createdWith = normalizeSandboxVmm(data.createdWithVmm);
-    if (createdWith === "qemu") qemu = true;
-    if (createdWith === "krun") krun = true;
-    if (createdWith) sawCompatibilityMetadata = true;
+  if (normalizeSandboxVmm(data.createdWithVmm) === "firecracker") {
+    return ["firecracker"];
   }
 
-  // Legacy checkpoints were qemu-only.
-  if (!qemu && !krun && !sawCompatibilityMetadata) {
-    qemu = true;
-  }
-
-  const compatible: SandboxVmm[] = [];
-  if (qemu) compatible.push("qemu");
-  if (krun) compatible.push("krun");
-  return compatible;
+  return [];
 }
 
 function writeCheckpointTrailer(
@@ -270,31 +228,6 @@ function resolveAssetDirByBuildId(buildId: string): {
   throw new Error(msg);
 }
 
-function ensureCheckpointBackedByRootfs(
-  checkpointDiskPath: string,
-  rootfsPath: string,
-): void {
-  const checkpointAbs = path.resolve(checkpointDiskPath);
-  const backingAbs = resolveQcow2BackingPath(checkpointDiskPath);
-  if (!backingAbs) return;
-
-  if (backingAbs === checkpointAbs) {
-    throw new Error(
-      `checkpoint is corrupt: qcow2 backing file points to itself (${checkpointAbs})`,
-    );
-  }
-
-  const desired = path.resolve(rootfsPath);
-
-  if (backingAbs === desired) return;
-
-  rebaseQcow2InPlace(
-    checkpointDiskPath,
-    desired,
-    inferDiskFormatFromPath(desired),
-  );
-}
-
 async function resolveGuestAssetsForResume(
   requiredBuildId: string,
   options: VMOptions,
@@ -381,7 +314,7 @@ async function resolveGuestAssetsForResume(
 }
 
 /**
- * Disk-only checkpoint that can be resumed using qcow2 backing files.
+ * Disk-only checkpoint that can be resumed using a temporary raw copy.
  */
 export class VmCheckpoint {
   private readonly checkpointPath: string;
@@ -403,7 +336,7 @@ export class VmCheckpoint {
     return this.data.name;
   }
 
-  /** absolute path to the checkpoint qcow2 file */
+  /** absolute path to the checkpoint disk file */
   get path(): string {
     return this.checkpointPath;
   }
@@ -413,7 +346,7 @@ export class VmCheckpoint {
     return path.dirname(this.checkpointPath);
   }
 
-  /** absolute path to the qcow2 disk file */
+  /** absolute path to the disk file */
   get diskPath(): string {
     return this.checkpointPath;
   }
@@ -430,8 +363,7 @@ export class VmCheckpoint {
   /**
    * Resume the checkpoint into a new VM.
    *
-   * The resumed VM is implemented as a fresh qcow2 overlay backed by this
-   * checkpoint's qcow2 disk image.
+   * The resumed VM uses a temporary raw copy of the checkpoint disk.
    */
   async resume<TVm = any>(options: VMOptions = {}): Promise<TVm> {
     const createVm = getVmCreate();
@@ -446,18 +378,12 @@ export class VmCheckpoint {
       },
     };
 
-    const requestedVmm = resolveRequestedResumeVmm(mergedForResume);
-    if (requestedVmm === "firecracker") {
-      throw new Error("checkpoint resume is not supported with vmm=firecracker");
-    }
     const compatibleVmm = resolveCheckpointCompatibleVmm(this.data);
-    if (!compatibleVmm.includes(requestedVmm)) {
+    if (!compatibleVmm.includes("firecracker")) {
       throw new Error(
-        `checkpoint is not compatible with vmm=${requestedVmm} (compatible backends: ${compatibleVmm.join(", ")})`,
+        `checkpoint is not compatible with Firecracker (compatible backends: ${compatibleVmm.join(", ")})`,
       );
     }
-
-    ensureQemuImgAvailable();
 
     const checkpointDisk = this.diskPath;
     if (!fs.existsSync(checkpointDisk)) {
@@ -469,18 +395,22 @@ export class VmCheckpoint {
       mergedForResume,
     );
 
-    // Fix qcow2 backing filename portability by rebasing in-place on resume.
-    ensureCheckpointBackedByRootfs(checkpointDisk, resolved.assets.rootfsPath);
+    if ((this.data.diskFormat ?? "raw") !== "raw") {
+      throw new Error(
+        "checkpoint disk format is not supported by Firecracker-only runtime",
+      );
+    }
+    assertRawDiskImage(checkpointDisk);
 
-    const overlayPath = createTempQcow2Overlay(checkpointDisk, "qcow2");
+    const diskPath = createTempRawCopy(checkpointDisk);
 
     const merged: VMOptions = {
       ...mergedForResume,
       sandbox: {
         ...(mergedForResume.sandbox ?? {}),
         imagePath: resolved.imagePath,
-        rootDiskPath: overlayPath,
-        rootDiskFormat: "qcow2",
+        rootDiskPath: diskPath,
+        rootDiskFormat: "raw",
         rootDiskReadOnly: false,
         rootDiskDeleteOnClose: true,
       },
@@ -494,14 +424,14 @@ export class VmCheckpoint {
     return await this.resume<TVm>(options);
   }
 
-  /** Load a checkpoint from a qcow2 file with a metadata trailer. */
+  /** Load a checkpoint file with a metadata trailer. */
   static load(checkpointPath: string): VmCheckpoint {
     const resolved = path.resolve(checkpointPath);
     const stat = fs.statSync(resolved);
 
     if (stat.isDirectory()) {
       throw new Error(
-        `checkpoint path must be a .qcow2 file, got directory: ${resolved}`,
+        `checkpoint path must be a disk file, got directory: ${resolved}`,
       );
     }
 
@@ -520,7 +450,7 @@ export class VmCheckpoint {
     fs.rmSync(this.checkpointPath, { force: true });
   }
 
-  /** Create a checkpoint metadata trailer and append it to a qcow2 file. */
+  /** Create a checkpoint metadata trailer and append it to a disk file. */
   static writeTrailer(diskPath: string, data: VmCheckpointData): void {
     writeCheckpointTrailer(diskPath, data);
   }
@@ -529,7 +459,6 @@ export class VmCheckpoint {
 /** @internal */
 export const __test = {
   normalizeSandboxVmm,
-  resolveRequestedResumeVmm,
   resolveCheckpointCompatibleVmm,
   resolveAssetDirByBuildId,
 };

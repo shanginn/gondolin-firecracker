@@ -86,8 +86,8 @@ test("assets: computeAssetBuildId is deterministic", () => {
       kernel: "a",
       initramfs: "b",
       rootfs: "c",
-      krunKernel: "k1",
-      krunInitrd: "i1",
+      firecrackerKernel: "k1",
+      firecrackerInitrd: "i1",
     },
     arch: "aarch64",
   });

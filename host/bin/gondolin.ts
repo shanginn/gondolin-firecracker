@@ -8,12 +8,11 @@ import { PassThrough } from "stream";
 import { fileURLToPath } from "url";
 
 import { VmCheckpoint } from "../src/checkpoint.ts";
-import { parseDiskSizeToBytes } from "../src/qemu/img.ts";
+import { parseDiskSizeToBytes } from "../src/disk/image.ts";
 import { VM } from "../src/vm/core.ts";
 import type { VirtualProvider } from "../src/vfs/node/index.ts";
 import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
 import { ReadonlyProvider } from "../src/vfs/readonly.ts";
-import { createHttpHooks } from "../src/http/hooks.ts";
 import {
   FrameReader,
   buildExecRequest,
@@ -96,7 +95,7 @@ function resolveSnapshotPath(args: { output?: string; name?: string }): string {
 
   const checkpointDir = checkpointBaseDir();
   const stem = args.name ? sanitizeCheckpointName(args.name) : randomUUID();
-  return path.resolve(checkpointDir, `${stem}.qcow2`);
+  return path.resolve(checkpointDir, `${stem}.raw`);
 }
 
 async function waitForCheckpointReady(
@@ -150,14 +149,14 @@ function resolveResumeCheckpoint(resume: string): string {
     throw new Error(`checkpoint not found: ${value}`);
   }
 
-  const normalized = value.endsWith(".qcow2") ? value.slice(0, -6) : value;
+  const normalized = value.endsWith(".raw") ? value.slice(0, -4) : value;
   const entries = fs
     .readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".qcow2"))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".raw"))
     .map((entry) => entry.name);
 
   const matches = entries.filter((file) => {
-    const stem = file.slice(0, -6);
+    const stem = file.slice(0, -4);
     return stem === normalized || stem.startsWith(normalized);
   });
 
@@ -168,7 +167,7 @@ function resolveResumeCheckpoint(resume: string): string {
   if (matches.length > 1) {
     throw new Error(
       `ambiguous checkpoint id '${value}' matches ${matches.length} snapshots:\n` +
-        matches.map((file) => `  ${file.slice(0, -6)}`).join("\n"),
+        matches.map((file) => `  ${file.slice(0, -4)}`).join("\n"),
     );
   }
 
@@ -180,27 +179,6 @@ function renderCliError(err: unknown) {
   const binary = (err as any)?.path;
 
   if (code === "ENOENT" && typeof binary === "string") {
-    if (binary.includes("qemu")) {
-      console.error(`Error: QEMU binary '${binary}' not found.`);
-      console.error("Please install QEMU to run the sandbox.");
-      if (process.platform === "darwin") {
-        console.error("  brew install qemu");
-      } else {
-        console.error(
-          "  sudo apt install qemu-system (or equivalent for your distro)",
-        );
-      }
-      return;
-    }
-
-    if (binary.includes("krun-runner") || binary.includes("libkrun")) {
-      console.error(`Error: krun runner binary '${binary}' not found.`);
-      console.error(
-        "Build/install gondolin-krun-runner (auto-detected from local build or runner package) or set sandbox.krunRunnerPath / GONDOLIN_KRUN_RUNNER.",
-      );
-      return;
-    }
-
     if (binary.includes("firecracker")) {
       console.error(`Error: Firecracker binary '${binary}' not found.`);
       console.error(
@@ -253,13 +231,10 @@ function bashUsage() {
     "  --env KEY=VALUE                 Set environment variable (can repeat)",
   );
   console.log(
-    "  --resume ID_OR_PATH             Resume from a snapshot ID or .qcow2 path",
+    "  --resume ID_OR_PATH             Resume from a snapshot ID or .raw path",
   );
   console.log(
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
-  );
-  console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun|firecracker (default: qemu)",
   );
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
@@ -277,48 +252,9 @@ function bashUsage() {
   );
   console.log();
   console.log("Network Options:");
+  console.log("  Firecracker guest egress is disabled by default.");
   console.log(
-    "  --allow-host HOST               Allow HTTP requests to host (can repeat)",
-  );
-  console.log("  --host-secret NAME@HOST[,HOST...][=VALUE]");
-  console.log(
-    "                                  Add secret for specified hosts",
-  );
-  console.log(
-    "                                  If =VALUE is omitted, reads from $NAME",
-  );
-  console.log(
-    "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
-  );
-  console.log(
-    "  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)",
-  );
-  console.log(
-    "  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host",
-  );
-  console.log(
-    "  --tcp-map SPEC                  Map guest HOST[:PORT] to upstream HOST:PORT",
-  );
-  console.log(
-    "                                  Format: GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT",
-  );
-  console.log(
-    "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
-  );
-  console.log(
-    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)",
-  );
-  console.log(
-    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)",
-  );
-  console.log(
-    "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)",
-  );
-  console.log(
-    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=...",
-  );
-  console.log(
-    "  --disable-websockets            Disable WebSocket upgrades (egress + ingress)",
+    "  --disable-websockets            Disable WebSocket upgrades for ingress",
   );
   console.log();
   console.log("Ingress:");
@@ -343,15 +279,11 @@ function bashUsage() {
   console.log(
     "  gondolin bash --mount-hostfs /data:/data:ro --mount-memfs /tmp",
   );
-  console.log("  gondolin bash --allow-host api.github.com");
-  console.log("  gondolin bash --host-secret GITHUB_TOKEN@api.github.com");
   console.log("  gondolin bash --cmd claude --cwd /workspace");
   console.log("  gondolin bash --listen");
   console.log("  gondolin bash --listen 127.0.0.1:3000");
   console.log("  gondolin bash --resume 4a8f2b0c");
-  console.log("  gondolin bash --resume /tmp/my-snapshot.qcow2");
-  console.log("  gondolin bash --vmm krun");
-  console.log("  gondolin bash --vmm firecracker");
+  console.log("  gondolin bash --resume /tmp/my-snapshot.raw");
   console.log("  gondolin bash --ssh");
 }
 
@@ -390,7 +322,7 @@ function snapshotUsage() {
   console.log();
   console.log("Options:");
   console.log(
-    "  --output PATH   Absolute or relative path for the snapshot .qcow2 file",
+    "  --output PATH   Absolute or relative path for the snapshot .raw file",
   );
   console.log("  --name NAME     Snapshot name (default output path only)");
   console.log("  --help, -h      Show this help");
@@ -420,50 +352,13 @@ function execUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun|firecracker (default: qemu)",
-  );
-  console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
   );
   console.log();
   console.log("Network Options (VM mode only):");
-  console.log("  --allow-host HOST               Allow HTTP requests to host");
-  console.log("  --host-secret NAME@HOST[,HOST...][=VALUE]");
+  console.log("  Firecracker guest egress is disabled by default.");
   console.log(
-    "                                  Add secret for specified hosts",
-  );
-  console.log(
-    "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
-  );
-  console.log(
-    "  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)",
-  );
-  console.log(
-    "  --dns-synthetic-host-mapping M  Synthetic DNS mapping: single|per-host",
-  );
-  console.log(
-    "  --tcp-map SPEC                  Map guest HOST[:PORT] to upstream HOST:PORT",
-  );
-  console.log(
-    "                                  Format: GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT",
-  );
-  console.log(
-    "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
-  );
-  console.log(
-    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)",
-  );
-  console.log(
-    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)",
-  );
-  console.log(
-    "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)",
-  );
-  console.log(
-    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=...",
-  );
-  console.log(
-    "  --disable-websockets            Disable WebSocket upgrades (egress + ingress)",
+    "  --disable-websockets            Disable WebSocket upgrades for ingress",
   );
 }
 
@@ -473,61 +368,18 @@ type MountSpec = {
   readonly: boolean;
 };
 
-type SecretSpec = {
-  name: string;
-  value: string;
-  hosts: string[];
-};
-
-type SshCredentialSpec = {
-  host: string;
-  username?: string;
-  keyPath: string;
-  /** private key passphrase (optional) */
-  passphrase?: string;
-};
-
 type CommonOptions = {
   mounts: MountSpec[];
   memoryMounts: string[];
-  allowedHosts: string[];
-  secrets: SecretSpec[];
 
   /** image selector (asset dir, build id, or name:tag) */
   image?: string;
-
-  /** vm backend selection */
-  vmm?: "qemu" | "krun" | "firecracker";
 
   /** minimum rootfs virtual disk size */
   rootfsSize?: string;
 
   /** disable WebSocket upgrades (both egress and ingress) */
   disableWebSockets?: boolean;
-
-  /** dns mode (synthetic|trusted|open) */
-  dnsMode?: "synthetic" | "trusted" | "open";
-
-  /** trusted dns server ipv4 addresses */
-  dnsTrustedServers: string[];
-
-  /** synthetic dns hostname mapping mode */
-  dnsSyntheticHostMapping?: "single" | "per-host";
-
-  /** guest host[:port] -> upstream host:port tcp mappings */
-  tcpHostMappings: Record<string, string>;
-
-  /** allowed ssh host patterns for outbound ssh */
-  sshAllowedHosts: string[];
-
-  /** ssh-agent socket path (defaults to $SSH_AUTH_SOCK) */
-  sshAgent?: string;
-
-  /** OpenSSH known_hosts file paths for upstream host key verification */
-  sshKnownHostsFiles: string[];
-
-  /** ssh credentials for host-side proxy auth */
-  sshCredentials: SshCredentialSpec[];
 
   /** enable ssh (bash command only) */
   ssh?: boolean;
@@ -583,179 +435,6 @@ function parseMount(spec: string): MountSpec {
   return { hostPath, guestPath, readonly };
 }
 
-function parseHostSecret(spec: string): SecretSpec {
-  // Format: NAME@HOST[,HOST...][=VALUE]
-  const atIndex = spec.indexOf("@");
-  if (atIndex === -1) {
-    throw new Error(
-      `Invalid host-secret format: ${spec} (expected NAME@HOST[,HOST...][=VALUE])`,
-    );
-  }
-
-  const name = spec.slice(0, atIndex);
-  if (!name) {
-    throw new Error(`Invalid host-secret format: ${spec} (empty name)`);
-  }
-
-  const afterAt = spec.slice(atIndex + 1);
-  const eqIndex = afterAt.indexOf("=");
-
-  let hostsStr: string;
-  let value: string;
-
-  if (eqIndex === -1) {
-    // No explicit value, read from environment
-    hostsStr = afterAt;
-    const envValue = process.env[name];
-    if (envValue === undefined) {
-      throw new Error(`Environment variable ${name} not set for host-secret`);
-    }
-    value = envValue;
-  } else {
-    hostsStr = afterAt.slice(0, eqIndex);
-    value = afterAt.slice(eqIndex + 1);
-  }
-
-  const hosts = hostsStr.split(",").filter(Boolean);
-  if (hosts.length === 0) {
-    throw new Error(`Invalid host-secret format: ${spec} (no hosts specified)`);
-  }
-
-  return { name, value, hosts };
-}
-
-function parseSshCredential(spec: string): SshCredentialSpec {
-  // Format:
-  //   HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV]
-  //   USER@HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV]
-  //
-  // Prefer passphrase-env to avoid leaking secrets into shell history.
-  const eq = spec.indexOf("=");
-  if (eq === -1) {
-    throw new Error(
-      `Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`,
-    );
-  }
-
-  const left = spec.slice(0, eq).trim();
-  const right = spec.slice(eq + 1).trim();
-  if (!left || !right) {
-    throw new Error(
-      `Invalid --ssh-credential format: ${spec} (expected HOST=KEY_PATH)`,
-    );
-  }
-
-  const [keyPathRaw, ...opts] = right.split(",");
-  const keyPath = keyPathRaw.trim();
-  if (!keyPath) {
-    throw new Error(
-      `Invalid --ssh-credential format: ${spec} (missing KEY_PATH)`,
-    );
-  }
-
-  let passphrase: string | undefined;
-  let passphraseEnv: string | undefined;
-
-  for (const optRaw of opts) {
-    const opt = optRaw.trim();
-    if (!opt) continue;
-
-    if (opt.startsWith("passphrase-env=")) {
-      passphraseEnv = opt.slice("passphrase-env=".length);
-      if (!passphraseEnv) {
-        throw new Error(
-          `Invalid --ssh-credential option: ${opt} (missing env var name)`,
-        );
-      }
-      continue;
-    }
-
-    if (opt === "passphrase-ask") {
-      throw new Error(
-        `Invalid --ssh-credential option: ${opt} (interactive prompting is not supported; use passphrase-env=ENV)`,
-      );
-    }
-
-    if (opt.startsWith("passphrase=")) {
-      passphrase = opt.slice("passphrase=".length);
-      continue;
-    }
-
-    throw new Error(`Invalid --ssh-credential option: ${opt}`);
-  }
-
-  if (passphraseEnv && passphrase !== undefined) {
-    throw new Error(
-      `Invalid --ssh-credential format: ${spec} (cannot combine passphrase and passphrase-env)`,
-    );
-  }
-
-  if (passphraseEnv) {
-    const envValue = process.env[passphraseEnv];
-    if (envValue === undefined) {
-      throw new Error(
-        `--ssh-credential passphrase env var '${passphraseEnv}' is not set (for ${left})`,
-      );
-    }
-    passphrase = envValue;
-  }
-
-  const at = left.indexOf("@");
-  if (at === -1) {
-    return { host: left, keyPath, passphrase };
-  }
-
-  const username = left.slice(0, at).trim();
-  const host = left.slice(at + 1).trim();
-  if (!username || !host) {
-    throw new Error(
-      `Invalid --ssh-credential format: ${spec} (expected USER@HOST=KEY_PATH)`,
-    );
-  }
-
-  return { host, username, keyPath, passphrase };
-}
-
-function parseTcpMapSpec(spec: string): { key: string; value: string } {
-  const trimmed = spec.trim();
-  const eq = trimmed.indexOf("=");
-  if (eq <= 0 || eq === trimmed.length - 1) {
-    throw new Error(
-      `Invalid --tcp-map format: ${spec} (expected GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT)`,
-    );
-  }
-
-  const key = trimmed.slice(0, eq).trim();
-  const value = trimmed.slice(eq + 1).trim();
-  if (!key || !value) {
-    throw new Error(
-      `Invalid --tcp-map format: ${spec} (expected GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT)`,
-    );
-  }
-
-  return { key, value };
-}
-
-function resolveSshAgent(explicit?: string): string {
-  const sock = (explicit ?? process.env.SSH_AUTH_SOCK)?.trim();
-  if (!sock) {
-    throw new Error("--ssh-agent requires a socket path or $SSH_AUTH_SOCK");
-  }
-  return sock;
-}
-
-function parseVmmOption(value: string): "qemu" | "krun" | "firecracker" {
-  const normalized = value.trim().toLowerCase();
-  if (
-    normalized === "qemu" ||
-    normalized === "krun" ||
-    normalized === "firecracker"
-  ) {
-    return normalized;
-  }
-  throw new Error("--vmm must be one of: qemu, krun, firecracker");
-}
-
 function parseRootfsSizeOption(
   value: string | undefined,
   fail: (message: string) => never,
@@ -768,6 +447,10 @@ function parseRootfsSizeOption(
     fail(`invalid --rootfs-size: ${message}`);
   }
   return value;
+}
+
+function unsupportedEgressOption(flag: string): string {
+  return `${flag} is not supported by the Firecracker runtime; guest egress is disabled`;
 }
 
 function parseListenSpec(spec: string): { host: string; port: number } {
@@ -841,145 +524,14 @@ function buildVmOptions(common: CommonOptions) {
     mounts[path] = new MemoryProvider();
   }
 
-  // Build HTTP hooks if we have network options
-  let httpHooks;
-  let env: Record<string, string> | undefined;
-
-  if (common.allowedHosts.length > 0 || common.secrets.length > 0) {
-    const secrets: Record<string, { hosts: string[]; value: string }> = {};
-    for (const secret of common.secrets) {
-      secrets[secret.name] = { hosts: secret.hosts, value: secret.value };
-    }
-
-    const result = createHttpHooks({
-      allowedHosts:
-        common.allowedHosts.length > 0 ? common.allowedHosts : undefined,
-      secrets,
-    });
-    httpHooks = result.httpHooks;
-    env = result.env;
-  }
-
-  if (common.dnsTrustedServers.length > 0) {
-    if (common.dnsMode === undefined) {
-      throw new Error("--dns-trusted-server requires --dns trusted");
-    }
-    if (common.dnsMode !== "trusted") {
-      throw new Error(
-        "--dns-trusted-server can only be used with --dns trusted",
-      );
-    }
-  }
-
-  if (
-    common.dnsSyntheticHostMapping &&
-    common.dnsMode &&
-    common.dnsMode !== "synthetic"
-  ) {
-    throw new Error("--dns-synthetic-host-mapping requires --dns synthetic");
-  }
-
-  if (common.sshCredentials.length > 0) {
-    for (const credential of common.sshCredentials) {
-      if (!common.sshAllowedHosts.includes(credential.host)) {
-        common.sshAllowedHosts.push(credential.host);
-      }
-    }
-  }
-
-  if (common.sshAgent && common.sshAllowedHosts.length === 0) {
-    throw new Error(
-      "--ssh-agent requires at least one --ssh-allow-host (or --ssh-credential)",
-    );
-  }
-
-  if (common.sshAllowedHosts.length > 0) {
-    if (common.dnsMode && common.dnsMode !== "synthetic") {
-      throw new Error("--ssh-allow-host requires --dns synthetic");
-    }
-    if (!common.dnsMode) {
-      common.dnsMode = "synthetic";
-    }
-    if (!common.dnsSyntheticHostMapping) {
-      common.dnsSyntheticHostMapping = "per-host";
-    }
-  }
-
-  if (Object.keys(common.tcpHostMappings).length > 0) {
-    if (common.dnsMode && common.dnsMode !== "synthetic") {
-      throw new Error("--tcp-map requires --dns synthetic");
-    }
-    if (!common.dnsMode) {
-      common.dnsMode = "synthetic";
-    }
-    if (!common.dnsSyntheticHostMapping) {
-      common.dnsSyntheticHostMapping = "per-host";
-    }
-  }
-
-  const sshCredentials =
-    common.sshCredentials.length > 0
-      ? Object.fromEntries(
-          common.sshCredentials.map((credential) => {
-            const resolvedPath = path.resolve(credential.keyPath);
-            if (!fs.existsSync(resolvedPath)) {
-              throw new Error(
-                `SSH key file does not exist: ${credential.keyPath}`,
-              );
-            }
-            return [
-              credential.host,
-              {
-                username: credential.username,
-                privateKey: fs.readFileSync(resolvedPath, "utf8"),
-                passphrase: credential.passphrase,
-              },
-            ];
-          }),
-        )
-      : undefined;
-
-  const dns =
-    common.dnsMode ||
-    common.dnsTrustedServers.length > 0 ||
-    common.dnsSyntheticHostMapping
-      ? {
-          mode: common.dnsMode,
-          trustedServers: common.dnsTrustedServers,
-          syntheticHostMapping: common.dnsSyntheticHostMapping,
-        }
-      : undefined;
-
   const vmOptions: any = {
     vfs: Object.keys(mounts).length > 0 ? { mounts } : undefined,
-    httpHooks,
-    dns,
-    ssh:
-      common.sshAllowedHosts.length > 0
-        ? {
-            allowedHosts: common.sshAllowedHosts,
-            credentials: sshCredentials,
-            agent: common.sshAgent,
-            knownHostsFile:
-              common.sshKnownHostsFiles.length > 0
-                ? common.sshKnownHostsFiles
-                : undefined,
-          }
-        : undefined,
-    tcp:
-      Object.keys(common.tcpHostMappings).length > 0
-        ? {
-            hosts: common.tcpHostMappings,
-          }
-        : undefined,
-    env,
   };
 
-  if (common.image || common.vmm) {
+  if (common.image) {
     vmOptions.sandbox = {
       ...(vmOptions.sandbox ?? {}),
-      ...(common.image ? { imagePath: common.image } : {}),
-      ...(common.vmm ? { vmm: common.vmm } : {}),
+      imagePath: common.image,
     };
   }
 
@@ -988,10 +540,6 @@ function buildVmOptions(common: CommonOptions) {
       ...(vmOptions.rootfs ?? {}),
       size: common.rootfsSize,
     };
-  }
-
-  if (common.disableWebSockets) {
-    vmOptions.allowWebSockets = false;
   }
 
   return vmOptions;
@@ -1003,14 +551,6 @@ function parseExecArgs(argv: string[]): ExecArgs {
     common: {
       mounts: [],
       memoryMounts: [],
-      allowedHosts: [],
-      secrets: [],
-      dnsTrustedServers: [],
-      tcpHostMappings: {},
-      sshAllowedHosts: [],
-      sshCredentials: [],
-      sshAgent: undefined,
-      sshKnownHostsFiles: [],
     },
   };
   let current: Command | null = null;
@@ -1032,11 +572,6 @@ function parseExecArgs(argv: string[]): ExecArgs {
   const parseCommonOption = (optionArgs: string[], i: number): number => {
     const arg = optionArgs[i];
 
-    if (arg.startsWith("--vmm=")) {
-      const raw = arg.slice("--vmm=".length);
-      args.common.vmm = parseVmmOption(raw);
-      return i;
-    }
     if (arg.startsWith("--rootfs-size=")) {
       args.common.rootfsSize = parseRootfsSizeOption(
         arg.slice("--rootfs-size=".length),
@@ -1064,93 +599,21 @@ function parseExecArgs(argv: string[]): ExecArgs {
         args.common.image = image;
         return i;
       }
-      case "--vmm": {
-        const value = optionArgs[++i];
-        if (!value) fail("--vmm requires an argument");
-        args.common.vmm = parseVmmOption(value);
-        return i;
-      }
       case "--rootfs-size": {
         args.common.rootfsSize = parseRootfsSizeOption(optionArgs[++i], fail);
         return i;
       }
-      case "--allow-host": {
-        const host = optionArgs[++i];
-        if (!host) fail("--allow-host requires a host argument");
-        args.common.allowedHosts.push(host);
-        return i;
-      }
-      case "--host-secret": {
-        const spec = optionArgs[++i];
-        if (!spec) fail("--host-secret requires an argument");
-        args.common.secrets.push(parseHostSecret(spec));
-        return i;
-      }
-      case "--dns": {
-        const mode = optionArgs[++i] as any;
-        if (mode !== "synthetic" && mode !== "trusted" && mode !== "open") {
-          fail("--dns must be one of: synthetic, trusted, open");
-        }
-        args.common.dnsMode = mode;
-        return i;
-      }
-      case "--dns-trusted-server": {
-        const ip = optionArgs[++i];
-        if (!ip) fail("--dns-trusted-server requires an argument");
-        if (net.isIP(ip) !== 4)
-          fail("--dns-trusted-server must be a valid IPv4 address");
-        args.common.dnsTrustedServers.push(ip);
-        return i;
-      }
-      case "--dns-synthetic-host-mapping": {
-        const mode = optionArgs[++i] as any;
-        if (mode !== "single" && mode !== "per-host") {
-          fail("--dns-synthetic-host-mapping must be one of: single, per-host");
-        }
-        args.common.dnsSyntheticHostMapping = mode;
-        return i;
-      }
-      case "--tcp-map": {
-        const spec = optionArgs[++i];
-        if (!spec) fail("--tcp-map requires an argument");
-        try {
-          const mapping = parseTcpMapSpec(spec);
-          args.common.tcpHostMappings[mapping.key] = mapping.value;
-        } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
-        }
-        return i;
-      }
-      case "--ssh-allow-host": {
-        const host = optionArgs[++i];
-        if (!host) fail("--ssh-allow-host requires a host argument");
-        args.common.sshAllowedHosts.push(host);
-        return i;
-      }
-      case "--ssh-agent": {
-        const next = optionArgs[i + 1];
-        if (next && !next.startsWith("--") && next !== "-h" && next !== "--") {
-          i += 1;
-          args.common.sshAgent = resolveSshAgent(next);
-        } else {
-          args.common.sshAgent = resolveSshAgent();
-        }
-        return i;
-      }
-      case "--ssh-known-hosts": {
-        const file = optionArgs[++i];
-        if (!file) fail("--ssh-known-hosts requires a path argument");
-        args.common.sshKnownHostsFiles.push(file);
-        return i;
-      }
+      case "--allow-host":
+      case "--host-secret":
+      case "--dns":
+      case "--dns-trusted-server":
+      case "--dns-synthetic-host-mapping":
+      case "--tcp-map":
+      case "--ssh-allow-host":
+      case "--ssh-agent":
+      case "--ssh-known-hosts":
       case "--ssh-credential": {
-        const spec = optionArgs[++i];
-        if (!spec) fail("--ssh-credential requires an argument");
-        try {
-          args.common.sshCredentials.push(parseSshCredential(spec));
-        } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
-        }
+        fail(unsupportedEgressOption(arg));
         return i;
       }
       case "--disable-websockets": {
@@ -1442,14 +905,6 @@ function parseBashArgs(argv: string[]): BashArgs {
   const args: BashArgs = {
     mounts: [],
     memoryMounts: [],
-    allowedHosts: [],
-    secrets: [],
-    dnsTrustedServers: [],
-    tcpHostMappings: {},
-    sshAllowedHosts: [],
-    sshCredentials: [],
-    sshAgent: undefined,
-    sshKnownHostsFiles: [],
     ssh: false,
     listen: false,
     env: [],
@@ -1463,17 +918,6 @@ function parseBashArgs(argv: string[]): BashArgs {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-
-    if (arg.startsWith("--vmm=")) {
-      const raw = arg.slice("--vmm=".length);
-      try {
-        args.vmm = parseVmmOption(raw);
-      } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-      continue;
-    }
 
     if (arg.startsWith("--rootfs-size=")) {
       args.rootfsSize = parseRootfsSizeOption(
@@ -1519,130 +963,21 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.image = image;
         break;
       }
-      case "--vmm": {
-        const value = argv[++i];
-        if (!value) {
-          console.error("--vmm requires an argument");
-          process.exit(1);
-        }
-        try {
-          args.vmm = parseVmmOption(value);
-        } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
-          process.exit(1);
-        }
-        break;
-      }
       case "--rootfs-size": {
         args.rootfsSize = parseRootfsSizeOption(argv[++i], fail);
         break;
       }
-      case "--allow-host": {
-        const host = argv[++i];
-        if (!host) {
-          console.error("--allow-host requires a host argument");
-          process.exit(1);
-        }
-        args.allowedHosts.push(host);
-        break;
-      }
-      case "--host-secret": {
-        const spec = argv[++i];
-        if (!spec) {
-          console.error("--host-secret requires an argument");
-          process.exit(1);
-        }
-        args.secrets.push(parseHostSecret(spec));
-        break;
-      }
-      case "--dns": {
-        const mode = argv[++i] as any;
-        if (mode !== "synthetic" && mode !== "trusted" && mode !== "open") {
-          console.error("--dns must be one of: synthetic, trusted, open");
-          process.exit(1);
-        }
-        args.dnsMode = mode;
-        break;
-      }
-      case "--dns-trusted-server": {
-        const ip = argv[++i];
-        if (!ip) {
-          console.error("--dns-trusted-server requires an argument");
-          process.exit(1);
-        }
-        if (net.isIP(ip) !== 4) {
-          console.error("--dns-trusted-server must be a valid IPv4 address");
-          process.exit(1);
-        }
-        args.dnsTrustedServers.push(ip);
-        break;
-      }
-      case "--dns-synthetic-host-mapping": {
-        const mode = argv[++i] as any;
-        if (mode !== "single" && mode !== "per-host") {
-          console.error(
-            "--dns-synthetic-host-mapping must be one of: single, per-host",
-          );
-          process.exit(1);
-        }
-        args.dnsSyntheticHostMapping = mode;
-        break;
-      }
-      case "--tcp-map": {
-        const spec = argv[++i];
-        if (!spec) {
-          console.error("--tcp-map requires an argument");
-          process.exit(1);
-        }
-        try {
-          const mapping = parseTcpMapSpec(spec);
-          args.tcpHostMappings[mapping.key] = mapping.value;
-        } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
-          process.exit(1);
-        }
-        break;
-      }
-      case "--ssh-allow-host": {
-        const host = argv[++i];
-        if (!host) {
-          console.error("--ssh-allow-host requires a host argument");
-          process.exit(1);
-        }
-        args.sshAllowedHosts.push(host);
-        break;
-      }
-      case "--ssh-agent": {
-        const next = argv[i + 1];
-        if (next && !next.startsWith("--") && next !== "-h") {
-          i += 1;
-          args.sshAgent = resolveSshAgent(next);
-        } else {
-          args.sshAgent = resolveSshAgent();
-        }
-        break;
-      }
-      case "--ssh-known-hosts": {
-        const file = argv[++i];
-        if (!file) {
-          console.error("--ssh-known-hosts requires a path argument");
-          process.exit(1);
-        }
-        args.sshKnownHostsFiles.push(file);
-        break;
-      }
+      case "--allow-host":
+      case "--host-secret":
+      case "--dns":
+      case "--dns-trusted-server":
+      case "--dns-synthetic-host-mapping":
+      case "--tcp-map":
+      case "--ssh-allow-host":
+      case "--ssh-agent":
+      case "--ssh-known-hosts":
       case "--ssh-credential": {
-        const spec = argv[++i];
-        if (!spec) {
-          console.error("--ssh-credential requires an argument");
-          process.exit(1);
-        }
-        try {
-          args.sshCredentials.push(parseSshCredential(spec));
-        } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
-          process.exit(1);
-        }
+        fail(unsupportedEgressOption(arg));
         break;
       }
       case "--disable-websockets": {
@@ -2963,7 +2298,6 @@ function isMainModule(moduleUrl: string): boolean {
 
 export const __test = {
   buildVmOptions,
-  parseHostSecret,
 };
 
 if (isMainModule(import.meta.url)) {

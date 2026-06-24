@@ -90,6 +90,7 @@ export class VirtioBridge {
       });
     }
 
+    fs.rmSync(this.socketPath, { force: true });
     this.waitingDrain = false;
 
     // Drop any queued frames; after disconnect the bridge is permanently closed.

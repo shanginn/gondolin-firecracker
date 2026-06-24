@@ -38,7 +38,7 @@ Design your workloads so that throwing away a VM is always safe.  This means:
 
 | Location | Backing | Survives VM close? | In disk checkpoints? |
 |---|---|---|---|
-| Most of `/` (rootfs) | qcow2 overlay | No | Yes |
+| Most of `/` (rootfs) | raw disk | No | Yes |
 | `/root`, `/tmp`, `/run`, `/var/log`, `/var/tmp`, `/var/cache` | tmpfs | No | No |
 | VFS-mounted paths (e.g. `/workspace`) | Host provider | Yes (provider-dependent) | No |
 
@@ -57,7 +57,7 @@ in keeping a VM alive across long idle periods:
 
 - **Cold starts are fast.**  Gondolin VMs boot in under a second, so
   recreating a VM is cheap.
-- **Idle VMs waste resources.**  A parked QEMU process still holds memory.
+- **Idle VMs waste resources.**  A parked Firecracker VM still holds memory.
 - **LLM context resets anyway.**  If your model's context window or cache
   has gone cold (e.g. after minutes of inactivity), you are effectively
   starting fresh regardless.  Aligning VM lifecycle with context lifecycle

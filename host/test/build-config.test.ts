@@ -118,7 +118,7 @@ test("build-config: rejects invalid runtimeDefaults.rootfsMode", () => {
     distro: "alpine",
     alpine: { version: "3.23.0" },
     runtimeDefaults: {
-      rootfsMode: "qcow2",
+      rootfsMode: "overlay",
     },
   };
 

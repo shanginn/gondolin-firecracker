@@ -10,7 +10,7 @@
  * How to run:
  *   1. Install dependencies for this repo (so imports resolve):
  *        pnpm install
- *   2. Ensure QEMU is installed (see the gondolin README "Quick Start")
+ *   2. Ensure Firecracker and KVM are available (see the gondolin README)
  *   3. Start pi in the project you want to sandbox:
  *        cd /path/to/your/project
  *        pi -e /absolute/path/to/gondolin/host/examples/pi-gondolin.ts
@@ -247,7 +247,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    // Start eagerly so the user sees errors early (missing qemu, etc.)
+    // Start eagerly so the user sees runtime errors early.
     await ensureVm(ctx);
   });
 

@@ -6,6 +6,10 @@ import test from "node:test";
 
 import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
 
+function hostManifestArch(): "aarch64" | "x86_64" {
+  return process.arch === "arm64" ? "aarch64" : "x86_64";
+}
+
 function makeTempAssetsDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-stdin-"));
 
@@ -13,6 +17,7 @@ function makeTempAssetsDir(): string {
   fs.writeFileSync(path.join(dir, "vmlinuz-virt"), "");
   fs.writeFileSync(path.join(dir, "initramfs.cpio.lz4"), "");
   fs.writeFileSync(path.join(dir, "rootfs.ext4"), "");
+  fs.writeFileSync(path.join(dir, "firecracker-kernel"), "");
 
   // A minimal manifest so arch detection passes.
   fs.writeFileSync(
@@ -21,7 +26,7 @@ function makeTempAssetsDir(): string {
       {
         version: 1,
         config: {
-          arch: "aarch64",
+          arch: hostManifestArch(),
           distro: "alpine",
           alpine: { version: "3.23.0" },
         },
@@ -30,11 +35,13 @@ function makeTempAssetsDir(): string {
           kernel: "vmlinuz-virt",
           initramfs: "initramfs.cpio.lz4",
           rootfs: "rootfs.ext4",
+          firecrackerKernel: "firecracker-kernel",
         },
         checksums: {
           kernel: "",
           initramfs: "",
           rootfs: "",
+          firecrackerKernel: "",
         },
       },
       null,
@@ -48,11 +55,14 @@ function makeTempAssetsDir(): string {
 test("resolveSandboxServerOptions ensures queued stdin caps are >= maxStdinBytes", () => {
   const dir = makeTempAssetsDir();
   try {
-    const resolved = resolveSandboxServerOptions({
-      imagePath: dir,
-      qemuPath: "qemu-system-aarch64",
-      maxStdinBytes: 16 * 1024 * 1024,
-    });
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: dir,
+        maxStdinBytes: 16 * 1024 * 1024,
+      },
+      undefined,
+      { platform: "linux" },
+    );
 
     assert.ok(resolved.maxQueuedStdinBytes >= resolved.maxStdinBytes);
     assert.ok(

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +8,6 @@ import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
 import { createExecSession } from "../src/exec.ts";
 import { VM, __test, type VMOptions } from "../src/vm/core.ts";
 import { resolveEnvNumber } from "../src/utils/env.ts";
-import { getImageVirtualSizeBytes } from "../src/qemu/img.ts";
 import type { RootfsMode } from "../src/build/config.ts";
 
 function makeTempResolvedServerOptions() {
@@ -24,9 +22,7 @@ function makeTempResolvedServerOptions() {
   return {
     dir,
     resolved: {
-      vmm: "qemu" as const,
-      qemuPath: "qemu-system-aarch64",
-      krunRunnerPath: "gondolin-krun-runner",
+      vmm: "firecracker" as const,
       firecrackerPath: "firecracker",
       firecrackerApiSocketPath: path.join(dir, "firecracker-api.sock"),
       firecrackerVsockPath: path.join(dir, "firecracker-vsock.sock"),
@@ -43,20 +39,16 @@ function makeTempResolvedServerOptions() {
       virtioFsSocketPath: path.join(dir, "virtiofs.sock"),
       virtioSshSocketPath: path.join(dir, "virtio-ssh.sock"),
       virtioIngressSocketPath: path.join(dir, "virtio-ingress.sock"),
-      netSocketPath: path.join(dir, "net.sock"),
       netMac: "02:00:00:00:00:01",
       netEnabled: false,
       debug: [],
-      machineType: "virt",
-      accel: "tcg",
-      cpu: "max",
       console: "none" as const,
       autoRestart: false,
       append: "console=ttyAMA0",
       maxStdinBytes: 64 * 1024,
-      maxHttpBodyBytes: 1024 * 1024,
-      maxHttpResponseBodyBytes: 1024 * 1024,
-      mitmCertDir: path.join(dir, "mitm"),
+      maxQueuedStdinBytes: 8 * 1024 * 1024,
+      maxTotalQueuedStdinBytes: 32 * 1024 * 1024,
+      maxQueuedExecs: 64,
       vfsProvider: null,
     },
   };
@@ -92,15 +84,6 @@ function writeAssetManifest(dir: string, rootfsMode?: RootfsMode) {
   );
 }
 
-function hasQemuImg(): boolean {
-  try {
-    execFileSync("qemu-img", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function makeVm(options: VMOptions = {}) {
   const { dir, resolved } = makeTempResolvedServerOptions();
   const vm = new VM(options, resolved as any);
@@ -125,6 +108,13 @@ test("vm internals: VM.create validates rootfs size before asset resolution", as
   await assert.rejects(
     () => VM.create({ rootfs: { size: "1GBps" } }),
     /invalid disk size suffix/,
+  );
+});
+
+test("vm internals: VM.create rejects removed egress options", async () => {
+  await assert.rejects(
+    () => VM.create({ httpHooks: {} } as any),
+    /does not support mediated guest egress/,
   );
 });
 
@@ -185,7 +175,7 @@ test("vm internals: rootfs size rejects readonly mode", () => {
 
 test("vm internals: constructor cleans delete-on-close root disk after resize setup failure", () => {
   const { dir, resolved } = makeTempResolvedServerOptions();
-  const rootDiskPath = path.join(dir, "root-disk.qcow2");
+  const rootDiskPath = path.join(dir, "root-disk.raw");
   fs.writeFileSync(rootDiskPath, "temporary root disk");
 
   try {
@@ -249,7 +239,7 @@ test("vm internals: rootfs option overrides manifest default", async () => {
     assert.equal(resolvedOptions.rootDiskReadOnly, false);
 
     const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.snapshot, true);
+    assert.equal(rootDisk.snapshot, false);
     assert.equal(rootDisk.readOnly, false);
   } finally {
     await vm.close();
@@ -257,9 +247,8 @@ test("vm internals: rootfs option overrides manifest default", async () => {
   }
 });
 
-test("vm internals: firecracker defaults to readonly rootfs", async () => {
+test("vm internals: defaults to readonly rootfs", async () => {
   const { dir, resolved } = makeTempResolvedServerOptions();
-  (resolved as any).vmm = "firecracker";
   fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
 
   const vm = new VM(
@@ -286,37 +275,8 @@ test("vm internals: firecracker defaults to readonly rootfs", async () => {
   }
 });
 
-test("vm internals: rootfs cow mode uses throwaway qcow2 overlay", async (t) => {
-  if (!hasQemuImg()) {
-    t.skip("qemu-img unavailable");
-    return;
-  }
-
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    vfs: null,
-    rootfs: { mode: "cow" },
-  });
-
-  try {
-    const resolved = (vm as any).resolvedSandboxOptions;
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(resolved.rootDiskFormat, "qcow2");
-    assert.equal(resolved.rootDiskReadOnly, false);
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.deleteOnClose, true);
-    assert.equal(fs.existsSync(rootDisk.path), true);
-  } finally {
-    await vm.close();
-    cleanup();
-  }
-});
-
-test("vm internals: firecracker cow mode uses throwaway raw copy", async () => {
+test("vm internals: rootfs cow mode uses throwaway raw copy", async () => {
   const { dir, resolved } = makeTempResolvedServerOptions();
-  (resolved as any).vmm = "firecracker";
   fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
 
   const vm = new VM(
@@ -344,9 +304,8 @@ test("vm internals: firecracker cow mode uses throwaway raw copy", async () => {
   }
 });
 
-test("vm internals: firecracker rootfs size grows raw copy before boot", async () => {
+test("vm internals: rootfs size grows raw copy before boot", async () => {
   const { dir, resolved } = makeTempResolvedServerOptions();
-  (resolved as any).vmm = "firecracker";
   fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
 
   const vm = new VM(
@@ -367,60 +326,6 @@ test("vm internals: firecracker rootfs size grows raw copy before boot", async (
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("vm internals: rootfs size grows cow overlay before boot", async (t) => {
-  if (!hasQemuImg()) {
-    t.skip("qemu-img unavailable");
-    return;
-  }
-
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    vfs: null,
-    rootfs: { mode: "cow", size: "64M" },
-  });
-
-  try {
-    const resolved = (vm as any).resolvedSandboxOptions;
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal((vm as any).rootfsGuestResizePending, true);
-    assert.equal(getImageVirtualSizeBytes(rootDisk.path), 64 * 1024 * 1024);
-  } finally {
-    await vm.close();
-    cleanup();
-  }
-});
-
-test("vm internals: rootfs size uses resized overlay for qemu memory mode", async (t) => {
-  if (!hasQemuImg()) {
-    t.skip("qemu-img unavailable");
-    return;
-  }
-
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    vfs: null,
-    rootfs: { mode: "memory", size: "64M" },
-  });
-
-  try {
-    const resolved = (vm as any).resolvedSandboxOptions;
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.notEqual(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(resolved.rootDiskFormat, "qcow2");
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.deleteOnClose, true);
-    assert.equal((vm as any).rootfsGuestResizePending, true);
-    assert.equal(getImageVirtualSizeBytes(rootDisk.path), 64 * 1024 * 1024);
-  } finally {
-    await vm.close();
-    cleanup();
   }
 });
 
@@ -469,6 +374,27 @@ test("vm internals: rootfs size refuses symlink to base image", () => {
   }
 });
 
+test("vm internals: custom vfs binds use writable rootfs copy by default", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: {
+      mounts: {
+        "/": new MemoryProvider(),
+        "/app": new MemoryProvider(),
+      },
+    },
+  });
+
+  try {
+    const rootDisk = (vm as any).rootDisk;
+    assert.equal(rootDisk.readOnly, false);
+    assert.equal(rootDisk.deleteOnClose, true);
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
 test("vm internals: start timeout rejects stalled guest readiness", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
@@ -486,6 +412,32 @@ test("vm internals: start timeout rejects stalled guest readiness", async () => 
     await assert.rejects(
       () => vm.start(),
       /vm startup timed out after 10ms while waiting for guest readiness/,
+    );
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: start timeout includes server diagnostic hint", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    startTimeoutMs: 10,
+    vfs: null,
+  });
+
+  (vm as any).ensureVmmAvailable = () => {};
+  (vm as any).ensureConnection = async () => {};
+  (vm as any).ensureRunning = async () => new Promise<void>(() => {});
+  (vm as any).ensureVfsReady = async () => {};
+  (vm as any).ensureSessionIpc = async () => {};
+  (vm as any).server.getStartupDiagnostic = () =>
+    " (firecracker: boot hung)";
+
+  try {
+    await assert.rejects(
+      () => vm.start(),
+      /vm startup timed out after 10ms while waiting for guest readiness \(firecracker: boot hung\)/,
     );
   } finally {
     await vm.close();
@@ -659,54 +611,6 @@ test("vm internals: resolveVmVfs supports null vfs and default MemoryProvider", 
 
   const enabled = __test.resolveVmVfs(undefined, undefined);
   assert.ok(enabled.provider, "expected default vfs provider");
-});
-
-test("vm internals: resolveMitmMounts injects /etc/gondolin/mitm unless overridden", () => {
-  const injected = __test.resolveMitmMounts(undefined, undefined, true);
-  assert.ok(
-    injected["/etc/gondolin/mitm"],
-    "expected mitm mounts to include /etc/gondolin/mitm",
-  );
-
-  const customMitm = __test.resolveMitmMounts(
-    { mounts: { "/etc/gondolin/mitm": new MemoryProvider() } },
-    undefined,
-    true,
-  );
-  assert.deepEqual(customMitm, {});
-
-  const customEtc = __test.resolveMitmMounts(
-    { mounts: { "/etc/gondolin": new MemoryProvider() } },
-    undefined,
-    true,
-  );
-  assert.deepEqual(customEtc, {});
-
-  const disabledNet = __test.resolveMitmMounts(undefined, undefined, false);
-  assert.deepEqual(disabledNet, {});
-
-  const disabledVfs = __test.resolveMitmMounts(null, undefined, true);
-  assert.deepEqual(disabledVfs, {});
-});
-
-test("vm internals: createMitmCaProvider creates readonly ca.crt", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-mitmca-test-"));
-  try {
-    const provider = __test.createMitmCaProvider(dir) as any;
-    assert.equal(provider.readonly, true);
-
-    const handle = provider.openSync("/ca.crt", "r");
-    try {
-      const pem = handle.readFileSync({ encoding: "utf8" });
-      assert.ok(typeof pem === "string");
-      assert.match(pem, /BEGIN CERTIFICATE/);
-      assert.ok(pem.endsWith("\n"), "expected trailing newline");
-    } finally {
-      handle.closeSync();
-    }
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test("vm internals: mergeEnvInputs and buildShellEnv normalize TERM", () => {

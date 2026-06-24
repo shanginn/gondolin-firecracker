@@ -1,173 +1,47 @@
 # Architecture Overview
 
-This document answers the question: **"what is Gondolin?"**
+Gondolin is a Firecracker VM runtime plus a Node.js control plane.
 
-Gondolin is not a single binary. It is a small system made of:
+## Components
 
-- **A host-side library + CLI**: for TypeScript / Node.js, also called the control plane
-- **A guest-side runtime**: a minimal Linux VM image plus a few small daemons
-- **VM backend**: QEMU (default), `libkrun` (experimental), or Firecracker (experimental)
+- **Host package and CLI** start Firecracker, manage guest assets, expose `VM`,
+  and provide VFS/exec/SSH/ingress services.
+- **Guest image** is Alpine Linux with small Zig daemons.
+- **Firecracker** is the only VM boundary. It runs on Linux/KVM.
 
-The high-level idea is:
+## Guest Daemons
 
-> Run untrusted code inside a real Linux VM, but keep the VM's *I/O surface*
-> (network + persistence) mediated by host code you control.
+- `sandboxd`: command execution over vsock
+- `sandboxfs`: FUSE-backed VFS RPC over vsock
+- `sandboxssh`: host-to-guest SSH TCP forwarder over vsock
+- `sandboxingress`: host-to-guest ingress TCP forwarder over vsock
 
-If you already read [Security Design](./security.md): this page focuses on
-**components and data flow**, not threat modeling.
-
-## The Pieces
-
-This gives you an overview of what they are.
-
-### Host
-
-This is the code you import (`@earendil-works/gondolin`) and also what powers
-the CLI.  It manages not just the lifecycle of the VM but it's also a crucial
-counterpart to the guest as the guest delegates a lot of functionality to the
-host.
-
-Responsibilities:
-
-- Start/stop the selected VM backend and wire up the devices Gondolin needs
-- Provide the **exec** (`vm.exec(...)`)
-- Provide the **programmable filesystem** (VFS providers)
-- Provide the **programmable network policy** (HTTP/TLS mediation + hooks, plus explicit SSH/mapped-TCP exception paths)
-- Download/cache guest assets (kernel/initramfs/rootfs) on demand
-
-Key concepts you interact with:
-
-- `VM` (lifecycle + `exec`)
-- `httpHooks` / `createHttpHooks()` (network allowlists, secrets, request/response hooks)
-- VFS providers (`MemoryProvider`, `RealFSProvider`, `ReadonlyProvider`, ...)
-
-### Guest
-
-The guest is a conventional Linux userspace (kernel + initramfs/rootfs) with a
-few small Gondolin-specific helpers.
-
-Responsibilities:
-
-- Boot fast and provide a familiar Linux environment for tools
-- Execute commands requested by the host
-- Proxy filesystem operations to the host (for mounted VFS paths)
-
-Guest daemons/components:
-
-- `sandboxd`: receives exec requests and spawns processes
-- `sandboxfs`: a FUSE daemon that forwards filesystem operations to the host via RPC
-- `sandboxssh`: a dedicated host-to-guest TCP forwarder for SSH access (loopback-only inside the guest)
-- `sandboxingress`: a dedicated host-to-guest TCP forwarder for inbound HTTP traffic (ingress gateway)
-- `/init`: mounts tmpfs, brings up networking, starts services
-
-### VM backend (QEMU default, optional krun/Firecracker)
-
-QEMU is the default VM engine (and primary isolation boundary). Gondolin also
-has experimental `libkrun` and Firecracker backends.
-
-See [VM Backends](./backends.md) for capability differences and
-[QEMU](./qemu.md) for QEMU-specific internals.
-
-## System Diagram
+## Data Flow
 
 ```
-+--------------------------- Host machine (trusted) ---------------------------+
-|                                                                              |
-|  Your Node.js app / CLI                                                      |
-|  (policy + secrets + VFS providers)                                          |
-|                                                                              |
-|  +------------------------------ VM boundary ------------------------------+ |
-|  | Guest Linux VM (untrusted)                                              | |
-|  |                                                                         | |
-|  |  [virtio-net]   eth0  <---- Ethernet frames ---->  host network backend | |
-|  |                                                                         | |
-|  |  [virtio-serial]  exec RPC    <---------------->  sandbox server        | |
-|  |  [virtio-serial]  fs RPC      <---------------->  VFS RPC service       | |
-|  |  [virtio-serial]  ssh fwd     <---------------->  loopback-only proxy   | |
-|  |  [virtio-serial]  ingress fwd <---------------->  ingress gateway       | |
-|  +-------------------------------------------------------------------------+ |
-|                                                                              |
-+------------------------------------------------------------------------------+
+trusted host process
+  |
+  | Firecracker API socket
+  v
+Firecracker VM process
+  |
+  | vsock ports 1024-1027
+  v
+guest daemons
 ```
 
-Firecracker uses the same host control-plane services but maps the exec, VFS,
-SSH, and ingress channels onto vsock ports instead of virtio-serial devices.
-Firecracker mediated guest network egress is not implemented yet.
+The guest has no egress network device in the default runtime. Command
+execution, VFS, host-to-guest SSH, and ingress do not need guest networking.
 
-The important architectural choice: **the host is the enforcement point** for
-both networking and persistence.
+## Storage
 
-## Control Plane vs Data Plane
+The base rootfs is attached read-only by default for fast startup and low disk
+churn. Writable modes create a temporary raw rootfs copy. VFS mounts should hold
+workspace and persistent data.
 
-It's useful to think of Gondolin as two planes:
+## Enforcement
 
-- **Control plane:** structured RPC over virtio-serial
-
-    - command execution (`vm.exec`)
-    - filesystem RPC for the programmable mounts
-    - a small set of host <-> guest utility channels
-
-- **Data plane:** guest-visible "normal" Linux interfaces
-
-    - `eth0` exists, but egress is mediated by the host (no generic NAT)
-    - files under mounted VFS paths behave like normal paths, but operations are
-    served by host providers
-
-## What Happens When You Run `vm.exec(...)`
-
-1. Your code calls `vm.exec("...")` (or the CLI does).
-2. The host sends an **exec request** over a virtio-serial channel.
-3. In the guest, `sandboxd` spawns the process and attaches pipes.
-4. stdout/stderr/stdin are streamed back to the host.
-5. The host assembles an `ExecResult` (exit code + captured output).
-
-This is why Gondolin can provide a nice programmatic API without needing SSH for
-normal operation.
-
-## What Happens on Network Access
-
-From the guest's point of view, networking looks ordinary: it opens TCP sockets
-and writes bytes.
-
-On the host side, Gondolin does **not** provide a generic NAT. Instead:
-
-1. The guest emits Ethernet frames via virtio-net.
-2. The host receives frames and implements a small userspace network stack.
-3. Outbound TCP flows either match an explicit mapped TCP rule first, or are
-   classified as **HTTP**, **TLS**, or **SSH** (anything else is blocked).
-4. If a mapped TCP rule matches, the host connects to the explicit mapped
-   upstream `HOST:PORT` and forwards bytes.
-5. For HTTP requests, data is parsed, checked against policy, optionally transformed
-   (hooks), and replayed via host `fetch`.
-6. For TLS flows, the host performs a controlled MITM so it can see the HTTP
-   request inside TLS and apply the same policy/hook pipeline.
-7. For SSH egress flows, the host runs the SSH proxy path (allowlist + host-key
-   verification + exec restrictions).
-
-For HTTP/TLS-mediated flows, this is the reason Gondolin can:
-
-- enforce allowlists by hostname
-- block internal ranges robustly
-- inject secrets into headers without exposing real values to the guest
-
-Mapped TCP/SSH exception paths use different controls (explicit target mapping/
-allowlisting and protocol constraints) and do not run the HTTP hook/secrets pipeline.
-
-See [Network Stack](./network.md) for the full details.
-
-## What Happens on Filesystem Access
-
-The guest has two kinds of storage:
-
-- **Image-backed root filesystem** (usually ephemeral per run)
-- **Explicit host-provided mounts** (programmable VFS)
-
-For a programmable mount (e.g. `/workspace` or `/data`):
-
-1. In the guest, the mountpoint is served by `sandboxfs` (FUSE).
-2. Each file operation becomes an RPC message over virtio-serial.
-3. The host `FsRpcService` dispatches it to the configured provider(s).
-
-Providers can implement very different semantics (in-memory, read-only host
-directories, remote-backed content, policy wrappers, etc.) while the guest still
-sees normal POSIX paths.
+The VM boundary isolates compute. The host controls every exposed channel:
+exec, VFS, SSH, ingress, checkpointing, and image selection. Guest egress is
+disabled until a Firecracker network path can enforce Gondolin policy without
+falling back to generic NAT.

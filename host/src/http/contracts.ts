@@ -5,38 +5,14 @@ import type { Agent, fetch as undiciFetch } from "undici";
 
 export type HttpFetch = typeof undiciFetch;
 
+export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES =
+  DEFAULT_MAX_HTTP_BODY_BYTES;
+
 /** internal marker for onRequest hooks safe for pre-body policy precheck */
 export const ON_REQUEST_EARLY_POLICY_SAFE = Symbol.for(
   "gondolin.http.onRequestEarlyPolicySafe",
 );
-
-const GUEST_CLOSED_MARKER = Symbol.for("gondolin.net.guestClosed");
-
-type GuestClosedError = Error & {
-  [GUEST_CLOSED_MARKER]: true;
-};
-
-export function createGuestClosedError(): Error {
-  const error = new Error("guest closed") as GuestClosedError;
-  error.name = "GuestClosedError";
-  error[GUEST_CLOSED_MARKER] = true;
-  return error;
-}
-
-export function isGuestClosedError(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
-    const candidate = current as Error & {
-      [GUEST_CLOSED_MARKER]?: boolean;
-      cause?: unknown;
-    };
-    if (candidate[GUEST_CLOSED_MARKER] === true) {
-      return true;
-    }
-    current = candidate.cause;
-  }
-  return false;
-}
 
 export type HttpOnRequestHook = ((
   request: Request,
@@ -63,10 +39,8 @@ export type HttpHooks = {
   isRequestAllowed?: (request: Request) => Promise<boolean> | boolean;
   /** allow/deny callback for resolved destination ip */
   isIpAllowed?: (info: HttpIpAllowInfo) => Promise<boolean> | boolean;
-
   /** request hook (may rewrite request or short-circuit with response) */
   onRequest?: HttpOnRequestHook;
-
   /** response rewrite hook */
   onResponse?: (
     response: Response,
@@ -81,19 +55,14 @@ export type SyntheticDnsHostMappingMode = "single" | "per-host";
 export type DnsOptions = {
   /** dns mode */
   mode?: DnsMode;
-
   /** trusted resolver ipv4 addresses (mode="trusted") */
   trustedServers?: string[];
-
   /** synthetic A response ipv4 address (mode="synthetic") */
   syntheticIPv4?: string;
-
   /** synthetic AAAA response ipv6 address (mode="synthetic") */
   syntheticIPv6?: string;
-
   /** synthetic response ttl in `seconds` (mode="synthetic") */
   syntheticTtlSeconds?: number;
-
   /** synthetic hostname mapping strategy (mode="synthetic") */
   syntheticHostMapping?: SyntheticDnsHostMappingMode;
 };
@@ -103,26 +72,7 @@ export type SharedDispatcherEntry = {
   lastUsedAt: number;
 };
 
-export type QemuHttpInternalsLike = {
-  maxHttpBodyBytes: number;
-  maxHttpResponseBodyBytes: number;
-  allowWebSockets: boolean;
-  webSocketUpstreamConnectTimeoutMs: number;
-  webSocketUpstreamHeaderTimeoutMs: number;
-  httpConcurrency: {
-    acquire(): Promise<() => void>;
-  };
-  sharedDispatchers: Map<string, SharedDispatcherEntry>;
-  qemuRxPausedForHttpStreaming: boolean;
-};
-
-export type NetworkStackLike = {
-  handleTcpData(message: { key: string; data: Buffer }): void;
-  handleTcpEnd(message: { key: string }): void;
-  handleTcpClosed(message: { key: string }): void;
-};
-
-export type TcpSession = {
+export type HttpBackendTcpSession = {
   socket: net.Socket | null;
   srcIP: string;
   srcPort: number;
@@ -143,9 +93,8 @@ export type TcpSession = {
   ssh?: any;
 };
 
-export type QemuNetworkBackend<
-  TSession extends TcpSession = TcpSession,
-  TSsh = unknown,
+export type HttpDispatchBackend<
+  TSession extends HttpBackendTcpSession = HttpBackendTcpSession,
 > = {
   options: {
     debug?: boolean;
@@ -160,16 +109,14 @@ export type QemuNetworkBackend<
       ) => void,
     ) => void;
   };
-  socket: net.Socket | null;
-  stack: NetworkStackLike | null;
   tcpSessions: Map<string, TSession>;
-  maxTcpPendingWriteBytes: number;
-  http: QemuHttpInternalsLike;
-  ssh: TSsh;
+  http: {
+    maxHttpBodyBytes: number;
+    maxHttpResponseBodyBytes: number;
+    allowWebSockets: boolean;
+    webSocketUpstreamConnectTimeoutMs: number;
+    webSocketUpstreamHeaderTimeoutMs: number;
+    sharedDispatchers: Map<string, SharedDispatcherEntry>;
+  };
   emitDebug(message: string): void;
-  emit(event: string | symbol, ...args: any[]): boolean;
-  flush(): void;
-  waitForFlowResume(key: string): Promise<void>;
-  settleFlowResume(key: string, err?: Error): void;
-  abortTcpSession(key: string, session: TSession, reason: string): void;
 };

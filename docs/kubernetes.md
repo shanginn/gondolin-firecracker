@@ -46,8 +46,6 @@ spec:
         - name: worker
           image: ghcr.io/example/gondolin-worker:latest
           env:
-            - name: GONDOLIN_VMM
-              value: firecracker
             - name: GONDOLIN_RUNTIME_DIR
               value: /run/gondolin
             - name: XDG_CACHE_HOME
@@ -140,16 +138,14 @@ provision `TMPDIR` storage for one raw rootfs copy per concurrent VM.
 ## Network And Secrets
 
 Firecracker currently rejects `netEnabled: true`, `httpHooks`, DNS overrides,
-mapped TCP/SSH egress, and MITM certificate options. This is intentional: a
-generic TAP/NAT device would bypass Gondolin's existing network mediation
+mapped TCP/SSH egress, and certificate-injection options. This is intentional:
+a generic TAP/NAT device would bypass Gondolin's existing network mediation
 semantics.
 
 For Kubernetes:
 
 - use Firecracker for no-guest-network workloads, VFS-backed workloads, and
   host-mediated ingress/SSH/control-plane use cases
-- use QEMU or krun when the guest needs Gondolin's HTTP/TLS egress policy and
-  secret-injection path
 - apply Kubernetes `NetworkPolicy` to the pod itself, because the host process
   still has normal pod network access
 

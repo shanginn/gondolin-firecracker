@@ -15,8 +15,6 @@ import { ensureSandboxHelperBinaries } from "./sandbox-helpers.ts";
 export const KERNEL_FILENAME = "vmlinuz-virt";
 export const INITRAMFS_FILENAME = "initramfs.cpio.lz4";
 export const ROOTFS_FILENAME = "rootfs.ext4";
-export const KRUN_KERNEL_FILENAME = "krun-kernel";
-export const KRUN_INITRD_FILENAME = "krun-empty-initrd";
 export const FIRECRACKER_KERNEL_FILENAME = "firecracker-kernel";
 export const FIRECRACKER_INITRD_FILENAME = "firecracker-initrd";
 
@@ -47,8 +45,6 @@ export type ResolvedAlpineConfig = {
   mirror?: string;
   kernelPackage?: string;
   kernelImage?: string;
-  /** libkrunfw release version (e.g. `v5.2.1`) */
-  krunfwVersion: string;
   rootfsPackages: string[];
   initramfsPackages: string[];
 };
@@ -151,9 +147,9 @@ export function findGuestDirFrom(
   starts: string[],
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
-  const envPath = env.GONDOLIN_GUEST_SRC;
-  if (envPath && fs.existsSync(path.join(envPath, "build.zig"))) {
-    return envPath;
+  const envPath = env.GONDOLIN_GUEST_SRC?.trim();
+  if (envPath) {
+    return fs.existsSync(path.join(envPath, "build.zig")) ? envPath : null;
   }
 
   const visited = new Set<string>();
@@ -367,8 +363,7 @@ async function buildSandboxBinaryPathsFromSource(
   } catch (error) {
     throw new Error(
       "Failed to build sandbox helpers from Zig sources. " +
-        "Install Zig 0.16.0 or unset " +
-        `${BUILD_SANDBOX_HELPERS_FROM_SOURCE_ENV} to use published helpers.\n` +
+        "Install Zig 0.16.0 or build from an installed package with published helpers.\n" +
         `Cause: ${errorMessage(error)}`,
     );
   }
@@ -442,6 +437,12 @@ export async function resolveSandboxBinaryPaths(
 
   if (options.skipBinaries) {
     const paths = resolveExistingGuestZigOutBinaryPaths();
+    assertSandboxBinaryPathsExist(paths);
+    return paths;
+  }
+
+  if (findGuestDir()) {
+    const paths = await buildSandboxBinaryPathsFromSource(config.arch, log);
     assertSandboxBinaryPathsExist(paths);
     return paths;
   }
@@ -527,8 +528,6 @@ export function writeAssetManifest(
   const initramfsDst = path.join(outputDir, INITRAMFS_FILENAME);
   const rootfsDst = path.join(outputDir, ROOTFS_FILENAME);
 
-  const krunKernelDst = path.join(outputDir, KRUN_KERNEL_FILENAME);
-  const krunInitrdDst = path.join(outputDir, KRUN_INITRD_FILENAME);
   const firecrackerKernelDst = path.join(
     outputDir,
     FIRECRACKER_KERNEL_FILENAME,
@@ -549,16 +548,6 @@ export function writeAssetManifest(
     initramfs: INITRAMFS_FILENAME,
     rootfs: ROOTFS_FILENAME,
   };
-
-  if (fs.existsSync(krunKernelDst)) {
-    assets.krunKernel = KRUN_KERNEL_FILENAME;
-    checksums.krunKernel = computeFileHash(krunKernelDst);
-  }
-
-  if (fs.existsSync(krunInitrdDst)) {
-    assets.krunInitrd = KRUN_INITRD_FILENAME;
-    checksums.krunInitrd = computeFileHash(krunInitrdDst);
-  }
 
   if (fs.existsSync(firecrackerKernelDst)) {
     assets.firecrackerKernel = FIRECRACKER_KERNEL_FILENAME;

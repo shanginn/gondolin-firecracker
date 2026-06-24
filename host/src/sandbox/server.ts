@@ -1,7 +1,6 @@
 import { EventEmitter } from "events";
 import { Duplex, PassThrough, Readable } from "stream";
 
-import { getHostNodeArchCached } from "../host/arch.ts";
 import { AsyncSingleflight } from "../utils/async.ts";
 import { toBufferIterable } from "../utils/buffer-iter.ts";
 import {
@@ -23,18 +22,11 @@ import {
   type StdinCommandMessage,
   encodeOutputFrame,
 } from "./control-protocol.ts";
-import {
-  SandboxController,
-  type SandboxConfig,
-  type SandboxState,
-  type SandboxLogStream,
-} from "./controller.ts";
-import { KrunController, type KrunConfig } from "./krun-controller.ts";
+import { type SandboxLogStream, type SandboxState } from "./state.ts";
 import {
   FirecrackerController,
   type FirecrackerConfig,
 } from "./firecracker-controller.ts";
-import { QemuNetworkBackend } from "../qemu/net.ts";
 import { FsRpcService } from "../vfs/rpc-service.ts";
 import { LINUX_ERRNO } from "../vfs/linux-errno.ts";
 import { SandboxVfsProvider } from "../vfs/provider.ts";
@@ -58,7 +50,6 @@ import {
   VirtioBridge,
   estimateBase64Bytes,
   isValidRequestId,
-  parseMac,
 } from "./server-transport.ts";
 import {
   type SandboxClient,
@@ -135,8 +126,6 @@ type SandboxControllerLike = {
 };
 
 type SandboxServerInternalOptions = {
-  /** qemu root disk volatility mode */
-  qemuRootDiskVolatileMode?: "snapshot";
 };
 
 export class SandboxServer extends EventEmitter {
@@ -150,13 +139,13 @@ export class SandboxServer extends EventEmitter {
     );
   }
 
-  private normalizeQemuHintLine(line: string): string | null {
+  private normalizeVmmHintLine(line: string): string | null {
     let normalized = stripTrailingNewline(line).trimEnd();
     if (!normalized) return null;
 
     // Avoid leaking control sequences / non-printable bytes into client-visible
-    // error messages. This is especially important when QEMU is configured with
-    // -serial stdio, where stdout may contain untrusted guest console output.
+    // error messages, especially when stdout may contain untrusted guest console
+    // output.
     normalized = normalized
       .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "") // ANSI CSI
       .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "") // ANSI OSC
@@ -169,17 +158,17 @@ export class SandboxServer extends EventEmitter {
     return normalized;
   }
 
-  private recordQemuLogLine(line: string) {
-    const normalized = this.normalizeQemuHintLine(line);
+  private recordVmmLogLine(line: string) {
+    const normalized = this.normalizeVmmHintLine(line);
     if (!normalized) return;
-    this.qemuLogTail.push(normalized);
+    this.vmmLogTail.push(normalized);
     // Keep a small tail so error messages can include likely root causes.
-    if (this.qemuLogTail.length > 50) {
-      this.qemuLogTail.splice(0, this.qemuLogTail.length - 50);
+    if (this.vmmLogTail.length > 50) {
+      this.vmmLogTail.splice(0, this.vmmLogTail.length - 50);
     }
   }
 
-  private isLowValueQemuHintLine(line: string): boolean {
+  private isLowValueVmmHintLine(line: string): boolean {
     const trimmed = line.trim();
     if (!trimmed) return true;
     if (trimmed === "^") return true;
@@ -203,16 +192,16 @@ export class SandboxServer extends EventEmitter {
     return false;
   }
 
-  private selectQemuHintLine(): string | null {
-    for (let i = this.qemuLogTail.length - 1; i >= 0; i -= 1) {
-      const line = this.qemuLogTail[i]!;
-      if (!this.isLowValueQemuHintLine(line)) return line;
+  private selectVmmHintLine(): string | null {
+    for (let i = this.vmmLogTail.length - 1; i >= 0; i -= 1) {
+      const line = this.vmmLogTail[i]!;
+      if (!this.isLowValueVmmHintLine(line)) return line;
     }
-    return this.qemuLogTail[this.qemuLogTail.length - 1] ?? null;
+    return this.vmmLogTail[this.vmmLogTail.length - 1] ?? null;
   }
 
-  private formatQemuLogHint(): string {
-    const hint = this.selectQemuHintLine();
+  private formatVmmLogHint(): string {
+    const hint = this.selectVmmHintLine();
     if (!hint) return "";
     const truncated = hint.length > 300 ? hint.slice(0, 300) + "…" : hint;
     const label = this.options.vmm;
@@ -231,7 +220,7 @@ export class SandboxServer extends EventEmitter {
   private readonly fsBridge: VirtioBridge;
   private readonly sshBridge: VirtioBridge;
   private readonly ingressBridge: VirtioBridge;
-  private readonly network: QemuNetworkBackend | null;
+  private readonly network: null = null;
   private readonly internalOptions: SandboxServerInternalOptions;
 
   private tcpStreams = new Map<number, TcpForwardStream>();
@@ -292,32 +281,23 @@ export class SandboxServer extends EventEmitter {
   private readonly startSingleflight = new AsyncSingleflight<void>();
   private readonly closeSingleflight = new AsyncSingleflight<void>();
   private started = false;
-  private qemuStdoutBuffer = "";
-  private qemuStderrBuffer = "";
-  /** recent QEMU stderr log lines, used to enrich error messages */
-  private qemuLogTail: string[] = [];
+  private vmmStdoutBuffer = "";
+  private vmmStderrBuffer = "";
+  /** recent VMM stderr log lines, used to enrich error messages */
+  private vmmLogTail: string[] = [];
   private status: SandboxState = "stopped";
   private vfsReady = false;
   private vfsReadyTimer: NodeJS.Timeout | null = null;
   private bootConfig: SandboxFsConfig | null = null;
 
   /** @internal resolved VM backend name */
-  getVmmBackend(): "qemu" | "krun" | "firecracker" {
-    return this.options.vmm;
+  getVmmBackend(): "firecracker" {
+    return "firecracker";
   }
 
   /** @internal resolved VM backend binary path */
   getVmmPath(): string {
-    if (this.options.vmm === "krun") return this.options.krunRunnerPath;
-    if (this.options.vmm === "firecracker") {
-      return this.options.firecrackerPath;
-    }
-    return this.options.qemuPath;
-  }
-
-  /** @internal resolved qemu binary path */
-  getQemuPath(): string {
-    return this.options.qemuPath;
+    return this.options.firecrackerPath;
   }
 
   /**
@@ -352,7 +332,7 @@ export class SandboxServer extends EventEmitter {
     super();
     if (Object.hasOwn(options as object, "rootDiskSnapshot")) {
       throw new Error(
-        "sandbox.rootDiskSnapshot has been removed; use VM rootfs.mode='memory' for backend-native ephemeral writes on qemu or rootfs.mode='cow' for a throwaway qcow2 overlay on disk",
+        "sandbox.rootDiskSnapshot has been removed; use VM rootfs.mode='cow' for a throwaway raw copy on disk",
       );
     }
     this.on("error", (err) => {
@@ -382,107 +362,46 @@ export class SandboxServer extends EventEmitter {
         : new SandboxVfsProvider(this.options.vfsProvider)
       : null;
 
-    const hostArch = getHostNodeArchCached();
-    const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
-
     const firecrackerConsole =
       this.options.console === "stdio" ? "console=ttyS0" : "8250.nr_uarts=0";
     const firecrackerLogLevel =
       this.options.console === "stdio" ? "" : "quiet loglevel=1";
-    const defaultAppend =
-      this.options.vmm === "krun"
-        ? "console=hvc0 root=/dev/vda rootfstype=ext4 rw init=/init"
-        : this.options.vmm === "firecracker"
-          ? [
-              firecrackerConsole,
-              firecrackerLogLevel,
-              "reboot=k",
-              "panic=1",
-              "root=/dev/vda",
-              "rootfstype=ext4",
-              this.options.rootDiskReadOnly ? "ro" : "rw",
-              "init=/init",
-              "gondolin.transport=vsock",
-              "gondolin.net=off",
-              "gondolin.debug=0",
-            ]
-              .filter(Boolean)
-              .join(" ")
-          : `console=${consoleDevice} initramfs_async=1`;
+    const defaultAppend = [
+      firecrackerConsole,
+      firecrackerLogLevel,
+      "reboot=k",
+      "panic=1",
+      "root=/dev/vda",
+      "rootfstype=ext4",
+      this.options.rootDiskReadOnly ? "ro" : "rw",
+      "init=/init",
+      "gondolin.transport=vsock",
+      "gondolin.net=off",
+      "gondolin.debug=0",
+    ]
+      .filter(Boolean)
+      .join(" ");
 
     const baseAppend = (this.options.append ?? defaultAppend).trim();
     this.baseAppend = baseAppend;
 
-    if (this.options.vmm === "krun") {
-      const krunConfig: KrunConfig = {
-        krunRunnerPath: this.options.krunRunnerPath,
-        kernelPath: this.options.kernelPath,
-        initrdPath: this.options.initrdPath,
-        rootDiskPath: this.options.rootDiskPath,
-        rootDiskFormat: this.options.rootDiskFormat,
-        rootDiskReadOnly: this.options.rootDiskReadOnly,
-        memory: this.options.memory,
-        cpus: this.options.cpus,
-        virtioSocketPath: this.options.virtioSocketPath,
-        virtioFsSocketPath: this.options.virtioFsSocketPath,
-        virtioSshSocketPath: this.options.virtioSshSocketPath,
-        virtioIngressSocketPath: this.options.virtioIngressSocketPath,
-        netSocketPath: this.options.netEnabled
-          ? this.options.netSocketPath
-          : undefined,
-        netMac: this.options.netMac,
-        append: this.baseAppend,
-        console: this.options.console,
-        autoRestart: this.options.autoRestart,
-      };
-      this.controller = new KrunController(krunConfig);
-    } else if (this.options.vmm === "firecracker") {
-      const firecrackerConfig: FirecrackerConfig = {
-        firecrackerPath: this.options.firecrackerPath,
-        apiSocketPath: this.options.firecrackerApiSocketPath,
-        vsockPath: this.options.firecrackerVsockPath,
-        guestCid: this.options.firecrackerGuestCid,
-        kernelPath: this.options.kernelPath,
-        initrdPath: this.options.initrdPath,
-        rootDiskPath: this.options.rootDiskPath,
-        rootDiskFormat: this.options.rootDiskFormat,
-        rootDiskReadOnly: this.options.rootDiskReadOnly,
-        memory: this.options.memory,
-        cpus: this.options.cpus,
-        append: this.baseAppend,
-        console: this.options.console,
-        autoRestart: this.options.autoRestart,
-      };
-      this.controller = new FirecrackerController(firecrackerConfig);
-    } else {
-      const sandboxConfig: SandboxConfig = {
-        qemuPath: this.options.qemuPath,
-        kernelPath: this.options.kernelPath,
-        initrdPath: this.options.initrdPath,
-        rootDiskPath: this.options.rootDiskPath,
-        rootDiskFormat: this.options.rootDiskFormat,
-        rootDiskVolatileMode: this.internalOptions.qemuRootDiskVolatileMode,
-        rootDiskReadOnly: this.options.rootDiskReadOnly,
-        memory: this.options.memory,
-        cpus: this.options.cpus,
-        virtioSocketPath: this.options.virtioSocketPath,
-        virtioFsSocketPath: this.options.virtioFsSocketPath,
-        virtioSshSocketPath: this.options.virtioSshSocketPath,
-        virtioIngressSocketPath: this.options.virtioIngressSocketPath,
-        netSocketPath: this.options.netEnabled
-          ? this.options.netSocketPath
-          : undefined,
-        netMac: this.options.netMac,
-        append: this.baseAppend,
-        machineType: this.options.machineType,
-        accel: this.options.accel,
-        cpu: this.options.cpu,
-        console: this.options.console,
-        qemuIdlePauseMs: this.options.qemuIdlePauseMs,
-        autoRestart: this.options.autoRestart,
-      };
-      this.controller = new SandboxController(sandboxConfig);
-    }
+    const firecrackerConfig: FirecrackerConfig = {
+      firecrackerPath: this.options.firecrackerPath,
+      apiSocketPath: this.options.firecrackerApiSocketPath,
+      vsockPath: this.options.firecrackerVsockPath,
+      guestCid: this.options.firecrackerGuestCid,
+      kernelPath: this.options.kernelPath,
+      initrdPath: this.options.initrdPath,
+      rootDiskPath: this.options.rootDiskPath,
+      rootDiskFormat: this.options.rootDiskFormat,
+      rootDiskReadOnly: this.options.rootDiskReadOnly,
+      memory: this.options.memory,
+      cpus: this.options.cpus,
+      append: this.baseAppend,
+      console: this.options.console,
+      autoRestart: this.options.autoRestart,
+    };
+    this.controller = new FirecrackerController(firecrackerConfig);
 
     // The virtio control channel can briefly accumulate a lot of data (notably
     // when streaming large stdin payloads). The default 8MiB buffer is too
@@ -521,54 +440,6 @@ export class SandboxServer extends EventEmitter {
         })
       : null;
 
-    const mac =
-      parseMac(this.options.netMac) ??
-      Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    this.network = this.options.netEnabled
-      ? new QemuNetworkBackend({
-          socketPath: this.options.netSocketPath,
-          vmMac: mac,
-          debug: this.hasDebug("net"),
-          fetch: this.options.fetch,
-          httpHooks: this.options.httpHooks,
-          dns: this.options.dns,
-          ssh: this.options.ssh,
-          tcp: this.options.tcp,
-          mitmCertDir: this.options.mitmCertDir,
-          maxHttpBodyBytes: this.options.maxHttpBodyBytes,
-          maxHttpResponseBodyBytes: this.options.maxHttpResponseBodyBytes,
-          allowWebSockets: this.options.allowWebSockets,
-        })
-      : null;
-
-    if (this.network) {
-      this.network.on("debug", (component: DebugComponent, message: string) => {
-        this.emitDebug(component, message);
-      });
-      this.network.on("error", (err) => {
-        this.emit("error", err);
-      });
-      this.network.on("guest-activity-change", (active: boolean) => {
-        if (active) {
-          const resume = this.resumeControllerForActivity();
-          if (resume) {
-            void resume
-              .catch((err: unknown) => {
-                this.emit(
-                  "error",
-                  err instanceof Error ? err : new Error(String(err)),
-                );
-              })
-              .finally(() => {
-                this.scheduleControllerIdlePause();
-              });
-          }
-        } else {
-          this.scheduleControllerIdlePause();
-        }
-      });
-    }
-
     this.controller.on("state", (state) => {
       if (state === "running") {
         this.bridge.connect();
@@ -579,7 +450,7 @@ export class SandboxServer extends EventEmitter {
       if (state === "stopped") {
         // The controller emits state="stopped" before emitting "exit".
         // Defer failing inflight requests so the exit handler can include the
-        // exit code/signal and (sanitized) QEMU stderr hint.
+        // exit code/signal and sanitized VMM stderr hint.
         queueMicrotask(() => {
           if (this.controller.getState() !== "stopped") return;
           if (this.inflight.size === 0) return;
@@ -589,15 +460,15 @@ export class SandboxServer extends EventEmitter {
 
       if (state === "starting") {
         // Clear previous run's logs so hints stay scoped to the current VM.
-        this.qemuStdoutBuffer = "";
-        this.qemuStderrBuffer = "";
-        this.qemuLogTail = [];
+        this.vmmStdoutBuffer = "";
+        this.vmmStderrBuffer = "";
+        this.vmmLogTail = [];
 
         this.vfsReady = false;
         this.clearVfsReadyTimer();
         this.status = "starting";
       } else if (state === "running") {
-        // Consider the sandbox "running" once QEMU has spawned.
+        // Consider the sandbox "running" once Firecracker has spawned.
         //
         // VFS readiness is verified separately (e.g. via `await VM.start()`).
         // Relying on the guest's one-shot vfs_ready message can lead to
@@ -619,20 +490,20 @@ export class SandboxServer extends EventEmitter {
     this.controller.on("exit", (info) => {
       // Flush any unterminated chunks so exit diagnostics have a chance to
       // include the last stderr line.
-      if (this.qemuStderrBuffer.length > 0) {
-        this.recordQemuLogLine(this.qemuStderrBuffer);
+      if (this.vmmStderrBuffer.length > 0) {
+        this.recordVmmLogLine(this.vmmStderrBuffer);
         if (this.hasDebug("protocol")) {
-          const normalized = this.normalizeQemuHintLine(this.qemuStderrBuffer);
-          if (normalized) this.emitDebug("qemu", normalized);
+          const normalized = this.normalizeVmmHintLine(this.vmmStderrBuffer);
+          if (normalized) this.emitDebug("vmm", normalized);
         }
-        this.qemuStderrBuffer = "";
+        this.vmmStderrBuffer = "";
       }
-      if (this.qemuStdoutBuffer.length > 0) {
+      if (this.vmmStdoutBuffer.length > 0) {
         if (this.hasDebug("protocol")) {
-          const normalized = this.normalizeQemuHintLine(this.qemuStdoutBuffer);
-          if (normalized) this.emitDebug("qemu", `stdout: ${normalized}`);
+          const normalized = this.normalizeVmmHintLine(this.vmmStdoutBuffer);
+          if (normalized) this.emitDebug("vmm", `stdout: ${normalized}`);
         }
-        this.qemuStdoutBuffer = "";
+        this.vmmStdoutBuffer = "";
       }
 
       const detail =
@@ -642,7 +513,7 @@ export class SandboxServer extends EventEmitter {
             ? `signal=${info.signal}`
             : "";
       const base = detail ? `sandbox exited (${detail})` : "sandbox exited";
-      this.failInflight("sandbox_stopped", base + this.formatQemuLogHint());
+      this.failInflight("sandbox_stopped", base + this.formatVmmLogHint());
       this.emit("exit", info);
     });
 
@@ -673,7 +544,7 @@ export class SandboxServer extends EventEmitter {
         }
 
         let buffer =
-          stream === "stdout" ? this.qemuStdoutBuffer : this.qemuStderrBuffer;
+          stream === "stdout" ? this.vmmStdoutBuffer : this.vmmStderrBuffer;
         buffer += chunk;
 
         let newlineIndex = buffer.indexOf("\n");
@@ -684,14 +555,14 @@ export class SandboxServer extends EventEmitter {
           // Only use stderr for client-visible error hints to avoid leaking
           // untrusted guest console output from -serial stdio.
           if (stream === "stderr") {
-            this.recordQemuLogLine(line);
+            this.recordVmmLogLine(line);
           }
 
           if (this.hasDebug("protocol")) {
-            const normalized = this.normalizeQemuHintLine(line);
+            const normalized = this.normalizeVmmHintLine(line);
             if (normalized) {
               this.emitDebug(
-                "qemu",
+                "vmm",
                 stream === "stderr" ? normalized : `stdout: ${normalized}`,
               );
             }
@@ -701,9 +572,9 @@ export class SandboxServer extends EventEmitter {
         }
 
         if (stream === "stdout") {
-          this.qemuStdoutBuffer = buffer;
+          this.vmmStdoutBuffer = buffer;
         } else {
-          this.qemuStderrBuffer = buffer;
+          this.vmmStderrBuffer = buffer;
         }
       },
     );
@@ -1091,7 +962,7 @@ export class SandboxServer extends EventEmitter {
       this.emit("error", new Error(`[virtio] bridge error: ${message}`));
       this.failInflight(
         "protocol_error",
-        `virtio bridge error: ${message}` + this.formatQemuLogHint(),
+        `virtio bridge error: ${message}` + this.formatVmmLogHint(),
       );
     };
 

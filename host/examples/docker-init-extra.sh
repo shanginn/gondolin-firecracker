@@ -13,33 +13,9 @@ export PATH=/usr/local/bin:$PATH
 # Enable IPv4 forwarding for Docker bridge networking
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
-# Ensure containers trust the gondolin MITM CA bundle by default.
-# We wrap `docker run` to mount the guest CA bundle and set SSL_CERT_FILE.
-if [ -x /usr/bin/docker ]; then
-  cat > /usr/local/bin/docker <<'EOF'
-#!/bin/sh
-set -eu
-
-DOCKER_BIN="/usr/bin/docker"
-CA_BUNDLE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
-
-if [ "$#" -gt 0 ] && [ "$1" = "run" ] && [ -r "$CA_BUNDLE" ]; then
-  shift
-  exec "$DOCKER_BIN" run \
-    -e "SSL_CERT_FILE=$CA_BUNDLE" \
-    -v "$CA_BUNDLE:$CA_BUNDLE:ro" \
-    "$@"
-fi
-
-exec "$DOCKER_BIN" "$@"
-EOF
-  chmod +x /usr/local/bin/docker
-  log "[init] installed docker wrapper for CA trust"
-fi
-
 # Start dockerd with sandbox-friendly defaults:
 # - vfs storage driver (overlayfs is often unavailable in tiny VMs)
-# - keep bridge/NAT enabled so containers can reach the network
+# - keep Docker's bridge enabled for container-to-container traffic inside the guest
 if command -v dockerd > /dev/null 2>&1; then
   dockerd \
     --host=unix:///var/run/docker.sock \

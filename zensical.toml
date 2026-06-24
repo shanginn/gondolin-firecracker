@@ -58,7 +58,6 @@ nav = [
         {"Architecture Overview" = "architecture.md"},
         {"Security Design" = "security.md"},
         {"Network Stack" = "network.md"},
-        {"QEMU Backend" = "qemu.md"},
         {"Limitations" = "limitations.md"},
     ]},
 ]

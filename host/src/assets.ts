@@ -264,8 +264,6 @@ export type AssetBuildIdInput = {
     kernel: string;
     initramfs: string;
     rootfs: string;
-    krunKernel?: string;
-    krunInitrd?: string;
     firecrackerKernel?: string;
     firecrackerInitrd?: string;
   };
@@ -288,12 +286,6 @@ export function computeAssetBuildId(input: AssetBuildIdInput): string {
     `rootfs=${input.checksums.rootfs}`,
   ];
 
-  if (input.checksums.krunKernel !== undefined) {
-    parts.push(`krunKernel=${input.checksums.krunKernel}`);
-  }
-  if (input.checksums.krunInitrd !== undefined) {
-    parts.push(`krunInitrd=${input.checksums.krunInitrd}`);
-  }
   if (input.checksums.firecrackerKernel !== undefined) {
     parts.push(`firecrackerKernel=${input.checksums.firecrackerKernel}`);
   }
@@ -352,10 +344,6 @@ export interface AssetManifest {
     initramfs: string;
     /** rootfs filename */
     rootfs: string;
-    /** krun-compatible kernel image filename */
-    krunKernel?: string;
-    /** krun initrd image filename */
-    krunInitrd?: string;
     /** Firecracker-compatible kernel image filename */
     firecrackerKernel?: string;
     /** Firecracker initrd image filename */
@@ -370,10 +358,6 @@ export interface AssetManifest {
     initramfs: string;
     /** rootfs checksum */
     rootfs: string;
-    /** krun-compatible kernel checksum */
-    krunKernel?: string;
-    /** krun initrd checksum */
-    krunInitrd?: string;
     /** Firecracker-compatible kernel checksum */
     firecrackerKernel?: string;
     /** Firecracker initrd checksum */
@@ -452,20 +436,6 @@ export function loadGuestAssets(assetDir: string): GuestAssets {
     missing.push(assetFiles.rootfs);
   }
 
-  if (assetFiles.krunKernel) {
-    const krunKernelPath = path.join(resolvedDir, assetFiles.krunKernel);
-    if (!fs.existsSync(krunKernelPath)) {
-      missing.push(assetFiles.krunKernel);
-    }
-  }
-
-  if (assetFiles.krunInitrd) {
-    const krunInitrdPath = path.join(resolvedDir, assetFiles.krunInitrd);
-    if (!fs.existsSync(krunInitrdPath)) {
-      missing.push(assetFiles.krunInitrd);
-    }
-  }
-
   if (assetFiles.firecrackerKernel) {
     const firecrackerKernelPath = path.join(
       resolvedDir,
@@ -517,20 +487,6 @@ function assetsExist(dir: string): boolean {
     fs.existsSync(path.join(dir, assetFiles.rootfs));
 
   if (!required) {
-    return false;
-  }
-
-  if (
-    assetFiles.krunKernel &&
-    !fs.existsSync(path.join(dir, assetFiles.krunKernel))
-  ) {
-    return false;
-  }
-
-  if (
-    assetFiles.krunInitrd &&
-    !fs.existsSync(path.join(dir, assetFiles.krunInitrd))
-  ) {
     return false;
   }
 

@@ -2,9 +2,6 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
-import { execFileSync } from "child_process";
-import { createRequire } from "module";
-
 import { getHostNodeArchCached } from "../host/arch.ts";
 import {
   debugFlagsToArray,
@@ -21,19 +18,9 @@ import {
   type GuestAssets,
 } from "../assets.ts";
 import { ensureImageSelector, resolveImageSelector } from "../images.ts";
-import {
-  DEFAULT_MAX_HTTP_BODY_BYTES,
-  DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
-  type DnsOptions,
-  type HttpFetch,
-  type HttpHooks,
-} from "../qemu/net.ts";
-import { inferDiskFormatFromPath } from "../qemu/img.ts";
-import type { SshOptions } from "../qemu/ssh.ts";
-import type { TcpOptions } from "../qemu/tcp.ts";
+import type { HttpFetch } from "../http/contracts.ts";
+import { assertRawDiskImage } from "../disk/image.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
-
-const require = createRequire(import.meta.url);
 
 /**
  * Path or selector for guest image assets
@@ -46,15 +33,12 @@ const require = createRequire(import.meta.url);
 export type ImagePath = string | GuestAssets;
 
 /** vm backend implementation */
-export type SandboxVmm = "qemu" | "krun" | "firecracker";
+export type SandboxVmm = "firecracker";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_QUEUED_EXECS = 64;
-const DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS = 30_000;
-const DEFAULT_VM_MEMORY = "1G";
-const DEFAULT_VM_CPUS = 2;
 const DEFAULT_FIRECRACKER_MEMORY = "256M";
 const DEFAULT_FIRECRACKER_CPUS = 1;
 
@@ -66,12 +50,6 @@ const DEFAULT_FIRECRACKER_CPUS = 1;
  * - an object with explicit asset paths
  */
 export type SandboxServerOptions = {
-  /** vm backend implementation */
-  vmm?: SandboxVmm;
-  /** qemu binary path */
-  qemuPath?: string;
-  /** krun runner binary path */
-  krunRunnerPath?: string;
   /** firecracker binary path */
   firecrackerPath?: string;
   /** firecracker API socket path */
@@ -82,28 +60,23 @@ export type SandboxServerOptions = {
   firecrackerGuestCid?: number;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
-  /** vm memory size (qemu syntax, e.g. "1G") */
+  /** vm memory size (e.g. "1G") */
   memory?: string;
   /** vm cpu count */
   cpus?: number;
-  /** virtio-serial control socket path */
+  /** vsock control socket path */
   virtioSocketPath?: string;
-  /** virtiofs/vfs socket path */
+  /** vsock vfs socket path */
   virtioFsSocketPath?: string;
-  /** virtio-serial ssh socket path */
+  /** vsock ssh socket path */
   virtioSshSocketPath?: string;
 
-  /** virtio-serial ingress socket path */
+  /** vsock ingress socket path */
   virtioIngressSocketPath?: string;
-  /** qemu net socket path */
-  netSocketPath?: string;
   /** guest mac address */
   netMac?: string;
   /** whether to enable networking */
   netEnabled?: boolean;
-  /** whether to allow WebSocket upgrades for guest egress (default: true) */
-  allowWebSockets?: boolean;
-
   /**
    * Root disk image path (attached as `/dev/vda`)
    *
@@ -112,9 +85,9 @@ export type SandboxServerOptions = {
   rootDiskPath?: string;
 
   /** root disk image format */
-  rootDiskFormat?: "raw" | "qcow2";
+  rootDiskFormat?: "raw";
 
-  /** qemu readonly mode for the root disk */
+  /** readonly mode for the root disk */
   rootDiskReadOnly?: boolean;
 
   /**
@@ -135,18 +108,10 @@ export type SandboxServerOptions = {
    * If omitted, defaults to `GONDOLIN_DEBUG`.
    */
   debug?: DebugConfig;
-  /** qemu machine type */
-  machineType?: string;
-  /** qemu acceleration backend (e.g. kvm, hvf) */
-  accel?: string;
-  /** qemu cpu model */
-  cpu?: string;
   /** guest console mode */
   console?: "stdio" | "none";
   /** whether to restart the vm automatically on exit */
   autoRestart?: boolean;
-  /** qemu idle pause timeout in `ms` (`0` disables) */
-  qemuIdlePauseMs?: number;
   /** kernel cmdline append string */
   append?: string;
 
@@ -160,24 +125,6 @@ export type SandboxServerOptions = {
   maxQueuedExecs?: number;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
-  /** http interception hooks */
-  httpHooks?: HttpHooks;
-
-  /** dns configuration */
-  dns?: DnsOptions;
-
-  /** ssh egress configuration */
-  ssh?: SshOptions;
-
-  /** explicit host-mapped tcp egress configuration */
-  tcp?: TcpOptions;
-
-  /** max intercepted http request body size in `bytes` */
-  maxHttpBodyBytes?: number;
-  /** max buffered upstream http response body size in `bytes` */
-  maxHttpResponseBodyBytes?: number;
-  /** mitm ca directory path */
-  mitmCertDir?: string;
   /** vfs provider to expose under the fuse mount */
   vfsProvider?: VirtualProvider;
 };
@@ -185,10 +132,6 @@ export type SandboxServerOptions = {
 export type ResolvedSandboxServerOptions = {
   /** vm backend implementation */
   vmm: SandboxVmm;
-  /** qemu binary path */
-  qemuPath: string;
-  /** krun runner binary path */
-  krunRunnerPath: string;
   /** firecracker binary path */
   firecrackerPath: string;
   /** firecracker API socket path */
@@ -207,46 +150,33 @@ export type ResolvedSandboxServerOptions = {
   /** root disk image path (attached as `/dev/vda`) */
   rootDiskPath: string;
   /** root disk image format */
-  rootDiskFormat: "raw" | "qcow2";
-  /** qemu readonly mode for the root disk */
+  rootDiskFormat: "raw";
+  /** readonly mode for the root disk */
   rootDiskReadOnly: boolean;
 
-  /** vm memory size (qemu syntax, e.g. "1G") */
+  /** vm memory size (e.g. "256M") */
   memory: string;
   /** vm cpu count */
   cpus: number;
-  /** virtio-serial control socket path */
+  /** vsock control socket path */
   virtioSocketPath: string;
-  /** virtiofs/vfs socket path */
+  /** vsock vfs socket path */
   virtioFsSocketPath: string;
-  /** virtio-serial ssh socket path */
+  /** vsock ssh socket path */
   virtioSshSocketPath: string;
 
-  /** virtio-serial ingress socket path */
+  /** vsock ingress socket path */
   virtioIngressSocketPath: string;
-  /** qemu net socket path */
-  netSocketPath: string;
   /** guest mac address */
   netMac: string;
   /** whether networking is enabled */
   netEnabled: boolean;
-  /** whether to allow WebSocket upgrades for guest egress */
-  allowWebSockets: boolean;
-
   /** enabled debug components */
   debug: DebugFlag[];
-  /** qemu machine type */
-  machineType?: string;
-  /** qemu acceleration backend (e.g. kvm, hvf) */
-  accel?: string;
-  /** qemu cpu model */
-  cpu?: string;
   /** guest console mode */
   console?: "stdio" | "none";
   /** whether to restart the vm automatically on exit */
   autoRestart: boolean;
-  /** qemu idle pause timeout in `ms` (`undefined` disables) */
-  qemuIdlePauseMs?: number;
   /** kernel cmdline append string */
   append?: string;
 
@@ -258,26 +188,8 @@ export type ResolvedSandboxServerOptions = {
   maxTotalQueuedStdinBytes: number;
   /** max total exec pressure (running + queued-to-start) */
   maxQueuedExecs: number;
-  /** max intercepted http request body size in `bytes` */
-  maxHttpBodyBytes: number;
-  /** max buffered upstream http response body size in `bytes` */
-  maxHttpResponseBodyBytes: number;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
-  /** http interception hooks */
-  httpHooks?: HttpHooks;
-
-  /** dns configuration */
-  dns?: DnsOptions;
-
-  /** ssh egress configuration */
-  ssh?: SshOptions;
-
-  /** explicit host-mapped tcp egress configuration */
-  tcp?: TcpOptions;
-
-  /** mitm ca directory path */
-  mitmCertDir?: string;
   /** vfs provider to expose under the fuse mount */
   vfsProvider: VirtualProvider | null;
 };
@@ -340,19 +252,6 @@ function resolveImagePath(imagePath: ImagePath): ResolvedImagePath {
   };
 }
 
-function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
-  if (!value) return null;
-  const normalized = value.trim().toLowerCase();
-  if (
-    normalized === "qemu" ||
-    normalized === "krun" ||
-    normalized === "firecracker"
-  ) {
-    return normalized;
-  }
-  return null;
-}
-
 function normalizeArch(
   value: string | null | undefined,
 ): "arm64" | "x64" | null {
@@ -361,49 +260,6 @@ function normalizeArch(
   if (lower === "arm64" || lower === "aarch64") return "arm64";
   if (lower === "x64" || lower === "x86_64" || lower === "amd64") return "x64";
   return null;
-}
-
-function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
-  const lower = qemuPath.toLowerCase();
-  if (lower.includes("aarch64") || lower.includes("arm64")) return "arm64";
-  if (
-    lower.includes("x86_64") ||
-    lower.includes("x64") ||
-    lower.includes("amd64")
-  )
-    return "x64";
-  return null;
-}
-
-function normalizeQemuIdlePauseMs(value: number): number | undefined {
-  if (!Number.isFinite(value) || value < 0) {
-    throw new Error(`invalid qemu idle pause timeout: ${value}`);
-  }
-  const ms = Math.trunc(value);
-  return ms > 0 ? ms : undefined;
-}
-
-function resolveQemuIdlePauseMs(
-  options: SandboxServerOptions,
-  vmm: SandboxVmm,
-): number | undefined {
-  if (options.qemuIdlePauseMs !== undefined) {
-    return normalizeQemuIdlePauseMs(options.qemuIdlePauseMs);
-  }
-
-  if (vmm !== "qemu" || process.platform !== "darwin") {
-    return undefined;
-  }
-
-  const accelName = (options.accel ?? "")
-    .split(",", 1)[0]!
-    .trim()
-    .toLowerCase();
-  if (accelName && accelName !== "hvf") {
-    return undefined;
-  }
-
-  return DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS;
 }
 
 function parseMemoryToMiB(value: string, backend: string): number {
@@ -436,190 +292,6 @@ function validateCpuCount(value: number, backend: string): void {
   if (!Number.isInteger(value) || value < 1 || value > 255) {
     throw new Error(`invalid vm cpu count for ${backend} backend: ${value}`);
   }
-}
-
-function resolveLocalKrunRunnerPath(): string | null {
-  const directCandidates = [
-    path.resolve(
-      process.cwd(),
-      "host",
-      "krun-runner",
-      "zig-out",
-      "bin",
-      "gondolin-krun-runner",
-    ),
-    path.resolve(
-      process.cwd(),
-      "krun-runner",
-      "zig-out",
-      "bin",
-      "gondolin-krun-runner",
-    ),
-  ];
-
-  for (const candidate of directCandidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  const starts = [process.cwd(), import.meta.dirname];
-  const visited = new Set<string>();
-
-  for (const start of starts) {
-    let dir = path.resolve(start);
-
-    for (let i = 0; i < 10; i += 1) {
-      const candidate = path.join(
-        dir,
-        "krun-runner",
-        "zig-out",
-        "bin",
-        "gondolin-krun-runner",
-      );
-      if (!visited.has(candidate)) {
-        visited.add(candidate);
-        if (fs.existsSync(candidate)) {
-          return candidate;
-        }
-      }
-
-      const hostCandidate = path.join(
-        dir,
-        "host",
-        "krun-runner",
-        "zig-out",
-        "bin",
-        "gondolin-krun-runner",
-      );
-      if (!visited.has(hostCandidate)) {
-        visited.add(hostCandidate);
-        if (fs.existsSync(hostCandidate)) {
-          return hostCandidate;
-        }
-      }
-
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  }
-
-  return null;
-}
-
-type ResolvePackagedKrunRunnerPathDeps = {
-  platform?: NodeJS.Platform;
-  arch?: NodeJS.Architecture;
-  resolvePackageJson?: (specifier: string) => string;
-  readFileSync?: typeof fs.readFileSync;
-  existsSync?: typeof fs.existsSync;
-  probeRunner?: (candidatePath: string) => boolean;
-};
-
-function probeKrunRunnerCandidate(candidatePath: string): boolean {
-  try {
-    execFileSync(candidatePath, ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function resolvePackagedKrunRunnerPath(
-  deps: ResolvePackagedKrunRunnerPathDeps = {},
-): string | null {
-  const platform = deps.platform ?? process.platform;
-  const arch = deps.arch ?? process.arch;
-
-  if (
-    (platform !== "darwin" && platform !== "linux") ||
-    (arch !== "arm64" && arch !== "x64")
-  ) {
-    return null;
-  }
-
-  const packageName = `@earendil-works/gondolin-krun-runner-${platform}-${arch}`;
-  const resolvePackageJson =
-    deps.resolvePackageJson ??
-    ((specifier: string) => require.resolve(specifier));
-  const readFileSync = deps.readFileSync ?? fs.readFileSync;
-  const existsSync = deps.existsSync ?? fs.existsSync;
-  const probeRunner = deps.probeRunner ?? probeKrunRunnerCandidate;
-
-  try {
-    const packageJsonPath = resolvePackageJson(`${packageName}/package.json`);
-    const packageDir = path.dirname(packageJsonPath);
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
-      bin?: string | Record<string, string>;
-    };
-
-    const binCandidates: string[] = [];
-    if (typeof packageJson.bin === "string") {
-      binCandidates.push(packageJson.bin);
-    } else if (packageJson.bin && typeof packageJson.bin === "object") {
-      const preferred = packageJson.bin["gondolin-krun-runner"];
-      if (typeof preferred === "string") {
-        binCandidates.push(preferred);
-      }
-      for (const value of Object.values(packageJson.bin)) {
-        if (typeof value === "string") {
-          binCandidates.push(value);
-        }
-      }
-    }
-
-    binCandidates.push("bin/gondolin-krun-runner", "gondolin-krun-runner");
-
-    const seen = new Set<string>();
-    for (const rel of binCandidates) {
-      const candidate = path.resolve(packageDir, rel);
-      if (seen.has(candidate) || !existsSync(candidate)) {
-        continue;
-      }
-      seen.add(candidate);
-      if (probeRunner(candidate)) {
-        return candidate;
-      }
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-type ResolveDefaultKrunRunnerPathDeps = {
-  envPath?: string;
-  resolveLocalPath?: () => string | null;
-  resolvePackagedPath?: () => string | null;
-};
-
-function resolveDefaultKrunRunnerPath(
-  deps: ResolveDefaultKrunRunnerPathDeps = {},
-): string {
-  const envValue = Object.prototype.hasOwnProperty.call(deps, "envPath")
-    ? deps.envPath
-    : process.env.GONDOLIN_KRUN_RUNNER;
-  const envPath = envValue?.trim();
-  if (envPath) {
-    return envPath;
-  }
-
-  const resolveLocalPath = deps.resolveLocalPath ?? resolveLocalKrunRunnerPath;
-  const local = resolveLocalPath();
-  if (local) {
-    return local;
-  }
-
-  const resolvePackagedPath =
-    deps.resolvePackagedPath ?? resolvePackagedKrunRunnerPath;
-  const packaged = resolvePackagedPath();
-  if (packaged) {
-    return packaged;
-  }
-
-  return "gondolin-krun-runner";
 }
 
 function resolveDefaultFirecrackerPath(): string {
@@ -679,34 +351,12 @@ function validateFirecrackerSocketPaths(
   }
 }
 
-type KrunKernelOverride = {
-  /** replacement kernel image path */
-  kernelPath: string;
-  /** replacement initrd path */
-  initrdPath: string;
-};
-
 type FirecrackerKernelOverride = {
   /** replacement kernel image path */
   kernelPath: string;
   /** replacement initrd path */
   initrdPath: string;
 };
-
-function getDefaultKrunInitrdPath(): string {
-  return path.join(os.tmpdir(), "gondolin-krun-empty-initrd");
-}
-
-function ensureEmptyInitrdFile(initrdPath: string): boolean {
-  try {
-    if (fs.existsSync(initrdPath)) return true;
-    fs.mkdirSync(path.dirname(initrdPath), { recursive: true });
-    fs.writeFileSync(initrdPath, "");
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function resolveManifestAssetPath(
   imageDir: string,
@@ -730,58 +380,6 @@ function resolveManifestAssetPath(
   }
 
   return resolved;
-}
-
-function resolveKrunInitrdPath(
-  imageManifest: ReturnType<typeof loadAssetManifest>,
-  imageDir: string,
-): string {
-  if (imageManifest?.assets?.krunInitrd) {
-    const initrdPath = resolveManifestAssetPath(
-      imageDir,
-      imageManifest.assets.krunInitrd,
-      "manifest.assets.krunInitrd",
-    );
-    if (!fs.existsSync(initrdPath)) {
-      throw new Error(
-        `manifest.assets.krunInitrd points to missing file: ${imageManifest.assets.krunInitrd}`,
-      );
-    }
-    return initrdPath;
-  }
-
-  const initrdPath = getDefaultKrunInitrdPath();
-  if (!ensureEmptyInitrdFile(initrdPath) && !fs.existsSync(initrdPath)) {
-    throw new Error(`failed to create default krun initrd at ${initrdPath}`);
-  }
-
-  return initrdPath;
-}
-
-function resolveKrunKernelOverride(
-  imageManifest: ReturnType<typeof loadAssetManifest>,
-  imageDir: string | null,
-): KrunKernelOverride | null {
-  if (!imageDir || !imageManifest?.assets?.krunKernel) {
-    return null;
-  }
-
-  const kernelPath = resolveManifestAssetPath(
-    imageDir,
-    imageManifest.assets.krunKernel,
-    "manifest.assets.krunKernel",
-  );
-
-  if (!fs.existsSync(kernelPath)) {
-    throw new Error(
-      `manifest.assets.krunKernel points to missing file: ${imageManifest.assets.krunKernel}`,
-    );
-  }
-
-  return {
-    kernelPath,
-    initrdPath: resolveKrunInitrdPath(imageManifest, imageDir),
-  };
 }
 
 function resolveFirecrackerKernelOverride(
@@ -978,8 +576,6 @@ function detectGuestArchFromManifest(assets: Partial<GuestAssets>): {
  * @param assets Optional pre-resolved guest assets (from ensureGuestAssets)
  */
 type ResolveSandboxServerOptionsDeps = {
-  /** test-only override for default krun runner resolution */
-  resolveDefaultKrunRunnerPath?: () => string;
   /** test-only host platform override */
   platform?: NodeJS.Platform;
 };
@@ -991,7 +587,7 @@ export function resolveSandboxServerOptions(
 ): ResolvedSandboxServerOptions {
   if (Object.hasOwn(options as object, "rootDiskSnapshot")) {
     throw new Error(
-      "sandbox.rootDiskSnapshot has been removed; use VM rootfs.mode='memory' for backend-native ephemeral writes on qemu or rootfs.mode='cow' for a throwaway qcow2 overlay on disk",
+      "sandbox.rootDiskSnapshot has been removed; use VM rootfs.mode='cow' for a throwaway raw root disk copy",
     );
   }
   const platform = deps.platform ?? process.platform;
@@ -1021,26 +617,6 @@ export function resolveSandboxServerOptions(
   const rootfsPath = resolvedAssets.rootfsPath;
 
   const tmpDir = resolveRuntimeDir();
-  const defaultVirtio = path.resolve(
-    tmpDir,
-    `gondolin-virtio-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultVirtioFs = path.resolve(
-    tmpDir,
-    `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultVirtioSsh = path.resolve(
-    tmpDir,
-    `gondolin-virtio-ssh-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultVirtioIngress = path.resolve(
-    tmpDir,
-    `gondolin-virtio-ingress-${randomUUID().slice(0, 8)}.sock`,
-  );
-  const defaultNetSock = path.resolve(
-    tmpDir,
-    `gondolin-net-${randomUUID().slice(0, 8)}.sock`,
-  );
   const defaultFirecrackerApiSocket = path.resolve(
     tmpDir,
     `gondolin-firecracker-api-${randomUUID().slice(0, 8)}.sock`,
@@ -1049,156 +625,88 @@ export function resolveSandboxServerOptions(
     tmpDir,
     `gondolin-firecracker-vsock-${randomUUID().slice(0, 8)}.sock`,
   );
-  const defaultNetMac = "02:00:00:00:00:01";
-
   const hostArch = getHostNodeArchCached();
-  const hostArchNormalized = normalizeArch(hostArch);
-  const defaultQemuForHostArch =
-    hostArchNormalized === "arm64"
-      ? "qemu-system-aarch64"
-      : "qemu-system-x86_64";
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
   const debug = debugFlagsToArray(resolvedDebugFlags);
 
-  const explicitVmm = normalizeVmm(options.vmm ?? null);
-  if (options.vmm !== undefined && !explicitVmm) {
-    throw new Error(
-      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu", "krun", or "firecracker")`,
-    );
-  }
-  const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
-  const vmm = explicitVmm ?? envVmm ?? "qemu";
-  const defaultMemory =
-    vmm === "firecracker" ? DEFAULT_FIRECRACKER_MEMORY : DEFAULT_VM_MEMORY;
-  const defaultCpus =
-    vmm === "firecracker" ? DEFAULT_FIRECRACKER_CPUS : DEFAULT_VM_CPUS;
-  const memory = options.memory ?? defaultMemory;
-  const cpus = options.cpus ?? defaultCpus;
-  const envCpu = process.env.GONDOLIN_CPU?.trim() || undefined;
-  const cpu = vmm === "qemu" ? (options.cpu ?? envCpu) : options.cpu;
-  let qemuPath = options.qemuPath ?? defaultQemuForHostArch;
-  const resolveDefaultKrunRunnerPathFn =
-    deps.resolveDefaultKrunRunnerPath ?? resolveDefaultKrunRunnerPath;
-  const krunRunnerPath =
-    options.krunRunnerPath ??
-    (vmm === "krun"
-      ? resolveDefaultKrunRunnerPathFn()
-      : "gondolin-krun-runner");
-  const firecrackerPath =
-    options.firecrackerPath ??
-    (vmm === "firecracker" ? resolveDefaultFirecrackerPath() : "firecracker");
+  const vmm: SandboxVmm = "firecracker";
+  const memory = options.memory ?? DEFAULT_FIRECRACKER_MEMORY;
+  const cpus = options.cpus ?? DEFAULT_FIRECRACKER_CPUS;
+  const firecrackerPath = options.firecrackerPath ?? resolveDefaultFirecrackerPath();
   const firecrackerApiSocketPath =
     options.firecrackerApiSocketPath ?? defaultFirecrackerApiSocket;
   const firecrackerVsockPath =
     options.firecrackerVsockPath ?? defaultFirecrackerVsock;
   const firecrackerGuestCid = options.firecrackerGuestCid ?? 3;
 
-  if (vmm === "krun") {
-    const unsupported: string[] = [];
-    if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
-    if (options.firecrackerPath !== undefined)
-      unsupported.push("sandbox.firecrackerPath");
-    if (options.firecrackerApiSocketPath !== undefined)
-      unsupported.push("sandbox.firecrackerApiSocketPath");
-    if (options.firecrackerVsockPath !== undefined)
-      unsupported.push("sandbox.firecrackerVsockPath");
-    if (options.firecrackerGuestCid !== undefined)
-      unsupported.push("sandbox.firecrackerGuestCid");
-    if (options.machineType !== undefined)
-      unsupported.push("sandbox.machineType");
-    if (options.accel !== undefined) unsupported.push("sandbox.accel");
-    if (options.cpu !== undefined) unsupported.push("sandbox.cpu");
-    if (options.qemuIdlePauseMs !== undefined)
-      unsupported.push("sandbox.qemuIdlePauseMs");
+  const supportedKeys = new Set([
+    "firecrackerPath",
+    "firecrackerApiSocketPath",
+    "firecrackerVsockPath",
+    "firecrackerGuestCid",
+    "imagePath",
+    "memory",
+    "cpus",
+    "rootDiskPath",
+    "rootDiskFormat",
+    "rootDiskReadOnly",
+    "rootDiskDeleteOnClose",
+    "netEnabled",
+    "debug",
+    "console",
+    "autoRestart",
+    "append",
+    "maxStdinBytes",
+    "maxQueuedStdinBytes",
+    "maxTotalQueuedStdinBytes",
+    "maxQueuedExecs",
+    "fetch",
+    "vfsProvider",
+  ]);
+  const unsupported = Object.keys(options)
+    .filter((key) => !supportedKeys.has(key))
+    .map((key) => `sandbox.${key}`);
 
-    if (unsupported.length > 0) {
-      throw new Error(
-        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=krun: ${unsupported.join(", ")}. ` +
-          "These options are not supported with vmm=krun.",
-      );
-    }
-  } else if (vmm === "firecracker") {
-    const unsupported: string[] = [];
-    if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
-    if (options.krunRunnerPath !== undefined)
-      unsupported.push("sandbox.krunRunnerPath");
-    if (options.machineType !== undefined)
-      unsupported.push("sandbox.machineType");
-    if (options.accel !== undefined) unsupported.push("sandbox.accel");
-    if (options.cpu !== undefined) unsupported.push("sandbox.cpu");
-    if (options.qemuIdlePauseMs !== undefined)
-      unsupported.push("sandbox.qemuIdlePauseMs");
-    if (options.netSocketPath !== undefined)
-      unsupported.push("sandbox.netSocketPath");
-    if (options.netMac !== undefined) unsupported.push("sandbox.netMac");
-    if (options.virtioSocketPath !== undefined)
-      unsupported.push("sandbox.virtioSocketPath");
-    if (options.virtioFsSocketPath !== undefined)
-      unsupported.push("sandbox.virtioFsSocketPath");
-    if (options.virtioSshSocketPath !== undefined)
-      unsupported.push("sandbox.virtioSshSocketPath");
-    if (options.virtioIngressSocketPath !== undefined)
-      unsupported.push("sandbox.virtioIngressSocketPath");
-    if (options.httpHooks !== undefined) unsupported.push("sandbox.httpHooks");
-    if (options.dns !== undefined) unsupported.push("sandbox.dns");
-    if (options.ssh !== undefined) unsupported.push("sandbox.ssh");
-    if (options.tcp !== undefined) unsupported.push("sandbox.tcp");
-    if (options.mitmCertDir !== undefined) unsupported.push("sandbox.mitmCertDir");
-    if (options.maxHttpBodyBytes !== undefined)
-      unsupported.push("sandbox.maxHttpBodyBytes");
-    if (options.maxHttpResponseBodyBytes !== undefined)
-      unsupported.push("sandbox.maxHttpResponseBodyBytes");
-    if (options.allowWebSockets !== undefined)
-      unsupported.push("sandbox.allowWebSockets");
-
-    if (unsupported.length > 0) {
-      throw new Error(
-        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=firecracker: ${unsupported.join(", ")}.`,
-      );
-    }
-
-    if (platform !== "linux") {
-      throw new Error(
-        "Firecracker backend requires Linux/KVM and is not supported on this host platform.",
-      );
-    }
-
-    if (!Number.isInteger(firecrackerGuestCid) || firecrackerGuestCid < 3) {
-      throw new Error(
-        `invalid sandbox.firecrackerGuestCid: ${String(firecrackerGuestCid)} (expected integer >= 3)`,
-      );
-    }
-
-    if (options.netEnabled === true) {
-      throw new Error(
-        "Firecracker backend does not yet support Gondolin mediated networking; set sandbox.netEnabled=false.",
-      );
-    }
-
-    validateFirecrackerSocketPaths(
-      firecrackerApiSocketPath,
-      firecrackerVsockPath,
-      platform,
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Unsupported Firecracker option${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}.`,
     );
-    parseMemoryToMiB(memory, "Firecracker");
-    validateCpuCount(cpus, "Firecracker");
   }
+
+  if (platform !== "linux") {
+    throw new Error(
+      "Firecracker backend requires Linux/KVM and is not supported on this host platform.",
+    );
+  }
+
+  if (!Number.isInteger(firecrackerGuestCid) || firecrackerGuestCid < 3) {
+    throw new Error(
+      `invalid sandbox.firecrackerGuestCid: ${String(firecrackerGuestCid)} (expected integer >= 3)`,
+    );
+  }
+
+  if (options.netEnabled === true) {
+    throw new Error(
+      "Firecracker mediated networking is not implemented; leave sandbox.netEnabled unset or false.",
+    );
+  }
+
+  validateFirecrackerSocketPaths(
+    firecrackerApiSocketPath,
+    firecrackerVsockPath,
+    platform,
+  );
+  parseMemoryToMiB(memory, "Firecracker");
+  validateCpuCount(cpus, "Firecracker");
 
   const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
 
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
-  let krunKernelOverride: KrunKernelOverride | null = null;
   let firecrackerKernelOverride: FirecrackerKernelOverride | null = null;
 
-  if (vmm === "krun" && !explicitImageObject) {
-    krunKernelOverride = resolveKrunKernelOverride(imageManifest, imageDir);
-    if (krunKernelOverride) {
-      kernelPath = krunKernelOverride.kernelPath;
-      initrdPath = krunKernelOverride.initrdPath;
-    }
-  } else if (vmm === "firecracker" && !explicitImageObject) {
+  if (!explicitImageObject) {
     firecrackerKernelOverride = resolveFirecrackerKernelOverride(
       imageManifest,
       imageDir,
@@ -1227,65 +735,19 @@ export function resolveSandboxServerOptions(
     rootfsPath,
   });
 
-  if (
-    vmm === "qemu" &&
-    options.qemuPath === undefined &&
-    guestFromManifest !== null
-  ) {
-    qemuPath =
-      guestFromManifest.arch === "arm64"
-        ? "qemu-system-aarch64"
-        : "qemu-system-x86_64";
-  }
-
-  if (vmm === "qemu") {
-    const qemuArch = detectQemuArch(qemuPath);
-    if (guestFromManifest && qemuArch && guestFromManifest.arch !== qemuArch) {
-      const host = hostArchNormalized ?? hostArch;
-      throw new Error(
-        "Guest image architecture mismatch.\n" +
-          `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
-          `  qemu binary:  ${qemuArch} (${qemuPath})\n` +
-          `  host arch:    ${host}\n\n` +
-          "Fix: use a matching qemuPath (e.g. qemu-system-aarch64 vs qemu-system-x86_64) " +
-          "or rebuild/download guest assets for the correct architecture.",
-      );
-    }
-  } else if (vmm === "krun" && guestFromManifest) {
-    const host = normalizeArch(hostArch);
-    if (host && guestFromManifest.arch !== host) {
-      throw new Error(
-        "Guest image architecture mismatch for libkrun backend.\n" +
-          `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
-          `  host arch:    ${host}\n\n` +
-        "Fix: select a guest image that matches the host architecture when using vmm=krun.",
-      );
-    }
-  } else if (vmm === "firecracker" && guestFromManifest) {
+  if (guestFromManifest) {
     const host = normalizeArch(hostArch);
     if (host && guestFromManifest.arch !== host) {
       throw new Error(
         "Guest image architecture mismatch for Firecracker backend.\n" +
           `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
           `  host arch:    ${host}\n\n` +
-          "Fix: select a guest image that matches the host architecture when using vmm=firecracker.",
+          "Fix: select a guest image that matches the Firecracker host architecture.",
       );
     }
   }
 
-  if (vmm === "krun" && !explicitImageObject && !krunKernelOverride) {
-    throw new Error(
-      "Selected image does not provide krun boot assets.\n" +
-        "Expected manifest assets `krunKernel` (and optional `krunInitrd`).\n" +
-        "Fix: use an image built with `gondolin build` or choose a published image that includes krun assets.",
-    );
-  }
-
-  if (
-    vmm === "firecracker" &&
-    !explicitImageObject &&
-    !firecrackerKernelOverride
-  ) {
+  if (!explicitImageObject && !firecrackerKernelOverride) {
     throw new Error(
       "Selected image does not provide Firecracker boot assets.\n" +
         "Expected manifest assets `firecrackerKernel` (and optional `firecrackerInitrd`).\n" +
@@ -1294,20 +756,9 @@ export function resolveSandboxServerOptions(
   }
 
   const rootDiskPath = options.rootDiskPath ?? rootfsPath;
-  const rootDiskFormat =
-    options.rootDiskFormat ??
-    (vmm === "firecracker"
-      ? inferDiskFormatFromPath(rootDiskPath)
-      : options.rootDiskPath
-        ? "qcow2"
-        : "raw");
+  const rootDiskFormat = options.rootDiskFormat ?? "raw";
   const rootDiskReadOnly = options.rootDiskReadOnly ?? false;
-
-  if (vmm === "firecracker" && rootDiskFormat !== "raw") {
-    throw new Error(
-      `Firecracker backend supports raw root disks only (got ${rootDiskFormat}).`,
-    );
-  }
+  assertRawDiskImage(rootDiskPath);
 
   const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
   const maxQueuedStdinBytes = Math.max(
@@ -1321,8 +772,6 @@ export function resolveSandboxServerOptions(
 
   return {
     vmm,
-    qemuPath,
-    krunRunnerPath,
     firecrackerPath,
     firecrackerApiSocketPath,
     firecrackerVsockPath,
@@ -1335,51 +784,21 @@ export function resolveSandboxServerOptions(
     rootDiskReadOnly,
     memory,
     cpus,
-    virtioSocketPath:
-      options.virtioSocketPath ??
-      (vmm === "firecracker"
-        ? `${firecrackerVsockPath}_1024`
-        : defaultVirtio),
-    virtioFsSocketPath:
-      options.virtioFsSocketPath ??
-      (vmm === "firecracker"
-        ? `${firecrackerVsockPath}_1025`
-        : defaultVirtioFs),
-    virtioSshSocketPath:
-      options.virtioSshSocketPath ??
-      (vmm === "firecracker"
-        ? `${firecrackerVsockPath}_1026`
-        : defaultVirtioSsh),
-    virtioIngressSocketPath:
-      options.virtioIngressSocketPath ??
-      (vmm === "firecracker"
-        ? `${firecrackerVsockPath}_1027`
-        : defaultVirtioIngress),
-    netSocketPath: options.netSocketPath ?? defaultNetSock,
-    netMac: options.netMac ?? defaultNetMac,
-    netEnabled: options.netEnabled ?? vmm !== "firecracker",
-    allowWebSockets: options.allowWebSockets ?? true,
+    virtioSocketPath: `${firecrackerVsockPath}_1024`,
+    virtioFsSocketPath: `${firecrackerVsockPath}_1025`,
+    virtioSshSocketPath: `${firecrackerVsockPath}_1026`,
+    virtioIngressSocketPath: `${firecrackerVsockPath}_1027`,
+    netMac: "02:00:00:00:00:01",
+    netEnabled: false,
     debug,
-    machineType: options.machineType,
-    accel: options.accel,
-    cpu,
     console: options.console,
     autoRestart: options.autoRestart ?? false,
-    qemuIdlePauseMs: resolveQemuIdlePauseMs(options, vmm),
     append: options.append,
     maxStdinBytes,
     maxQueuedStdinBytes,
     maxTotalQueuedStdinBytes,
     maxQueuedExecs: options.maxQueuedExecs ?? DEFAULT_MAX_QUEUED_EXECS,
-    maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
-    maxHttpResponseBodyBytes:
-      options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
     fetch: options.fetch,
-    httpHooks: options.httpHooks,
-    dns: options.dns,
-    ssh: options.ssh,
-    tcp: options.tcp,
-    mitmCertDir: options.mitmCertDir,
     vfsProvider: options.vfsProvider ?? null,
   };
 }
@@ -1411,9 +830,6 @@ export async function resolveSandboxServerOptionsAsync(
 }
 
 export const __test = {
-  probeKrunRunnerCandidate,
-  resolvePackagedKrunRunnerPath,
-  resolveDefaultKrunRunnerPath,
   resolveRuntimeDir,
   validateLinuxUnixSocketPath,
 };

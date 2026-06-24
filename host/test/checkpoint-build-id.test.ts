@@ -17,7 +17,7 @@ function makeCheckpointData(
     version: 1,
     name: "test-checkpoint",
     createdAt: "2026-03-01T00:00:00.000Z",
-    diskFile: "test-checkpoint.qcow2",
+    diskFile: "test-checkpoint.raw",
     guestAssetBuildId: "15e98966-a559-55ee-8d57-9f4c3f0346c7",
     ...overrides,
   };
@@ -46,7 +46,7 @@ test("checkpoint: load rejects legacy directory checkpoint paths", () => {
   try {
     assert.throws(
       () => VmCheckpoint.load(dir),
-      /must be a \.qcow2 file, got directory/,
+      /checkpoint path must be a disk file, got directory/,
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -68,72 +68,39 @@ test("checkpoint: load rejects legacy checkpoint.json format", () => {
   }
 });
 
-test("checkpoint: legacy trailers default to qemu compatibility", () => {
+test("checkpoint: legacy trailers without backend metadata are incompatible", () => {
   const compatible =
     checkpointTest.resolveCheckpointCompatibleVmm(makeCheckpointData());
-  assert.deepEqual(compatible, ["qemu"]);
+  assert.deepEqual(compatible, []);
 });
 
-test("checkpoint: compatibility list accepts qemu/krun and ignores unknowns", () => {
+test("checkpoint: compatibility list accepts only Firecracker", () => {
   const compatible = checkpointTest.resolveCheckpointCompatibleVmm(
     makeCheckpointData({
-      compatibleVmm: ["krun", "qemu", "krun", "unknown" as any],
+      compatibleVmm: ["firecracker", "unknown" as any],
     }),
   );
-  assert.deepEqual(compatible, ["qemu", "krun"]);
+  assert.deepEqual(compatible, ["firecracker"]);
 });
 
-test("checkpoint: firecracker metadata is not resume-compatible yet", () => {
+test("checkpoint: Firecracker metadata is resume-compatible", () => {
   assert.deepEqual(
     checkpointTest.resolveCheckpointCompatibleVmm(
       makeCheckpointData({ compatibleVmm: ["firecracker"] }),
     ),
-    [],
+    ["firecracker"],
   );
   assert.deepEqual(
     checkpointTest.resolveCheckpointCompatibleVmm(
       makeCheckpointData({ createdWithVmm: "firecracker" }),
     ),
-    [],
+    ["firecracker"],
   );
 });
 
-test("checkpoint: createdWithVmm fallback is used when list is missing", () => {
+test("checkpoint: removed backends are incompatible", () => {
   const compatible = checkpointTest.resolveCheckpointCompatibleVmm(
-    makeCheckpointData({ createdWithVmm: "krun" }),
+    makeCheckpointData({ createdWithVmm: "removed" as any }),
   );
-  assert.deepEqual(compatible, ["krun"]);
-});
-
-test("checkpoint: resume vmm selection defaults to qemu and honors overrides", () => {
-  const prev = process.env.GONDOLIN_VMM;
-  try {
-    delete process.env.GONDOLIN_VMM;
-    assert.equal(checkpointTest.resolveRequestedResumeVmm({}), "qemu");
-
-    process.env.GONDOLIN_VMM = "krun";
-    assert.equal(checkpointTest.resolveRequestedResumeVmm({}), "krun");
-
-    process.env.GONDOLIN_VMM = "krun";
-    assert.equal(
-      checkpointTest.resolveRequestedResumeVmm({
-        sandbox: { vmm: "qemu" },
-      }),
-      "qemu",
-    );
-
-    assert.throws(
-      () =>
-        checkpointTest.resolveRequestedResumeVmm({
-          sandbox: { vmm: "wat" } as any,
-        }),
-      /invalid sandbox vmm backend/,
-    );
-  } finally {
-    if (prev === undefined) {
-      delete process.env.GONDOLIN_VMM;
-    } else {
-      process.env.GONDOLIN_VMM = prev;
-    }
-  }
+  assert.deepEqual(compatible, []);
 });

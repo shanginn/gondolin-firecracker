@@ -1,70 +1,33 @@
 # Current Limitations
 
-This page tracks the current limitations of Gondolin. If you are evaluating
-Gondolin for a production workflow, treat this as a "known gaps" checklist.
+## Linux/KVM Only
 
-## No Full VM Save/Restore (Memory Snapshots)
+The runtime requires Linux with `/dev/kvm`. macOS and Windows hosts are not
+supported by the Firecracker backend.
 
-Gondolin does not provide full VM save/restore (capturing in-VM process state +
-RAM) today.
+## No Guest Egress Network
 
-However, Gondolin _does_ support **disk-only checkpoints** (qcow2-backed) via
-`vm.checkpoint(<absolute qcow2 path>)` and `checkpoint.resume()`.
+Guest egress networking is disabled. HTTP hooks, DNS overrides, mapped TCP, and
+outbound SSH proxying are rejected until a Firecracker network path can enforce
+the same policy without generic NAT.
 
-See also: [Snapshots](./snapshots.md).
+## No Full VM Save/Restore
 
-Tracking issue: [#8](https://github.com/earendil-works/gondolin/issues/8).
+Checkpoints are disk-only. They do not capture RAM or process state.
 
-**Note:** Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`,
-`/var/tmp`, `/var/cache`, `/var/log`). Writes under those paths are not part of
-disk checkpoints.
+## Root Disk Only
 
-## Adding Extra Packages Requires Building a New Image
+Disk checkpoints capture the root disk. VFS mounts and tmpfs-backed paths are
+not included.
 
-The default guest image is intentionally minimal. If you need additional
-packages (for example: compilers, language runtimes, or extra system tools), you
-currently need to build a custom guest image and point Gondolin at it. This is
-in some ways a consequence of the lack of snapshotting.
+## Alpine Image Builder
 
-See [Custom Images](./custom-images.md).
+The included image builder targets Alpine Linux. Other distributions require a
+custom image pipeline that emits compatible Firecracker kernel/initrd/rootfs
+assets.
 
-## Only Alpine
+## Writable Rootfs Copies Cost Disk And Time
 
-The image builder currently only supports Alpine Linux.
-
-## No HTTP/2 or HTTP/3 support
-
-Gondolin's network mediation currently focuses on HTTP/1.x over plain TCP and
-HTTPS via TLS interception.
-
-As a result, HTTP/2 and HTTP/3 are not supported today.
-
-## No QUIC or WebRTC support
-
-Related to the lack of HTTP/3 support, QUIC is not supported. Likewise WebRTC
-is not supported.
-
-This means software that relies on UDP-based application protocols (or generic
-UDP connectivity) will not work in the default network model.
-
-## Backend parity gaps
-
-Gondolin supports `qemu` (default) plus experimental `krun` and `firecracker`
-backends, but feature parity is not complete.
-
-Notable gaps today:
-
-- Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires asset builds that include `manifest.assets.krunKernel`
-- qemu-specific backend knobs (`machineType`, `accel`, `cpu`, `qemuPath`) are
-  rejected when `vmm=krun` or `vmm=firecracker`
-- Firecracker requires Linux/KVM and does not support mediated guest network
-  egress yet
-- `rootfs.mode="memory"` is not truly RAM-backed on `krun` (or on `qemu` when
-  combined with `rootfs.size`); it is implemented as a temporary disk image
-  that is deleted on close
-
-See [VM Backends](./backends.md) for the maintained matrix.
-
-## No Windows support
-
-The host side of Gondolin is currently supported on macOS and Linux.
+The default rootfs mode is read-only. `rootfs.mode="cow"`,
+`rootfs.mode="memory"`, and `rootfs.size` use temporary raw disk copies, so size
+scratch storage for one copy per concurrent VM.

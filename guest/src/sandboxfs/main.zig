@@ -1053,7 +1053,7 @@ pub fn main(init: std.process.Init) !void {
     var rpc_path: []const u8 = "/dev/virtio-ports/virtio-fs";
     var rpc_vsock_port: ?u32 = null;
 
-    var i: usize = 1;
+    var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--mount") and i + 1 < args.len) {
             mount_point = args[i + 1];

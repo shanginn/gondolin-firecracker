@@ -326,11 +326,12 @@ test("sandbox helpers: archive sha256 mismatch fails before extraction", async (
   }
 });
 
-test("resolveSandboxBinaryPaths: uses registry helpers by default without zig", async () => {
+test("resolveSandboxBinaryPaths: uses registry helpers without guest sources", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
   const storeDir = path.join(tmpDir, "store");
   const emptyPathDir = path.join(tmpDir, "empty-path");
   const bundleDir = path.join(tmpDir, "bundle");
+  const missingGuestDir = path.join(tmpDir, "missing-guest");
   fs.mkdirSync(emptyPathDir, { recursive: true });
   fs.mkdirSync(bundleDir, { recursive: true });
 
@@ -362,6 +363,7 @@ test("resolveSandboxBinaryPaths: uses registry helpers by default without zig", 
   const prevRegistryUrl = process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL;
   const prevStore = process.env.GONDOLIN_SANDBOX_HELPER_STORE;
   const prevHelpersDir = process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
+  const prevGuestSrc = process.env.GONDOLIN_GUEST_SRC;
   const prevSourceBuild = process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
   let archiveFetches = 0;
 
@@ -383,6 +385,7 @@ test("resolveSandboxBinaryPaths: uses registry helpers by default without zig", 
     process.env.PATH = emptyPathDir;
     process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL = registryUrl;
     process.env.GONDOLIN_SANDBOX_HELPER_STORE = storeDir;
+    process.env.GONDOLIN_GUEST_SRC = missingGuestDir;
     delete process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
     delete process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
 
@@ -403,6 +406,7 @@ test("resolveSandboxBinaryPaths: uses registry helpers by default without zig", 
     setEnv("GONDOLIN_SANDBOX_HELPER_REGISTRY_URL", prevRegistryUrl);
     setEnv("GONDOLIN_SANDBOX_HELPER_STORE", prevStore);
     setEnv("GONDOLIN_SANDBOX_HELPERS_DIR", prevHelpersDir);
+    setEnv("GONDOLIN_GUEST_SRC", prevGuestSrc);
     setEnv("GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE", prevSourceBuild);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -473,13 +477,11 @@ test("resolveSandboxBinaryPaths: all custom helper paths bypass registry", async
 
 test("resolveSandboxBinaryPaths: registry failures do not source-build by default", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
-  const guestDir = path.join(tmpDir, "guest");
+  const missingGuestDir = path.join(tmpDir, "missing-guest");
   const stubDir = path.join(tmpDir, "bin");
   const storeDir = path.join(tmpDir, "store");
   const markerPath = path.join(tmpDir, "zig-called");
-  fs.mkdirSync(guestDir, { recursive: true });
   fs.mkdirSync(stubDir, { recursive: true });
-  fs.writeFileSync(path.join(guestDir, "build.zig"), "// test\n");
   fs.writeFileSync(
     path.join(stubDir, "zig"),
     `#!${process.execPath}\n` +
@@ -504,7 +506,7 @@ test("resolveSandboxBinaryPaths: registry failures do not source-build by defaul
     process.env.PATH = `${stubDir}:${prevPath ?? ""}`;
     process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL = registryUrl;
     process.env.GONDOLIN_SANDBOX_HELPER_STORE = storeDir;
-    process.env.GONDOLIN_GUEST_SRC = guestDir;
+    process.env.GONDOLIN_GUEST_SRC = missingGuestDir;
     delete process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
     delete process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
 
@@ -530,7 +532,7 @@ test("resolveSandboxBinaryPaths: registry failures do not source-build by defaul
   }
 });
 
-test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", async () => {
+test("resolveSandboxBinaryPaths: guest sources build before registry", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-helpers-"));
   const guestDir = path.join(tmpDir, "guest");
   const stubDir = path.join(tmpDir, "bin");
@@ -576,7 +578,7 @@ test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", asy
     process.env.GONDOLIN_SANDBOX_HELPER_REGISTRY_URL = registryUrl;
     process.env.GONDOLIN_SANDBOX_HELPER_STORE = storeDir;
     process.env.GONDOLIN_GUEST_SRC = guestDir;
-    process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE = "1";
+    delete process.env.GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE;
     delete process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
 
     const paths = await resolveSandboxBinaryPaths(
@@ -585,7 +587,7 @@ test("resolveSandboxBinaryPaths: source builds require explicit env opt-in", asy
       () => {},
     );
 
-    assert.equal(fetchCalls, 1);
+    assert.equal(fetchCalls, 0);
     assert.equal(
       fs.readFileSync(paths.sandboxsshPath, "utf8"),
       "#!/bin/sh\necho source-sandboxssh\n",

@@ -1,201 +1,68 @@
-# SDK: Storage Snapshots
+# Filesystem, Guest Assets, and Snapshots
 
-See also: [SDK Overview](./sdk.md), [VFS Providers](./vfs.md), [Custom Images](./custom-images.md), [Snapshots](./snapshots.md)
+## VFS Mounts
 
-## VFS Providers
-
-Gondolin can mount host-backed paths into the guest via programmable VFS
-providers.
-
-See [VFS Providers](./vfs.md) for the full provider reference and common
-recipes (blocking `/.env`, hiding `node_modules`, read-only mounts, hooks, and
-more).
-
-Minimal example:
+Use VFS mounts for workspace data and host-provided files.
 
 ```ts
-import { VM, RealFSProvider, MemoryProvider } from "@earendil-works/gondolin";
+import { VM, RealFSProvider, ReadonlyProvider } from "@earendil-works/gondolin";
 
 const vm = await VM.create({
   vfs: {
     mounts: {
-      "/workspace": new RealFSProvider("/host/workspace"),
-      "/scratch": new MemoryProvider(),
+      "/workspace": new ReadonlyProvider(new RealFSProvider("/host/project")),
     },
   },
 });
 ```
 
-## Image Management
-
-Guest images (kernel, initramfs, rootfs, and optional backend-specific boot
-artifacts) are resolved automatically from local overrides/store first, then from
-`builtin-image-registry.json` when needed.
-The default cache location is `~/.cache/gondolin/images/`.
-
-Override image selection / source:
-
-```bash
-# Use explicit local assets
-export GONDOLIN_GUEST_DIR=/path/to/assets
-
-# Change default image selector
-export GONDOLIN_DEFAULT_IMAGE=alpine-base:1.0
-
-# Override builtin registry URL
-export GONDOLIN_IMAGE_REGISTRY_URL=https://example.invalid/my-registry.json
-```
-
-Build-id selectors (`uuid`) are resolved locally first and only downloaded from
-the builtin registry when that registry has an explicit `builds[buildId]`
-mapping.
-
-Builtin registry entries are normalized: `refs[name:tag][arch]` stores a build
-id, and `builds[buildId]` stores the downloadable source metadata (`url`,
-optional `sha256`, optional `arch`).
-
-Check asset status programmatically:
-
-```ts
-import {
-  hasGuestAssets,
-  ensureGuestAssets,
-  getAssetDirectory,
-} from "@earendil-works/gondolin";
-
-console.log("Assets available:", hasGuestAssets());
-console.log("Asset directory:", getAssetDirectory());
-
-// Download if needed
-const assets = await ensureGuestAssets();
-console.log("Kernel:", assets.kernelPath);
-```
-
-To build custom images, see: [Building Custom Images](./custom-images.md).
-
-Use custom assets programmatically by pointing `sandbox.imagePath` at the
-asset directory:
-
-```ts
-import { VM } from "@earendil-works/gondolin";
-
-const vm = await VM.create({
-  sandbox: {
-    imagePath: "./my-assets",
-  },
-});
-
-const result = await vm.exec("uname -a");
-console.log("exitCode:", result.exitCode);
-console.log("stdout:\n", result.stdout);
-console.log("stderr:\n", result.stderr);
-
-await vm.close();
-```
-
 ## Rootfs Modes
 
-You can control rootfs write behavior per VM:
+- `readonly` is the default. It attaches the base raw rootfs read-only.
+- `cow` creates a temporary writable raw rootfs copy.
+- `memory` currently also creates a temporary writable raw rootfs copy.
 
-- `readonly`: rootfs is read-only (`EROFS` on writes)
-- `memory`: writable throwaway rootfs
-    - on `qemu`, this uses backend-native snapshot mode
-    - on `krun`, this is **not RAM-backed**; Gondolin creates a temporary qcow2 overlay on disk and deletes it on close
-    - on `firecracker`, this is **not RAM-backed**; Gondolin creates a temporary raw copy on disk and deletes it on close
-- `cow`: writable qcow2 copy-on-write overlay (default for `qemu` and `krun`)
-    - this does **not** write back into the original rootfs image
-    - by default it is a throwaway image file that is deleted on close
-    - on `qemu` and `krun`, it is a real qcow2 layer and can be checkpointed
-    - on `firecracker`, it is a temporary raw copy and cannot be checkpointed yet
-
-```ts
-const vm = await VM.create({
-  rootfs: { mode: "readonly" },
-});
-```
-
-If the guest asset `manifest.json` contains `runtimeDefaults.rootfsMode`, that
-value is used as the default when `rootfs.mode` is not provided. Without a
-manifest default, Firecracker uses `readonly` by default to avoid a temporary raw
-rootfs copy on startup.
+Use `readonly` for fastest startup and lowest scratch usage. Use writable modes
+only when the workload must write outside tmpfs and VFS mounts.
 
 ## Runtime Rootfs Size
 
-Use `rootfs.size` to ensure the effective root disk has at least the requested
-size without rebuilding the base image:
+`rootfs.size` grows the effective writable raw root disk before boot:
 
 ```ts
 const vm = await VM.create({
-  rootfs: { size: "2G" },
+  rootfs: { mode: "cow", size: "2G" },
 });
 ```
 
-Gondolin grows the writable root disk image on the host with `qemu-img resize`
-(or direct raw-file truncation for Firecracker) and then runs
-`resize2fs /dev/vda` in the guest before `VM.start()` completes. The base rootfs
-image is not modified when using the default `cow` mode. When combined with
-`rootfs.mode="memory"`, Gondolin uses a temporary writable image so the
-guest-side filesystem resize survives for the lifetime of that VM.
+The base image is never resized in place.
 
-The guest image must include `resize2fs` (Alpine package: `e2fsprogs`). Newer
-`alpine-base` images include it; custom images should add it to
-`alpine.rootfsPackages` when using `rootfs.size`.
+## Guest Assets
 
-## Disk Checkpoints (qcow2)
+Guest assets are resolved from an image selector, an asset directory, or
+`GONDOLIN_GUEST_DIR`. Firecracker images must include:
 
-Gondolin supports **disk-only checkpoints** of the VM root filesystem.
+- `vmlinuz-virt`
+- `initramfs.cpio.lz4`
+- `rootfs.ext4`
+- `manifest.json`
+- `manifest.assets.firecrackerKernel`
 
-A checkpoint captures the VM's writable disk state and can be resumed cheaply
-using qcow2 backing files.
+## Checkpoints
 
-> **Backend support:** checkpoints work with both `qemu` and `krun`.
-> Firecracker checkpoints are not supported yet.
-> Resume enforces checkpoint backend-compatibility metadata.
-> See [VM Backends](./backends.md).
-
-See also: [Snapshots](./snapshots.md).
+Checkpoints are raw root disk files with a metadata trailer.
 
 ```ts
 import path from "node:path";
 
-import { VM } from "@earendil-works/gondolin";
+const vm = await VM.create({ rootfs: { mode: "cow" } });
+await vm.exec("echo marker > /etc/checkpoint-marker");
 
-const base = await VM.create();
-
-// Install packages / write to the root filesystem...
-await base.exec("apk add git");
-await base.exec("echo hello > /etc/my-base-marker");
-
-// Note: must be an absolute path
-const checkpointPath = path.resolve("./dev-base.qcow2");
-const checkpoint = await base.checkpoint(checkpointPath);
-
-const task1 = await checkpoint.resume();
-const task2 = await checkpoint.resume();
-
-// Both VMs start from the same disk state and diverge independently
-await task1.close();
-await task2.close();
-
-checkpoint.delete();
+const checkpoint = await vm.checkpoint(path.resolve("./dev-base.raw"));
+const resumed = await checkpoint.resume();
 ```
 
-Notes:
+Checkpoints require guest assets with `manifest.buildId`. Resume finds matching
+assets by build id or uses `sandbox.imagePath` when provided.
 
-- This is **disk-only** (no in-VM RAM/process restore)
-- The checkpoint is a single `.qcow2` file; metadata is stored as a JSON trailer
-  (reload with `VmCheckpoint.load(checkpointPath)`)
-- Checkpoints require guest assets with a `manifest.json` that includes a
-  deterministic `buildId` (older assets without `buildId` cannot be snapshotted)
-- QEMU `rootfs.mode="memory"` uses backend snapshot mode and is not checkpointable
-  unless combined with `rootfs.size`; use `rootfs.mode="cow"` when you need a
-  writable qcow2 layer explicitly
-- Cross-backend resume (`qemu` ↔ `krun`) requires guest assets with krun boot
-  artifacts (`manifest.assets.krunKernel`)
-- Firecracker writable rootfs modes use temporary raw copies and are not
-  checkpointable yet
-- Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`); writes under those paths are not part of disk checkpoints
-
-## Debug Logging
-
-See [Debug Logging](./debug.md).
+See [Snapshots](./snapshots.md).

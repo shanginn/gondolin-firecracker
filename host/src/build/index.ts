@@ -140,28 +140,6 @@ export function verifyAssets(assetDir: string): boolean {
     },
   ];
 
-  if (manifest.assets.krunKernel) {
-    if (!manifest.checksums.krunKernel) {
-      return false;
-    }
-    assets.push({
-      name: "krunKernel",
-      file: manifest.assets.krunKernel,
-      expected: manifest.checksums.krunKernel,
-    });
-  }
-
-  if (manifest.assets.krunInitrd) {
-    if (!manifest.checksums.krunInitrd) {
-      return false;
-    }
-    assets.push({
-      name: "krunInitrd",
-      file: manifest.assets.krunInitrd,
-      expected: manifest.checksums.krunInitrd,
-    });
-  }
-
   if (manifest.assets.firecrackerKernel) {
     if (!manifest.checksums.firecrackerKernel) {
       return false;

@@ -8,9 +8,7 @@ function makeResolvedOptions(
   overrides: Partial<ResolvedSandboxServerOptions> = {},
 ): ResolvedSandboxServerOptions {
   return {
-    vmm: "qemu",
-    qemuPath: "/bin/false",
-    krunRunnerPath: "/bin/false",
+    vmm: "firecracker",
     firecrackerPath: "/bin/false",
     firecrackerApiSocketPath: "/tmp/gondolin-test-firecracker-api.sock",
     firecrackerVsockPath: "/tmp/gondolin-test-firecracker-vsock.sock",
@@ -29,15 +27,10 @@ function makeResolvedOptions(
     virtioFsSocketPath: "/tmp/gondolin-test-virtiofs.sock",
     virtioSshSocketPath: "/tmp/gondolin-test-virtiossh.sock",
     virtioIngressSocketPath: "/tmp/gondolin-test-virtioingress.sock",
-    netSocketPath: "/tmp/gondolin-test-net.sock",
     netMac: "02:00:00:00:00:01",
     netEnabled: false,
-    allowWebSockets: true,
 
     debug: [],
-    machineType: undefined,
-    accel: undefined,
-    cpu: undefined,
     console: "none",
     autoRestart: false,
     append: "",
@@ -46,12 +39,7 @@ function makeResolvedOptions(
     maxQueuedStdinBytes: 1024,
     maxTotalQueuedStdinBytes: 1024 * 1024,
     maxQueuedExecs: 64,
-    maxHttpBodyBytes: 1024 * 1024,
-    maxHttpResponseBodyBytes: 1024 * 1024,
     fetch: undefined,
-    httpHooks: undefined,
-    dns: undefined,
-    mitmCertDir: undefined,
     vfsProvider: null,
 
     ...overrides,
@@ -112,26 +100,6 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
-}
-
-function tcpSession(extra: Record<string, unknown> = {}) {
-  return {
-    socket: null,
-    srcIP: "192.168.127.2",
-    srcPort: 12345,
-    dstIP: "198.51.100.1",
-    dstPort: 443,
-    connectIP: "198.51.100.1",
-    connectPort: 443,
-    syntheticHostname: null,
-    mappedTcp: null,
-    flowControlPaused: false,
-    protocol: "tls",
-    connected: false,
-    pendingWrites: [],
-    pendingWriteBytes: 0,
-    ...extra,
-  };
 }
 
 test("exec requests are started concurrently when no file operation is active", () => {
@@ -222,35 +190,6 @@ test("exec admission reserves ids while controller resume is pending", async () 
   assert.equal(sent.filter((m) => m.t === "exec_request").length, 1);
   assert.ok((server as any).startedExecs.has(1));
   assert.ok(!(server as any).inflight.has(2));
-});
-
-test("network activity blocks idle until resume settles", async () => {
-  const server = new SandboxServer(makeResolvedOptions({ netEnabled: true }));
-  const network = (server as any).network;
-  const controller = (server as any).controller;
-  const resume = deferred<void>();
-  let scheduleCalls = 0;
-
-  controller.pauseInProgress = true;
-  controller.resumeForActivity = () =>
-    resume.promise.finally(() => {
-      controller.pauseInProgress = false;
-    });
-  controller.scheduleIdlePause = () => {
-    if (!controller.pauseInProgress) scheduleCalls += 1;
-  };
-
-  network.tcpSessions.set("flow", tcpSession());
-  assert.equal((server as any).hasActiveGuestActivity(), true);
-  (server as any).scheduleControllerIdlePause();
-  assert.equal(scheduleCalls, 0);
-
-  network.tcpSessions.delete("flow");
-  resume.resolve();
-  await resume.promise;
-  await new Promise<void>((resolve) => setImmediate(resolve));
-
-  assert.equal(scheduleCalls, 1);
 });
 
 test("sendControlMessage aborts after waiting for resume", async () => {

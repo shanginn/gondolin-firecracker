@@ -1,27 +1,17 @@
 import fs from "fs";
-import path from "path";
 import { execFileSync } from "child_process";
 
 import { VM, type VMOptions } from "../../src/vm/core.ts";
 
-/**
- * Check if hardware virtualization is available.
- * On Linux, this checks for KVM. On macOS, HVF is always available.
- * Returns false for other platforms or when acceleration is unavailable.
- */
+/** Check whether Linux KVM is available for Firecracker. */
 export function hasHardwareAccel(): boolean {
-  if (process.platform === "darwin") {
-    return true; // HVF is always available on macOS
+  if (process.platform !== "linux") return false;
+  try {
+    fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
   }
-  if (process.platform === "linux") {
-    try {
-      fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  return false;
 }
 
 /**
@@ -33,45 +23,6 @@ export function shouldSkipVmTests(): boolean {
     return false;
   }
   return !hasHardwareAccel();
-}
-
-/** Resolve a runnable krun helper binary path for integration tests. */
-export function resolveKrunRunnerPath(): string | null {
-  const envPath = process.env.GONDOLIN_KRUN_RUNNER?.trim();
-  const localRunnerPath = path.resolve(
-    process.cwd(),
-    "krun-runner",
-    "zig-out",
-    "bin",
-    "gondolin-krun-runner",
-  );
-
-  const candidates = [envPath, localRunnerPath, "gondolin-krun-runner"];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    try {
-      execFileSync(candidate, ["--version"], { stdio: "ignore" });
-      return candidate;
-    } catch {
-      // Try next candidate.
-    }
-  }
-
-  return null;
-}
-
-/** Return a skip reason for krun VM integration tests or false when runnable. */
-export function shouldSkipKrunVmTests(): string | false {
-  if (shouldSkipVmTests()) {
-    return "hardware virtualization unavailable";
-  }
-
-  const runnerPath = resolveKrunRunnerPath();
-  if (!runnerPath) {
-    return "krun runner unavailable (build host/krun-runner or set GONDOLIN_KRUN_RUNNER)";
-  }
-
-  return false;
 }
 
 /** Resolve a runnable Firecracker binary path for integration tests. */
@@ -108,57 +59,12 @@ export function shouldSkipFirecrackerVmTests(): string | false {
   return false;
 }
 
-let krunRuntimeSkipCheck: Promise<string | false> | null = null;
 let firecrackerRuntimeSkipCheck: Promise<string | false> | null = null;
 
-const krunPrecheckTimeoutMs = Math.max(
-  1,
-  Number(process.env.GONDOLIN_KRUN_PRECHECK_TIMEOUT_MS ?? 30000),
-);
 const firecrackerPrecheckTimeoutMs = Math.max(
   1,
   Number(process.env.GONDOLIN_FIRECRACKER_PRECHECK_TIMEOUT_MS ?? 30000),
 );
-
-/** Probe whether krun can actually boot/exec on this host. */
-export async function getKrunRuntimeSkipReason(): Promise<string | false> {
-  const staticReason = shouldSkipKrunVmTests();
-  if (staticReason) {
-    return staticReason;
-  }
-
-  if (!krunRuntimeSkipCheck) {
-    krunRuntimeSkipCheck = (async () => {
-      let vm: VM | null = null;
-      try {
-        vm = await VM.create({
-          startTimeoutMs: krunPrecheckTimeoutMs,
-          sandbox: {
-            vmm: "krun",
-            krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
-            console: "none",
-          },
-        });
-
-        await vm.start();
-        const probe = await vm.exec(["/bin/sh", "-lc", "echo preflight-ok"]);
-        if (probe.exitCode !== 0) {
-          return `krun runtime preflight exec failed (exit ${probe.exitCode})`;
-        }
-        return false;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return `krun runtime unavailable: ${message}`;
-      } finally {
-        if (vm) {
-          await closeWithTimeout(vm);
-        }
-      }
-    })();
-  }
-
-  return await krunRuntimeSkipCheck;
-}
 
 /** Probe whether Firecracker can actually boot/exec on this host. */
 export async function getFirecrackerRuntimeSkipReason(): Promise<string | false> {
@@ -174,7 +80,6 @@ export async function getFirecrackerRuntimeSkipReason(): Promise<string | false>
         vm = await VM.create({
           startTimeoutMs: firecrackerPrecheckTimeoutMs,
           sandbox: {
-            vmm: "firecracker",
             firecrackerPath: resolveFirecrackerPath() ?? undefined,
             netEnabled: false,
             console: "none",
@@ -303,7 +208,7 @@ export async function closeVm(key: string): Promise<void> {
     return;
   }
 
-  // VM.create() may still be in-flight (e.g. QEMU booting).  Wait briefly for
+  // VM.create() may still be in-flight (e.g. booting). Wait briefly for
   // it to resolve so we can close the underlying process; otherwise the child
   // keeps node alive forever.
   const inflight = pending.get(key);
@@ -332,12 +237,11 @@ export async function closeVm(key: string): Promise<void> {
 
 /**
  * Schedule a hard process.exit() as a safety net.  If vm.close() fails to
- * kill the QEMU child, the orphaned process keeps node alive via its stdio
- * pipes.  Calling process.exit() triggers the "exit" hook in
- * sandbox-controller which SIGKILLs all tracked children.
+ * kill the Firecracker child, the orphaned process keeps node alive via its
+ * stdio pipes. Calling process.exit() triggers process exit cleanup.
  *
  * The timer is unref'd so it does not *itself* keep node alive — it only
- * fires when something else (the QEMU pipe) is holding the event loop open.
+ * fires when something else is holding the event loop open.
  *
  * Each call refreshes the deadline so early-finishing files don't force-exit
  * while later tests are still running.

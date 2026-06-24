@@ -19,7 +19,7 @@ import {
   type PtyResizeCommandMessage,
   type StdinCommandMessage,
 } from "./control-protocol.ts";
-import type { SandboxState } from "./controller.ts";
+import type { SandboxState } from "./state.ts";
 import {
   type GuestFileDeleteOptions,
   type GuestFileReadOptions,
@@ -77,6 +77,14 @@ export class SandboxServerOps {
    */
   getHostPid(): number | null {
     return this.controller.getHostPid?.() ?? null;
+  }
+
+  getStartupDiagnostic(): string {
+    if (typeof this.vmmStderrBuffer === "string" && this.vmmStderrBuffer) {
+      this.recordVmmLogLine?.(this.vmmStderrBuffer);
+    }
+    const hint = this.formatVmmLogHint?.();
+    return typeof hint === "string" ? hint : "";
   }
 
   getVfsProvider() {
@@ -634,7 +642,7 @@ export class SandboxServerOps {
     this.closeAllClients();
 
     // Stop accepting new virtio connections immediately and prevent reconnect
-    // timers from keeping the event loop alive while we wait for QEMU to exit.
+    // timers from keeping the event loop alive while we wait for Firecracker to exit.
     await Promise.all([
       this.bridge.disconnect(),
       this.fsBridge.disconnect(),
@@ -642,7 +650,7 @@ export class SandboxServerOps {
       this.ingressBridge.disconnect(),
     ]);
 
-    // Tear down host-side network + streams promptly. QEMU may still be running
+    // Tear down host-side streams promptly. Firecracker may still be running
     // for a short grace period while SandboxController.close() tries SIGTERM.
     await this.network?.close();
 

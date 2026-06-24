@@ -9,7 +9,7 @@ GONDOLIN ?= $(NODE) ../host/bin/gondolin.ts
 GONDOLIN_BUILD_CONFIG ?=
 GONDOLIN_BUILD_EXTRA_ARGS ?=
 
-ZIG_SOURCES := $(shell find src fuzz -name '*.zig') build.zig
+ZIG_SOURCES := $(shell find src fuzz -name '*.zig' ! -name '._*') build.zig
 ZIG_BUILD_DEPS := $(ZIG_SOURCES) build.zig.zon
 # NOTE: guest image builds are driven by the host TypeScript builder (host/src/build/alpine.ts).
 HOST_BUILD_DEPS := $(shell find ../host/src ../host/bin -name '*.ts') ../host/package.json ../host/tsconfig.json
@@ -20,8 +20,7 @@ IMAGE_OUT ?= ./image/out
 IMAGE_INITRAMFS ?= $(IMAGE_OUT)/initramfs.cpio.lz4
 IMAGE_ROOTFS ?= $(IMAGE_OUT)/rootfs.ext4
 KERNEL ?= $(IMAGE_OUT)/vmlinuz-virt
-KRUN_KERNEL ?= $(IMAGE_OUT)/krun-kernel
-KRUN_INITRD ?= $(IMAGE_OUT)/krun-empty-initrd
+FIRECRACKER_KERNEL ?= $(IMAGE_OUT)/firecracker-kernel
 
 HOST_ARCH := $(shell uname -m)
 HOST_OS := $(shell uname -s)
@@ -81,9 +80,9 @@ build-inner:
 run: build-bins
 	./zig-out/bin/sandboxd
 
-assets: $(IMAGE_INITRAMFS) $(IMAGE_ROOTFS) $(KERNEL) $(KRUN_KERNEL) $(KRUN_INITRD)
+assets: $(IMAGE_INITRAMFS) $(IMAGE_ROOTFS) $(KERNEL) $(FIRECRACKER_KERNEL)
 
-$(IMAGE_INITRAMFS) $(IMAGE_ROOTFS) $(KERNEL) $(KRUN_KERNEL) $(KRUN_INITRD): $(BUILD_DEPS)
+$(IMAGE_INITRAMFS) $(IMAGE_ROOTFS) $(KERNEL) $(FIRECRACKER_KERNEL): $(BUILD_DEPS)
 	$(GONDOLIN) build $(GONDOLIN_BUILD_ARGS)
 
 format:

@@ -31,21 +31,28 @@ type FakeAssets = {
   buildId: string;
 };
 
+function hostManifestArch(): "aarch64" | "x86_64" {
+  return process.arch === "arm64" ? "aarch64" : "x86_64";
+}
+
 function createFakeAssets(arch: "aarch64" | "x86_64"): FakeAssets {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-images-assets-"));
 
   const kernel = path.join(dir, "vmlinuz-virt");
   const initramfs = path.join(dir, "initramfs.cpio.lz4");
   const rootfs = path.join(dir, "rootfs.ext4");
+  const firecrackerKernel = path.join(dir, "firecracker-kernel");
 
   fs.writeFileSync(kernel, `kernel-${arch}`);
   fs.writeFileSync(initramfs, `initramfs-${arch}`);
   fs.writeFileSync(rootfs, `rootfs-${arch}`);
+  fs.writeFileSync(firecrackerKernel, `firecracker-kernel-${arch}`);
 
   const checksums = {
     kernel: `k-${arch}`,
     initramfs: `i-${arch}`,
     rootfs: `r-${arch}`,
+    firecrackerKernel: `fc-${arch}`,
   };
 
   const buildId = computeAssetBuildId({ checksums, arch });
@@ -65,6 +72,7 @@ function createFakeAssets(arch: "aarch64" | "x86_64"): FakeAssets {
       kernel: "vmlinuz-virt",
       initramfs: "initramfs.cpio.lz4",
       rootfs: "rootfs.ext4",
+      firecrackerKernel: "firecracker-kernel",
     },
     checksums,
   };
@@ -93,8 +101,8 @@ function patchManifestAssets(
     kernel?: string;
     initramfs?: string;
     rootfs?: string;
-    krunKernel?: string;
-    krunInitrd?: string;
+    firecrackerKernel?: string;
+    firecrackerInitrd?: string;
   },
 ): void {
   patchManifest(dir, (manifest) => {
@@ -138,32 +146,32 @@ test("images: import and resolve by build id", () => {
   }
 });
 
-test("images: import preserves optional krun assets from manifest", () => {
+test("images: import preserves optional Firecracker initrd from manifest", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
   );
   process.env.GONDOLIN_IMAGE_STORE = storeDir;
 
   const assets = createFakeAssets("aarch64");
-  const krunKernel = path.join(assets.dir, "krun-kernel");
-  const krunInitrd = path.join(assets.dir, "krun-initrd");
-  fs.writeFileSync(krunKernel, "krun-kernel");
-  fs.writeFileSync(krunInitrd, "");
+  const firecrackerInitrd = path.join(assets.dir, "firecracker-initrd");
+  fs.writeFileSync(firecrackerInitrd, "");
 
   patchManifestAssets(assets.dir, {
-    krunKernel: "krun-kernel",
-    krunInitrd: "krun-initrd",
+    firecrackerInitrd: "firecracker-initrd",
   });
 
   try {
     const imported = importImageFromDirectory(assets.dir);
 
     assert.equal(
-      fs.readFileSync(path.join(imported.assetDir, "krun-kernel"), "utf8"),
-      "krun-kernel",
+      fs.readFileSync(
+        path.join(imported.assetDir, "firecracker-kernel"),
+        "utf8",
+      ),
+      "firecracker-kernel-aarch64",
     );
     assert.equal(
-      fs.existsSync(path.join(imported.assetDir, "krun-initrd")),
+      fs.existsSync(path.join(imported.assetDir, "firecracker-initrd")),
       true,
     );
   } finally {
@@ -541,6 +549,7 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
         "vmlinuz-virt",
         "initramfs.cpio.lz4",
         "rootfs.ext4",
+        "firecracker-kernel",
       ],
       { cwd: assets.dir, stdio: "pipe" },
     );
@@ -663,20 +672,23 @@ test("images: sandbox server options accept image refs", () => {
   );
   process.env.GONDOLIN_IMAGE_STORE = storeDir;
 
-  const assets = createFakeAssets("aarch64");
+  const assets = createFakeAssets(hostManifestArch());
 
   try {
     const imported = importImageFromDirectory(assets.dir);
     setImageRef("default:latest", imported.buildId, imported.arch);
 
-    const resolved = resolveSandboxServerOptions({
-      imagePath: "default:latest",
-      qemuPath: "qemu-system-aarch64",
-      netEnabled: false,
-    });
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: "default:latest",
+        netEnabled: false,
+      },
+      undefined,
+      { platform: "linux" },
+    );
 
     assert.equal(path.dirname(resolved.rootfsPath), imported.assetDir);
-    assert.equal(path.dirname(resolved.kernelPath), imported.assetDir);
+    assert.equal(path.basename(resolved.kernelPath), "firecracker-kernel");
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });

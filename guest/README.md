@@ -39,7 +39,7 @@ checkout, also set `GONDOLIN_GUEST_SRC` to this `guest/` directory.
 
 ## Common tasks
 
-Mandatory build command (builds kernel, initramfs, rootfs, and krun boot assets without booting):
+Mandatory build command (builds kernel, initramfs, rootfs, and Firecracker boot assets without booting):
 
 ```sh
 make build
@@ -66,4 +66,4 @@ Boot the guest in a VM (builds assets if needed):
 npx @earendil-works/gondolin bash
 ```
 
-The host manages the full QEMU lifecycle automatically.
+The host manages the full Firecracker lifecycle automatically.
