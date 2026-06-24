@@ -6,7 +6,7 @@ Gondolin is not a single binary. It is a small system made of:
 
 - **A host-side library + CLI**: for TypeScript / Node.js, also called the control plane
 - **A guest-side runtime**: a minimal Linux VM image plus a few small daemons
-- **VM backend**: QEMU (default) or `libkrun` (experimental)
+- **VM backend**: QEMU (default), `libkrun` (experimental), or Firecracker (experimental)
 
 The high-level idea is:
 
@@ -60,12 +60,12 @@ Guest daemons/components:
 - `sandboxingress`: a dedicated host-to-guest TCP forwarder for inbound HTTP traffic (ingress gateway)
 - `/init`: mounts tmpfs, brings up networking, starts services
 
-### VM backend (QEMU default, optional krun)
+### VM backend (QEMU default, optional krun/Firecracker)
 
 QEMU is the default VM engine (and primary isolation boundary). Gondolin also
-has an experimental `libkrun` backend.
+has experimental `libkrun` and Firecracker backends.
 
-See [VM Backends (QEMU vs krun)](./backends.md) for capability differences and
+See [VM Backends](./backends.md) for capability differences and
 [QEMU](./qemu.md) for QEMU-specific internals.
 
 ## System Diagram
@@ -89,6 +89,10 @@ See [VM Backends (QEMU vs krun)](./backends.md) for capability differences and
 |                                                                              |
 +------------------------------------------------------------------------------+
 ```
+
+Firecracker uses the same host control-plane services but maps the exec, VFS,
+SSH, and ingress channels onto vsock ports instead of virtio-serial devices.
+Firecracker mediated guest network egress is not implemented yet.
 
 The important architectural choice: **the host is the enforcement point** for
 both networking and persistence.

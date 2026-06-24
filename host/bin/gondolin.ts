@@ -200,6 +200,14 @@ function renderCliError(err: unknown) {
       );
       return;
     }
+
+    if (binary.includes("firecracker")) {
+      console.error(`Error: Firecracker binary '${binary}' not found.`);
+      console.error(
+        "Install Firecracker on a Linux/KVM host or set sandbox.firecrackerPath / GONDOLIN_FIRECRACKER.",
+      );
+      return;
+    }
   }
 
   const message = err instanceof Error ? err.message : String(err);
@@ -251,7 +259,7 @@ function bashUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
+    "  --vmm BACKEND                   VM backend: qemu|krun|firecracker (default: qemu)",
   );
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
@@ -343,6 +351,7 @@ function bashUsage() {
   console.log("  gondolin bash --resume 4a8f2b0c");
   console.log("  gondolin bash --resume /tmp/my-snapshot.qcow2");
   console.log("  gondolin bash --vmm krun");
+  console.log("  gondolin bash --vmm firecracker");
   console.log("  gondolin bash --ssh");
 }
 
@@ -411,7 +420,7 @@ function execUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --vmm BACKEND                   VM backend: qemu|krun (default: qemu)",
+    "  --vmm BACKEND                   VM backend: qemu|krun|firecracker (default: qemu)",
   );
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
@@ -488,7 +497,7 @@ type CommonOptions = {
   image?: string;
 
   /** vm backend selection */
-  vmm?: "qemu" | "krun";
+  vmm?: "qemu" | "krun" | "firecracker";
 
   /** minimum rootfs virtual disk size */
   rootfsSize?: string;
@@ -735,12 +744,16 @@ function resolveSshAgent(explicit?: string): string {
   return sock;
 }
 
-function parseVmmOption(value: string): "qemu" | "krun" {
+function parseVmmOption(value: string): "qemu" | "krun" | "firecracker" {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "firecracker"
+  ) {
     return normalized;
   }
-  throw new Error("--vmm must be one of: qemu, krun");
+  throw new Error("--vmm must be one of: qemu, krun, firecracker");
 }
 
 function parseRootfsSizeOption(

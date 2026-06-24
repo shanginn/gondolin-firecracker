@@ -17,6 +17,8 @@ export const INITRAMFS_FILENAME = "initramfs.cpio.lz4";
 export const ROOTFS_FILENAME = "rootfs.ext4";
 export const KRUN_KERNEL_FILENAME = "krun-kernel";
 export const KRUN_INITRD_FILENAME = "krun-empty-initrd";
+export const FIRECRACKER_KERNEL_FILENAME = "firecracker-kernel";
+export const FIRECRACKER_INITRD_FILENAME = "firecracker-initrd";
 
 /** Zig target triples for cross-compilation */
 const ZIG_TARGETS: Record<Architecture, string> = {
@@ -527,6 +529,14 @@ export function writeAssetManifest(
 
   const krunKernelDst = path.join(outputDir, KRUN_KERNEL_FILENAME);
   const krunInitrdDst = path.join(outputDir, KRUN_INITRD_FILENAME);
+  const firecrackerKernelDst = path.join(
+    outputDir,
+    FIRECRACKER_KERNEL_FILENAME,
+  );
+  const firecrackerInitrdDst = path.join(
+    outputDir,
+    FIRECRACKER_INITRD_FILENAME,
+  );
 
   const checksums: AssetManifest["checksums"] = {
     kernel: computeFileHash(kernelDst),
@@ -548,6 +558,16 @@ export function writeAssetManifest(
   if (fs.existsSync(krunInitrdDst)) {
     assets.krunInitrd = KRUN_INITRD_FILENAME;
     checksums.krunInitrd = computeFileHash(krunInitrdDst);
+  }
+
+  if (fs.existsSync(firecrackerKernelDst)) {
+    assets.firecrackerKernel = FIRECRACKER_KERNEL_FILENAME;
+    checksums.firecrackerKernel = computeFileHash(firecrackerKernelDst);
+  }
+
+  if (fs.existsSync(firecrackerInitrdDst)) {
+    assets.firecrackerInitrd = FIRECRACKER_INITRD_FILENAME;
+    checksums.firecrackerInitrd = computeFileHash(firecrackerInitrdDst);
   }
 
   const manifest: AssetManifest = {

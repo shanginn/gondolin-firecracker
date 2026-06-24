@@ -7,8 +7,7 @@ Gondolin runs untrusted code inside a real Linux VM. QEMU is the VM engine that
 provides the hardware boundary and the virtio devices that Gondolin uses for I/O
 mediation.
 
-For backend capability differences (`qemu` vs `krun`), see
-[VM Backends (QEMU vs krun)](./backends.md).
+For backend capability differences, see [VM Backends](./backends.md).
 
 ## Why QEMU
 
@@ -20,9 +19,10 @@ QEMU was chosen primarily because:
 - It supports the virtio devices we need (virtio-net, virtio-serial, virtio-blk, virtio-rng).
 - It is flexible enough to run in a minimal, tightly controlled configuration.
 
-Alternatives like Firecracker are attractive on Linux, but they do not provide
-the same cross-platform story on macOS, and divergence in VM behavior across
-OSes is a long-term maintenance and security risk.
+The experimental Firecracker backend is attractive on Linux/KVM, but it does
+not provide the same cross-platform story on macOS and does not yet support
+Gondolin's mediated network stack. QEMU remains the default compatibility
+backend.
 
 ## What the Guest Sees
 

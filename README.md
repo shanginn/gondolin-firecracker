@@ -6,9 +6,9 @@ AI agents increasingly run generated code without human review.  That code often
 needs network access and credentials, which creates exfiltration risk.
 
 Gondolin runs that code inside a fast local Linux micro-VM (QEMU by default,
-with an optional experimental `krun` backend) while keeping network and
-filesystem access under host-side policy control.  That policy layer can be
-customized via JavaScript.
+with optional experimental `krun` and `firecracker` backends) while keeping
+network and filesystem access under host-side policy control. That policy layer
+can be customized via JavaScript.
 
 ## Quick Example
 
@@ -67,8 +67,8 @@ npx @earendil-works/gondolin snapshot <session-id>
 npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
 
-Guest assets (kernel/initramfs/rootfs plus optional krun boot artifacts,
-~200MB+) are resolved automatically on first use via
+Guest assets (kernel/initramfs/rootfs plus optional backend-specific boot
+artifacts, ~200MB+) are resolved automatically on first use via
 `builtin-image-registry.json` and cached locally. When no image is specified,
 Gondolin uses `GONDOLIN_DEFAULT_IMAGE` (default: `alpine-base:latest`).
 
@@ -111,6 +111,20 @@ When `vmm=krun` is selected, Gondolin requires krun boot assets from the selecte
 image manifest (`assets.krunKernel` and optional `assets.krunInitrd`).
 For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object.
 
+Optional experimental Firecracker backend setup:
+
+```bash
+# Linux/KVM host only
+gondolin bash --vmm firecracker
+```
+
+Firecracker uses vsock for Gondolin's exec/VFS/SSH/ingress control plane. The
+default Firecracker profile is low-footprint (`1` vCPU, `256M`, quiet/no-serial
+boot, no guest DHCP, read-only base rootfs). The mediated guest network stack is
+not implemented for Firecracker yet, so `netEnabled` defaults to `false` and
+network policy options are rejected. For Kubernetes deployment requirements, see
+[docs/kubernetes.md](docs/kubernetes.md).
+
 > Linux and macOS are supported. ARM64 is the most tested runtime path today.
 > Linux x86_64 `make krun-runner` is covered by CI smoke builds.
 
@@ -138,7 +152,8 @@ For custom kernels/initrds, provide an explicit `sandbox.imagePath` asset object
 - [SSH](https://earendil-works.github.io/gondolin/ssh/)
 - [Custom Images](https://earendil-works.github.io/gondolin/custom-images/)
 - [Architecture Overview](https://earendil-works.github.io/gondolin/architecture/)
-- [VM Backends (QEMU vs krun)](docs/backends.md)
+- [VM Backends](docs/backends.md)
+- [Kubernetes](docs/kubernetes.md)
 - [Security Design](https://earendil-works.github.io/gondolin/security/)
 - [Limitations](https://earendil-works.github.io/gondolin/limitations/)
 

@@ -47,21 +47,23 @@ is not supported.
 This means software that relies on UDP-based application protocols (or generic
 UDP connectivity) will not work in the default network model.
 
-## Backend parity gaps (QEMU vs krun)
+## Backend parity gaps
 
-Gondolin supports both `qemu` (default) and an experimental `krun` backend, but
-feature parity is not complete.
+Gondolin supports `qemu` (default) plus experimental `krun` and `firecracker`
+backends, but feature parity is not complete.
 
 Notable gaps today:
 
 - Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires asset builds that include `manifest.assets.krunKernel`
 - qemu-specific backend knobs (`machineType`, `accel`, `cpu`, `qemuPath`) are
-  rejected when `vmm=krun`
+  rejected when `vmm=krun` or `vmm=firecracker`
+- Firecracker requires Linux/KVM and does not support mediated guest network
+  egress yet
 - `rootfs.mode="memory"` is not truly RAM-backed on `krun` (or on `qemu` when
-  combined with `rootfs.size`); it is implemented as a temporary qcow2 overlay
-  file on disk that is deleted on close
+  combined with `rootfs.size`); it is implemented as a temporary disk image
+  that is deleted on close
 
-See [VM Backends (QEMU vs krun)](./backends.md) for the maintained matrix.
+See [VM Backends](./backends.md) for the maintained matrix.
 
 ## No Windows support
 

@@ -266,6 +266,8 @@ export type AssetBuildIdInput = {
     rootfs: string;
     krunKernel?: string;
     krunInitrd?: string;
+    firecrackerKernel?: string;
+    firecrackerInitrd?: string;
   };
   /** guest architecture identifier (e.g. "aarch64") */
   arch?: string;
@@ -291,6 +293,12 @@ export function computeAssetBuildId(input: AssetBuildIdInput): string {
   }
   if (input.checksums.krunInitrd !== undefined) {
     parts.push(`krunInitrd=${input.checksums.krunInitrd}`);
+  }
+  if (input.checksums.firecrackerKernel !== undefined) {
+    parts.push(`firecrackerKernel=${input.checksums.firecrackerKernel}`);
+  }
+  if (input.checksums.firecrackerInitrd !== undefined) {
+    parts.push(`firecrackerInitrd=${input.checksums.firecrackerInitrd}`);
   }
 
   parts.push(`arch=${arch}`);
@@ -348,6 +356,10 @@ export interface AssetManifest {
     krunKernel?: string;
     /** krun initrd image filename */
     krunInitrd?: string;
+    /** Firecracker-compatible kernel image filename */
+    firecrackerKernel?: string;
+    /** Firecracker initrd image filename */
+    firecrackerInitrd?: string;
   };
 
   /** sha256 checksums (hex) */
@@ -362,6 +374,10 @@ export interface AssetManifest {
     krunKernel?: string;
     /** krun initrd checksum */
     krunInitrd?: string;
+    /** Firecracker-compatible kernel checksum */
+    firecrackerKernel?: string;
+    /** Firecracker initrd checksum */
+    firecrackerInitrd?: string;
   };
 }
 
@@ -450,6 +466,26 @@ export function loadGuestAssets(assetDir: string): GuestAssets {
     }
   }
 
+  if (assetFiles.firecrackerKernel) {
+    const firecrackerKernelPath = path.join(
+      resolvedDir,
+      assetFiles.firecrackerKernel,
+    );
+    if (!fs.existsSync(firecrackerKernelPath)) {
+      missing.push(assetFiles.firecrackerKernel);
+    }
+  }
+
+  if (assetFiles.firecrackerInitrd) {
+    const firecrackerInitrdPath = path.join(
+      resolvedDir,
+      assetFiles.firecrackerInitrd,
+    );
+    if (!fs.existsSync(firecrackerInitrdPath)) {
+      missing.push(assetFiles.firecrackerInitrd);
+    }
+  }
+
   if (missing.length > 0) {
     throw new Error(
       `Missing guest assets in ${resolvedDir}: ${missing.join(", ")}\n` +
@@ -494,6 +530,20 @@ function assetsExist(dir: string): boolean {
   if (
     assetFiles.krunInitrd &&
     !fs.existsSync(path.join(dir, assetFiles.krunInitrd))
+  ) {
+    return false;
+  }
+
+  if (
+    assetFiles.firecrackerKernel &&
+    !fs.existsSync(path.join(dir, assetFiles.firecrackerKernel))
+  ) {
+    return false;
+  }
+
+  if (
+    assetFiles.firecrackerInitrd &&
+    !fs.existsSync(path.join(dir, assetFiles.firecrackerInitrd))
   ) {
     return false;
   }

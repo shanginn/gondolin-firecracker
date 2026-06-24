@@ -8,7 +8,13 @@ function makeResolvedOptions(
   overrides: Partial<ResolvedSandboxServerOptions> = {},
 ): ResolvedSandboxServerOptions {
   return {
+    vmm: "qemu",
     qemuPath: "/bin/false",
+    krunRunnerPath: "/bin/false",
+    firecrackerPath: "/bin/false",
+    firecrackerApiSocketPath: "/tmp/gondolin-test-firecracker-api.sock",
+    firecrackerVsockPath: "/tmp/gondolin-test-firecracker-vsock.sock",
+    firecrackerGuestCid: 3,
     kernelPath: "/tmp/vmlinuz",
     initrdPath: "/tmp/initramfs.cpio",
     rootfsPath: "/tmp/rootfs.ext4",
@@ -22,6 +28,7 @@ function makeResolvedOptions(
     virtioSocketPath: "/tmp/gondolin-test-virtio.sock",
     virtioFsSocketPath: "/tmp/gondolin-test-virtiofs.sock",
     virtioSshSocketPath: "/tmp/gondolin-test-virtiossh.sock",
+    virtioIngressSocketPath: "/tmp/gondolin-test-virtioingress.sock",
     netSocketPath: "/tmp/gondolin-test-net.sock",
     netMac: "02:00:00:00:00:01",
     netEnabled: false,

@@ -81,7 +81,11 @@ export type VmCheckpointData = {
 function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "firecracker"
+  ) {
     return normalized;
   }
   return null;
@@ -93,7 +97,7 @@ function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm {
     const explicit = normalizeSandboxVmm(explicitRaw);
     if (!explicit) {
       throw new Error(
-        `invalid sandbox vmm backend: ${String(explicitRaw)} (expected "qemu" or "krun")`,
+        `invalid sandbox vmm backend: ${String(explicitRaw)} (expected "qemu", "krun", or "firecracker")`,
       );
     }
     return explicit;
@@ -105,23 +109,26 @@ function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm {
 function resolveCheckpointCompatibleVmm(data: VmCheckpointData): SandboxVmm[] {
   let qemu = false;
   let krun = false;
+  let sawCompatibilityMetadata = false;
 
   if (Array.isArray(data.compatibleVmm)) {
     for (const entry of data.compatibleVmm) {
       const normalized = normalizeSandboxVmm(entry);
       if (normalized === "qemu") qemu = true;
       if (normalized === "krun") krun = true;
+      if (normalized) sawCompatibilityMetadata = true;
     }
   }
 
-  if (!qemu && !krun) {
+  if (!qemu && !krun && !sawCompatibilityMetadata) {
     const createdWith = normalizeSandboxVmm(data.createdWithVmm);
     if (createdWith === "qemu") qemu = true;
     if (createdWith === "krun") krun = true;
+    if (createdWith) sawCompatibilityMetadata = true;
   }
 
   // Legacy checkpoints were qemu-only.
-  if (!qemu && !krun) {
+  if (!qemu && !krun && !sawCompatibilityMetadata) {
     qemu = true;
   }
 
@@ -440,6 +447,9 @@ export class VmCheckpoint {
     };
 
     const requestedVmm = resolveRequestedResumeVmm(mergedForResume);
+    if (requestedVmm === "firecracker") {
+      throw new Error("checkpoint resume is not supported with vmm=firecracker");
+    }
     const compatibleVmm = resolveCheckpointCompatibleVmm(this.data);
     if (!compatibleVmm.includes(requestedVmm)) {
       throw new Error(

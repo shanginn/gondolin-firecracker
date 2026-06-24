@@ -376,6 +376,8 @@ my-assets/
   rootfs.ext4          # Root filesystem image
   krun-kernel          # libkrunfw-compatible kernel
   krun-empty-initrd    # Empty initrd for krun boot
+  firecracker-kernel   # Optional Firecracker-specific kernel
+  firecracker-initrd   # Optional Firecracker-specific initrd
 ```
 
 The `manifest.json` contains the build configuration, timestamps, SHA-256

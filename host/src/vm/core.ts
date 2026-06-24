@@ -10,6 +10,7 @@ import { AsyncSingleflight } from "../utils/async.ts";
 
 import {
   createTempQcow2Overlay,
+  createTempRawCopy,
   ensureDiskImageMinimumSize,
   ensureQemuImgAvailable,
   inferDiskFormatFromPath,
@@ -363,10 +364,16 @@ export class VM {
       options.rootfs?.size === undefined
         ? null
         : parseDiskSizeToBytes(options.rootfs.size);
+    const requestedVmm = String(
+      options.sandbox?.vmm ?? process.env.GONDOLIN_VMM ?? "",
+    )
+      .trim()
+      .toLowerCase();
+    const defaultNetEnabled = requestedVmm !== "firecracker";
     const mitmMounts = resolveMitmMounts(
       options.vfs,
       options.sandbox?.mitmCertDir,
-      options.sandbox?.netEnabled ?? true,
+      options.sandbox?.netEnabled ?? defaultNetEnabled,
     );
 
     // Inject a guarded /etc/gondolin mount (host-authoritative ingress configuration)
@@ -415,7 +422,7 @@ export class VM {
       const injectedMounts = resolveMitmMounts(
         undefined,
         sandboxOptions.mitmCertDir,
-        sandboxOptions.netEnabled ?? true,
+        sandboxOptions.netEnabled ?? defaultNetEnabled,
       );
       if (Object.keys(injectedMounts).length > 0) {
         const normalized = normalizeMountMap({
@@ -498,8 +505,11 @@ export class VM {
       sandboxOptions.rootDiskDeleteOnClose !== undefined;
 
     const manifestRootfsMode = resolveManifestRootfsMode(resolved);
-    const rootfsMode = options.rootfs?.mode ?? manifestRootfsMode ?? "cow";
+    const defaultRootfsMode = resolved.vmm === "firecracker" ? "readonly" : "cow";
+    const rootfsMode =
+      options.rootfs?.mode ?? manifestRootfsMode ?? defaultRootfsMode;
     const supportsSnapshotRootDisk = (resolved.vmm ?? "qemu") === "qemu";
+    const requiresRawWritableRootDisk = resolved.vmm === "firecracker";
 
     try {
       // Prepare root disk:
@@ -519,9 +529,13 @@ export class VM {
                 readOnly: false,
                 snapshot: true,
               })
-            : prepareOverlayRootDisk(resolved);
+            : requiresRawWritableRootDisk
+              ? prepareRawCopyRootDisk(resolved)
+              : prepareOverlayRootDisk(resolved);
       } else if (rootfsMode === "cow") {
-        this.rootDisk = prepareOverlayRootDisk(resolved);
+        this.rootDisk = requiresRawWritableRootDisk
+          ? prepareRawCopyRootDisk(resolved)
+          : prepareOverlayRootDisk(resolved);
       } else {
         throw new Error(`unsupported rootfs mode: ${String(rootfsMode)}`);
       }
@@ -2128,6 +2142,18 @@ function prepareOverlayRootDisk(
   });
 }
 
+function prepareRawCopyRootDisk(
+  resolved: ResolvedSandboxServerOptions,
+): RootDiskState {
+  return installRootDisk(resolved, {
+    path: createTempRawCopy(resolved.rootfsPath),
+    format: "raw",
+    snapshot: false,
+    readOnly: false,
+    deleteOnClose: true,
+  });
+}
+
 function isSameExistingFile(a: string, b: string): boolean {
   const resolvedA = path.resolve(a);
   const resolvedB = path.resolve(b);
@@ -2161,8 +2187,10 @@ function prepareRootDiskResize(
     );
   }
 
-  ensureQemuImgAvailable();
-  ensureDiskImageMinimumSize(rootDisk.path, sizeBytes);
+  if (rootDisk.format !== "raw") {
+    ensureQemuImgAvailable();
+  }
+  ensureDiskImageMinimumSize(rootDisk.path, sizeBytes, rootDisk.format);
 }
 
 function resolveManifestRootfsMode(

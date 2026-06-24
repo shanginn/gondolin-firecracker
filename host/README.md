@@ -3,9 +3,10 @@
 **Local Linux micro-VMs with a fully programmable network stack and filesystem.**
 
 Gondolin runs lightweight micro-VMs on your Mac or Linux machine (QEMU by
-default, optional `krun` backend). The network stack and virtual filesystem are
-implemented in TypeScript, giving you complete programmatic control over what
-the sandbox can access and what secrets it can use.
+default, optional experimental `krun` and `firecracker` backends). The network
+stack and virtual filesystem are implemented in TypeScript, giving you complete
+programmatic control over what the sandbox can access and what secrets it can
+use.
 
 ## Requirements
 
@@ -26,6 +27,15 @@ Optional experimental backend:
 - `gondolin bash --vmm krun` selects the backend per-command
 - `GONDOLIN_VMM=krun` still works as a global default
 - backend parity matrix: [docs/backends.md](../docs/backends.md)
+
+Optional experimental Firecracker backend:
+
+- Linux/KVM only (`/dev/kvm` required)
+- selected with `gondolin bash --vmm firecracker` or `sandbox.vmm = "firecracker"`
+- uses Firecracker vsock for Gondolin exec/VFS/SSH/ingress channels
+- defaults to `1` vCPU and `256M` with quiet/no-serial boot, no guest DHCP, and a read-only base rootfs
+- mediated guest network egress is not implemented yet; `netEnabled` defaults to `false`
+- Kubernetes deployment requirements: [docs/kubernetes.md](../docs/kubernetes.md)
 
 Linux prerequisites for `make krun-runner` (Ubuntu/Debian):
 

@@ -83,6 +83,21 @@ test("checkpoint: compatibility list accepts qemu/krun and ignores unknowns", ()
   assert.deepEqual(compatible, ["qemu", "krun"]);
 });
 
+test("checkpoint: firecracker metadata is not resume-compatible yet", () => {
+  assert.deepEqual(
+    checkpointTest.resolveCheckpointCompatibleVmm(
+      makeCheckpointData({ compatibleVmm: ["firecracker"] }),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    checkpointTest.resolveCheckpointCompatibleVmm(
+      makeCheckpointData({ createdWithVmm: "firecracker" }),
+    ),
+    [],
+  );
+});
+
 test("checkpoint: createdWithVmm fallback is used when list is missing", () => {
   const compatible = checkpointTest.resolveCheckpointCompatibleVmm(
     makeCheckpointData({ createdWithVmm: "krun" }),

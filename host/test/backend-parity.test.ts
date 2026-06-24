@@ -8,7 +8,9 @@ import {
   scheduleForceExit,
   shouldSkipVmTests,
   resolveKrunRunnerPath,
+  resolveFirecrackerPath,
   getKrunRuntimeSkipReason,
+  getFirecrackerRuntimeSkipReason,
 } from "./helpers/vm-fixture.ts";
 
 const timeoutMs = Number(process.env.WS_TIMEOUT ?? 120000);
@@ -22,9 +24,10 @@ const ingressFetchTimeoutMs = Math.max(
 );
 const requireKrun = process.env.GONDOLIN_REQUIRE_KRUN === "1";
 const requireQemu = process.env.GONDOLIN_REQUIRE_QEMU !== "0";
+const requireFirecracker = process.env.GONDOLIN_REQUIRE_FIRECRACKER === "1";
 const runIngressParity = process.env.GONDOLIN_BACKEND_PARITY_INGRESS === "1";
 
-const ALL_BACKENDS = ["qemu", "krun"] as const;
+const ALL_BACKENDS = ["qemu", "krun", "firecracker"] as const;
 type BackendName = (typeof ALL_BACKENDS)[number];
 
 function resolveRequestedBackends(): BackendName[] {
@@ -54,6 +57,14 @@ function backendSandboxOptions(backend: BackendName) {
     return {
       vmm: "krun" as const,
       krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
+      console: "none" as const,
+    };
+  }
+  if (backend === "firecracker") {
+    return {
+      vmm: "firecracker" as const,
+      firecrackerPath: resolveFirecrackerPath() ?? undefined,
+      netEnabled: false,
       console: "none" as const,
     };
   }
@@ -114,6 +125,20 @@ async function skipIfBackendUnavailable(
       throw new Error(qemuSkipReason);
     }
     t.skip(qemuSkipReason);
+    return true;
+  }
+
+  if (backend === "firecracker") {
+    const firecrackerSkipReason = await getFirecrackerRuntimeSkipReason();
+    if (!firecrackerSkipReason) {
+      return false;
+    }
+
+    if (requireFirecracker) {
+      throw new Error(firecrackerSkipReason);
+    }
+
+    t.skip(firecrackerSkipReason);
     return true;
   }
 

@@ -28,6 +28,7 @@ import {
   type HttpFetch,
   type HttpHooks,
 } from "../qemu/net.ts";
+import { inferDiskFormatFromPath } from "../qemu/img.ts";
 import type { SshOptions } from "../qemu/ssh.ts";
 import type { TcpOptions } from "../qemu/tcp.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
@@ -45,13 +46,17 @@ const require = createRequire(import.meta.url);
 export type ImagePath = string | GuestAssets;
 
 /** vm backend implementation */
-export type SandboxVmm = "qemu" | "krun";
+export type SandboxVmm = "qemu" | "krun" | "firecracker";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_QUEUED_EXECS = 64;
 const DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS = 30_000;
+const DEFAULT_VM_MEMORY = "1G";
+const DEFAULT_VM_CPUS = 2;
+const DEFAULT_FIRECRACKER_MEMORY = "256M";
+const DEFAULT_FIRECRACKER_CPUS = 1;
 
 /**
  * sandbox server options
@@ -67,6 +72,14 @@ export type SandboxServerOptions = {
   qemuPath?: string;
   /** krun runner binary path */
   krunRunnerPath?: string;
+  /** firecracker binary path */
+  firecrackerPath?: string;
+  /** firecracker API socket path */
+  firecrackerApiSocketPath?: string;
+  /** firecracker vsock base Unix socket path */
+  firecrackerVsockPath?: string;
+  /** firecracker guest vsock CID */
+  firecrackerGuestCid?: number;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (qemu syntax, e.g. "1G") */
@@ -176,6 +189,14 @@ export type ResolvedSandboxServerOptions = {
   qemuPath: string;
   /** krun runner binary path */
   krunRunnerPath: string;
+  /** firecracker binary path */
+  firecrackerPath: string;
+  /** firecracker API socket path */
+  firecrackerApiSocketPath: string;
+  /** firecracker vsock base Unix socket path */
+  firecrackerVsockPath: string;
+  /** firecracker guest vsock CID */
+  firecrackerGuestCid: number;
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -322,7 +343,11 @@ function resolveImagePath(imagePath: ImagePath): ResolvedImagePath {
 function normalizeVmm(value: string | null | undefined): SandboxVmm | null {
   if (!value) return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "qemu" || normalized === "krun") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "firecracker"
+  ) {
     return normalized;
   }
   return null;
@@ -379,6 +404,38 @@ function resolveQemuIdlePauseMs(
   }
 
   return DEFAULT_DARWIN_HVF_IDLE_PAUSE_MS;
+}
+
+function parseMemoryToMiB(value: string, backend: string): number {
+  const trimmed = value.trim();
+  const match = /^(\d+)([kKmMgGtT]?)$/.exec(trimmed);
+  if (!match) {
+    throw new Error(
+      `invalid vm memory value for ${backend} backend: ${JSON.stringify(value)}`,
+    );
+  }
+
+  const amount = Number.parseInt(match[1]!, 10);
+  const unit = match[2]!.toUpperCase();
+
+  let bytes = amount;
+  if (unit === "K") bytes *= 1024;
+  else if (unit === "M" || unit === "") bytes *= 1024 * 1024;
+  else if (unit === "G") bytes *= 1024 * 1024 * 1024;
+  else if (unit === "T") bytes *= 1024 * 1024 * 1024 * 1024;
+
+  const mib = Math.max(1, Math.ceil(bytes / (1024 * 1024)));
+  if (!Number.isSafeInteger(mib) || mib > 0xffffffff) {
+    throw new Error(`vm memory is too large for ${backend} backend: ${value}`);
+  }
+
+  return mib;
+}
+
+function validateCpuCount(value: number, backend: string): void {
+  if (!Number.isInteger(value) || value < 1 || value > 255) {
+    throw new Error(`invalid vm cpu count for ${backend} backend: ${value}`);
+  }
 }
 
 function resolveLocalKrunRunnerPath(): string | null {
@@ -565,7 +622,71 @@ function resolveDefaultKrunRunnerPath(
   return "gondolin-krun-runner";
 }
 
+function resolveDefaultFirecrackerPath(): string {
+  return process.env.GONDOLIN_FIRECRACKER?.trim() || "firecracker";
+}
+
+function resolveRuntimeDir(): string {
+  const envDir = process.env.GONDOLIN_RUNTIME_DIR?.trim();
+  if (envDir) return path.resolve(envDir);
+
+  // macOS has tighter unix socket path limits in the default temp dir and we
+  // already standardize on /tmp elsewhere.
+  return process.platform === "darwin" ? "/tmp" : os.tmpdir();
+}
+
+const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
+
+function validateLinuxUnixSocketPath(
+  socketPath: string,
+  fieldName: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== "linux") return;
+
+  const bytes = Buffer.byteLength(socketPath);
+  if (bytes <= LINUX_UNIX_SOCKET_PATH_MAX_BYTES) return;
+
+  throw new Error(
+    `${fieldName} is too long for a Linux Unix socket path ` +
+      `(${bytes} bytes, max ${LINUX_UNIX_SOCKET_PATH_MAX_BYTES}). ` +
+      "Set GONDOLIN_RUNTIME_DIR to a short writable directory such as /run/gondolin, " +
+      "or provide explicit Firecracker socket paths.",
+  );
+}
+
+function validateFirecrackerSocketPaths(
+  apiSocketPath: string,
+  vsockPath: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  validateLinuxUnixSocketPath(
+    apiSocketPath,
+    "sandbox.firecrackerApiSocketPath",
+    platform,
+  );
+  validateLinuxUnixSocketPath(
+    vsockPath,
+    "sandbox.firecrackerVsockPath",
+    platform,
+  );
+  for (const port of [1024, 1025, 1026, 1027]) {
+    validateLinuxUnixSocketPath(
+      `${vsockPath}_${port}`,
+      `sandbox.firecrackerVsockPath channel ${port}`,
+      platform,
+    );
+  }
+}
+
 type KrunKernelOverride = {
+  /** replacement kernel image path */
+  kernelPath: string;
+  /** replacement initrd path */
+  initrdPath: string;
+};
+
+type FirecrackerKernelOverride = {
   /** replacement kernel image path */
   kernelPath: string;
   /** replacement initrd path */
@@ -660,6 +781,61 @@ function resolveKrunKernelOverride(
   return {
     kernelPath,
     initrdPath: resolveKrunInitrdPath(imageManifest, imageDir),
+  };
+}
+
+function resolveFirecrackerKernelOverride(
+  imageManifest: ReturnType<typeof loadAssetManifest>,
+  imageDir: string | null,
+): FirecrackerKernelOverride | null {
+  const assets = imageManifest?.assets as
+    | {
+        firecrackerKernel?: string;
+        firecrackerInitrd?: string;
+      }
+    | undefined;
+  if (!imageDir || !assets?.firecrackerKernel) {
+    return null;
+  }
+
+  const kernelPath = resolveManifestAssetPath(
+    imageDir,
+    assets.firecrackerKernel,
+    "manifest.assets.firecrackerKernel",
+  );
+
+  if (!fs.existsSync(kernelPath)) {
+    throw new Error(
+      `manifest.assets.firecrackerKernel points to missing file: ${assets.firecrackerKernel}`,
+    );
+  }
+
+  const fallbackInitramfs = imageManifest?.assets?.initramfs;
+  let initrdPath: string;
+  if (assets.firecrackerInitrd) {
+    initrdPath = resolveManifestAssetPath(
+      imageDir,
+      assets.firecrackerInitrd,
+      "manifest.assets.firecrackerInitrd",
+    );
+    if (!fs.existsSync(initrdPath)) {
+      throw new Error(
+        `manifest.assets.firecrackerInitrd points to missing file: ${assets.firecrackerInitrd}`,
+      );
+    }
+  } else if (fallbackInitramfs) {
+    initrdPath = resolveManifestAssetPath(
+      imageDir,
+      fallbackInitramfs,
+      "manifest.assets.initramfs",
+    );
+  } else {
+    return null;
+  }
+
+  return {
+    kernelPath,
+    initrdPath,
   };
 }
 
@@ -804,6 +980,8 @@ function detectGuestArchFromManifest(assets: Partial<GuestAssets>): {
 type ResolveSandboxServerOptionsDeps = {
   /** test-only override for default krun runner resolution */
   resolveDefaultKrunRunnerPath?: () => string;
+  /** test-only host platform override */
+  platform?: NodeJS.Platform;
 };
 
 export function resolveSandboxServerOptions(
@@ -816,6 +994,7 @@ export function resolveSandboxServerOptions(
       "sandbox.rootDiskSnapshot has been removed; use VM rootfs.mode='memory' for backend-native ephemeral writes on qemu or rootfs.mode='cow' for a throwaway qcow2 overlay on disk",
     );
   }
+  const platform = deps.platform ?? process.platform;
 
   // Resolve image paths: explicit imagePath > assets parameter > local dev paths
   let resolvedAssets: Partial<GuestAssets>;
@@ -841,8 +1020,7 @@ export function resolveSandboxServerOptions(
   const baseInitrdPath = resolvedAssets.initrdPath;
   const rootfsPath = resolvedAssets.rootfsPath;
 
-  // we are running into length limits on macos on the default temp dir
-  const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+  const tmpDir = resolveRuntimeDir();
   const defaultVirtio = path.resolve(
     tmpDir,
     `gondolin-virtio-${randomUUID().slice(0, 8)}.sock`,
@@ -863,6 +1041,14 @@ export function resolveSandboxServerOptions(
     tmpDir,
     `gondolin-net-${randomUUID().slice(0, 8)}.sock`,
   );
+  const defaultFirecrackerApiSocket = path.resolve(
+    tmpDir,
+    `gondolin-firecracker-api-${randomUUID().slice(0, 8)}.sock`,
+  );
+  const defaultFirecrackerVsock = path.resolve(
+    tmpDir,
+    `gondolin-firecracker-vsock-${randomUUID().slice(0, 8)}.sock`,
+  );
   const defaultNetMac = "02:00:00:00:00:01";
 
   const hostArch = getHostNodeArchCached();
@@ -871,7 +1057,6 @@ export function resolveSandboxServerOptions(
     hostArchNormalized === "arm64"
       ? "qemu-system-aarch64"
       : "qemu-system-x86_64";
-  const defaultMemory = "1G";
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
   const debug = debugFlagsToArray(resolvedDebugFlags);
@@ -879,11 +1064,17 @@ export function resolveSandboxServerOptions(
   const explicitVmm = normalizeVmm(options.vmm ?? null);
   if (options.vmm !== undefined && !explicitVmm) {
     throw new Error(
-      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu" or "krun")`,
+      `invalid sandbox vmm backend: ${String(options.vmm)} (expected "qemu", "krun", or "firecracker")`,
     );
   }
   const envVmm = normalizeVmm(process.env.GONDOLIN_VMM);
   const vmm = explicitVmm ?? envVmm ?? "qemu";
+  const defaultMemory =
+    vmm === "firecracker" ? DEFAULT_FIRECRACKER_MEMORY : DEFAULT_VM_MEMORY;
+  const defaultCpus =
+    vmm === "firecracker" ? DEFAULT_FIRECRACKER_CPUS : DEFAULT_VM_CPUS;
+  const memory = options.memory ?? defaultMemory;
+  const cpus = options.cpus ?? defaultCpus;
   const envCpu = process.env.GONDOLIN_CPU?.trim() || undefined;
   const cpu = vmm === "qemu" ? (options.cpu ?? envCpu) : options.cpu;
   let qemuPath = options.qemuPath ?? defaultQemuForHostArch;
@@ -894,10 +1085,26 @@ export function resolveSandboxServerOptions(
     (vmm === "krun"
       ? resolveDefaultKrunRunnerPathFn()
       : "gondolin-krun-runner");
+  const firecrackerPath =
+    options.firecrackerPath ??
+    (vmm === "firecracker" ? resolveDefaultFirecrackerPath() : "firecracker");
+  const firecrackerApiSocketPath =
+    options.firecrackerApiSocketPath ?? defaultFirecrackerApiSocket;
+  const firecrackerVsockPath =
+    options.firecrackerVsockPath ?? defaultFirecrackerVsock;
+  const firecrackerGuestCid = options.firecrackerGuestCid ?? 3;
 
   if (vmm === "krun") {
     const unsupported: string[] = [];
     if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
+    if (options.firecrackerPath !== undefined)
+      unsupported.push("sandbox.firecrackerPath");
+    if (options.firecrackerApiSocketPath !== undefined)
+      unsupported.push("sandbox.firecrackerApiSocketPath");
+    if (options.firecrackerVsockPath !== undefined)
+      unsupported.push("sandbox.firecrackerVsockPath");
+    if (options.firecrackerGuestCid !== undefined)
+      unsupported.push("sandbox.firecrackerGuestCid");
     if (options.machineType !== undefined)
       unsupported.push("sandbox.machineType");
     if (options.accel !== undefined) unsupported.push("sandbox.accel");
@@ -908,9 +1115,74 @@ export function resolveSandboxServerOptions(
     if (unsupported.length > 0) {
       throw new Error(
         `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=krun: ${unsupported.join(", ")}. ` +
-          "These options are only supported with vmm=qemu.",
+          "These options are not supported with vmm=krun.",
       );
     }
+  } else if (vmm === "firecracker") {
+    const unsupported: string[] = [];
+    if (options.qemuPath !== undefined) unsupported.push("sandbox.qemuPath");
+    if (options.krunRunnerPath !== undefined)
+      unsupported.push("sandbox.krunRunnerPath");
+    if (options.machineType !== undefined)
+      unsupported.push("sandbox.machineType");
+    if (options.accel !== undefined) unsupported.push("sandbox.accel");
+    if (options.cpu !== undefined) unsupported.push("sandbox.cpu");
+    if (options.qemuIdlePauseMs !== undefined)
+      unsupported.push("sandbox.qemuIdlePauseMs");
+    if (options.netSocketPath !== undefined)
+      unsupported.push("sandbox.netSocketPath");
+    if (options.netMac !== undefined) unsupported.push("sandbox.netMac");
+    if (options.virtioSocketPath !== undefined)
+      unsupported.push("sandbox.virtioSocketPath");
+    if (options.virtioFsSocketPath !== undefined)
+      unsupported.push("sandbox.virtioFsSocketPath");
+    if (options.virtioSshSocketPath !== undefined)
+      unsupported.push("sandbox.virtioSshSocketPath");
+    if (options.virtioIngressSocketPath !== undefined)
+      unsupported.push("sandbox.virtioIngressSocketPath");
+    if (options.httpHooks !== undefined) unsupported.push("sandbox.httpHooks");
+    if (options.dns !== undefined) unsupported.push("sandbox.dns");
+    if (options.ssh !== undefined) unsupported.push("sandbox.ssh");
+    if (options.tcp !== undefined) unsupported.push("sandbox.tcp");
+    if (options.mitmCertDir !== undefined) unsupported.push("sandbox.mitmCertDir");
+    if (options.maxHttpBodyBytes !== undefined)
+      unsupported.push("sandbox.maxHttpBodyBytes");
+    if (options.maxHttpResponseBodyBytes !== undefined)
+      unsupported.push("sandbox.maxHttpResponseBodyBytes");
+    if (options.allowWebSockets !== undefined)
+      unsupported.push("sandbox.allowWebSockets");
+
+    if (unsupported.length > 0) {
+      throw new Error(
+        `Unsupported sandbox option${unsupported.length === 1 ? "" : "s"} for vmm=firecracker: ${unsupported.join(", ")}.`,
+      );
+    }
+
+    if (platform !== "linux") {
+      throw new Error(
+        "Firecracker backend requires Linux/KVM and is not supported on this host platform.",
+      );
+    }
+
+    if (!Number.isInteger(firecrackerGuestCid) || firecrackerGuestCid < 3) {
+      throw new Error(
+        `invalid sandbox.firecrackerGuestCid: ${String(firecrackerGuestCid)} (expected integer >= 3)`,
+      );
+    }
+
+    if (options.netEnabled === true) {
+      throw new Error(
+        "Firecracker backend does not yet support Gondolin mediated networking; set sandbox.netEnabled=false.",
+      );
+    }
+
+    validateFirecrackerSocketPaths(
+      firecrackerApiSocketPath,
+      firecrackerVsockPath,
+      platform,
+    );
+    parseMemoryToMiB(memory, "Firecracker");
+    validateCpuCount(cpus, "Firecracker");
   }
 
   const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
@@ -918,12 +1190,22 @@ export function resolveSandboxServerOptions(
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
   let krunKernelOverride: KrunKernelOverride | null = null;
+  let firecrackerKernelOverride: FirecrackerKernelOverride | null = null;
 
   if (vmm === "krun" && !explicitImageObject) {
     krunKernelOverride = resolveKrunKernelOverride(imageManifest, imageDir);
     if (krunKernelOverride) {
       kernelPath = krunKernelOverride.kernelPath;
       initrdPath = krunKernelOverride.initrdPath;
+    }
+  } else if (vmm === "firecracker" && !explicitImageObject) {
+    firecrackerKernelOverride = resolveFirecrackerKernelOverride(
+      imageManifest,
+      imageDir,
+    );
+    if (firecrackerKernelOverride) {
+      kernelPath = firecrackerKernelOverride.kernelPath;
+      initrdPath = firecrackerKernelOverride.initrdPath;
     }
   }
 
@@ -969,14 +1251,24 @@ export function resolveSandboxServerOptions(
           "or rebuild/download guest assets for the correct architecture.",
       );
     }
-  } else if (guestFromManifest) {
+  } else if (vmm === "krun" && guestFromManifest) {
     const host = normalizeArch(hostArch);
     if (host && guestFromManifest.arch !== host) {
       throw new Error(
         "Guest image architecture mismatch for libkrun backend.\n" +
           `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
           `  host arch:    ${host}\n\n` +
-          "Fix: select a guest image that matches the host architecture when using vmm=krun.",
+        "Fix: select a guest image that matches the host architecture when using vmm=krun.",
+      );
+    }
+  } else if (vmm === "firecracker" && guestFromManifest) {
+    const host = normalizeArch(hostArch);
+    if (host && guestFromManifest.arch !== host) {
+      throw new Error(
+        "Guest image architecture mismatch for Firecracker backend.\n" +
+          `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
+          `  host arch:    ${host}\n\n` +
+          "Fix: select a guest image that matches the host architecture when using vmm=firecracker.",
       );
     }
   }
@@ -989,10 +1281,33 @@ export function resolveSandboxServerOptions(
     );
   }
 
+  if (
+    vmm === "firecracker" &&
+    !explicitImageObject &&
+    !firecrackerKernelOverride
+  ) {
+    throw new Error(
+      "Selected image does not provide Firecracker boot assets.\n" +
+        "Expected manifest assets `firecrackerKernel` (and optional `firecrackerInitrd`).\n" +
+        "Fix: use an image built with `gondolin build` or choose a published image that includes Firecracker assets.",
+    );
+  }
+
   const rootDiskPath = options.rootDiskPath ?? rootfsPath;
   const rootDiskFormat =
-    options.rootDiskFormat ?? (options.rootDiskPath ? "qcow2" : "raw");
+    options.rootDiskFormat ??
+    (vmm === "firecracker"
+      ? inferDiskFormatFromPath(rootDiskPath)
+      : options.rootDiskPath
+        ? "qcow2"
+        : "raw");
   const rootDiskReadOnly = options.rootDiskReadOnly ?? false;
+
+  if (vmm === "firecracker" && rootDiskFormat !== "raw") {
+    throw new Error(
+      `Firecracker backend supports raw root disks only (got ${rootDiskFormat}).`,
+    );
+  }
 
   const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES;
   const maxQueuedStdinBytes = Math.max(
@@ -1008,22 +1323,41 @@ export function resolveSandboxServerOptions(
     vmm,
     qemuPath,
     krunRunnerPath,
+    firecrackerPath,
+    firecrackerApiSocketPath,
+    firecrackerVsockPath,
+    firecrackerGuestCid,
     kernelPath,
     initrdPath,
     rootfsPath,
     rootDiskPath,
     rootDiskFormat,
     rootDiskReadOnly,
-    memory: options.memory ?? defaultMemory,
-    cpus: options.cpus ?? 2,
-    virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
-    virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
-    virtioSshSocketPath: options.virtioSshSocketPath ?? defaultVirtioSsh,
+    memory,
+    cpus,
+    virtioSocketPath:
+      options.virtioSocketPath ??
+      (vmm === "firecracker"
+        ? `${firecrackerVsockPath}_1024`
+        : defaultVirtio),
+    virtioFsSocketPath:
+      options.virtioFsSocketPath ??
+      (vmm === "firecracker"
+        ? `${firecrackerVsockPath}_1025`
+        : defaultVirtioFs),
+    virtioSshSocketPath:
+      options.virtioSshSocketPath ??
+      (vmm === "firecracker"
+        ? `${firecrackerVsockPath}_1026`
+        : defaultVirtioSsh),
     virtioIngressSocketPath:
-      options.virtioIngressSocketPath ?? defaultVirtioIngress,
+      options.virtioIngressSocketPath ??
+      (vmm === "firecracker"
+        ? `${firecrackerVsockPath}_1027`
+        : defaultVirtioIngress),
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
-    netEnabled: options.netEnabled ?? true,
+    netEnabled: options.netEnabled ?? vmm !== "firecracker",
     allowWebSockets: options.allowWebSockets ?? true,
     debug,
     machineType: options.machineType,
@@ -1080,4 +1414,6 @@ export const __test = {
   probeKrunRunnerCandidate,
   resolvePackagedKrunRunnerPath,
   resolveDefaultKrunRunnerPath,
+  resolveRuntimeDir,
+  validateLinuxUnixSocketPath,
 };

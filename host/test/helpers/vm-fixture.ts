@@ -74,11 +74,50 @@ export function shouldSkipKrunVmTests(): string | false {
   return false;
 }
 
+/** Resolve a runnable Firecracker binary path for integration tests. */
+export function resolveFirecrackerPath(): string | null {
+  const envPath = process.env.GONDOLIN_FIRECRACKER?.trim();
+  const candidates = [envPath, "firecracker"];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      execFileSync(candidate, ["--version"], { stdio: "ignore" });
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return null;
+}
+
+/** Return a skip reason for Firecracker VM integration tests or false when runnable. */
+export function shouldSkipFirecrackerVmTests(): string | false {
+  if (process.platform !== "linux") {
+    return "Firecracker requires Linux/KVM";
+  }
+  if (shouldSkipVmTests()) {
+    return "hardware virtualization unavailable";
+  }
+
+  const firecrackerPath = resolveFirecrackerPath();
+  if (!firecrackerPath) {
+    return "Firecracker binary unavailable (install firecracker or set GONDOLIN_FIRECRACKER)";
+  }
+
+  return false;
+}
+
 let krunRuntimeSkipCheck: Promise<string | false> | null = null;
+let firecrackerRuntimeSkipCheck: Promise<string | false> | null = null;
 
 const krunPrecheckTimeoutMs = Math.max(
   1,
   Number(process.env.GONDOLIN_KRUN_PRECHECK_TIMEOUT_MS ?? 30000),
+);
+const firecrackerPrecheckTimeoutMs = Math.max(
+  1,
+  Number(process.env.GONDOLIN_FIRECRACKER_PRECHECK_TIMEOUT_MS ?? 30000),
 );
 
 /** Probe whether krun can actually boot/exec on this host. */
@@ -119,6 +158,47 @@ export async function getKrunRuntimeSkipReason(): Promise<string | false> {
   }
 
   return await krunRuntimeSkipCheck;
+}
+
+/** Probe whether Firecracker can actually boot/exec on this host. */
+export async function getFirecrackerRuntimeSkipReason(): Promise<string | false> {
+  const staticReason = shouldSkipFirecrackerVmTests();
+  if (staticReason) {
+    return staticReason;
+  }
+
+  if (!firecrackerRuntimeSkipCheck) {
+    firecrackerRuntimeSkipCheck = (async () => {
+      let vm: VM | null = null;
+      try {
+        vm = await VM.create({
+          startTimeoutMs: firecrackerPrecheckTimeoutMs,
+          sandbox: {
+            vmm: "firecracker",
+            firecrackerPath: resolveFirecrackerPath() ?? undefined,
+            netEnabled: false,
+            console: "none",
+          },
+        });
+
+        await vm.start();
+        const probe = await vm.exec(["/bin/sh", "-lc", "echo preflight-ok"]);
+        if (probe.exitCode !== 0) {
+          return `Firecracker runtime preflight exec failed (exit ${probe.exitCode})`;
+        }
+        return false;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return `Firecracker runtime unavailable: ${message}`;
+      } finally {
+        if (vm) {
+          await closeWithTimeout(vm);
+        }
+      }
+    })();
+  }
+
+  return await firecrackerRuntimeSkipCheck;
 }
 
 class Semaphore {

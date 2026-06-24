@@ -194,6 +194,28 @@ test(
         );
       }
 
+      if (sourceManifest.assets?.firecrackerKernel) {
+        const sourceFirecrackerKernel = path.join(
+          sourceDir,
+          sourceManifest.assets.firecrackerKernel,
+        );
+        fs.symlinkSync(
+          sourceFirecrackerKernel,
+          path.join(dir, sourceManifest.assets.firecrackerKernel),
+        );
+      }
+
+      if (sourceManifest.assets?.firecrackerInitrd) {
+        const sourceFirecrackerInitrd = path.join(
+          sourceDir,
+          sourceManifest.assets.firecrackerInitrd,
+        );
+        fs.symlinkSync(
+          sourceFirecrackerInitrd,
+          path.join(dir, sourceManifest.assets.firecrackerInitrd),
+        );
+      }
+
       fs.writeFileSync(
         path.join(dir, "manifest.json"),
         JSON.stringify(sourceManifest, null, 2),

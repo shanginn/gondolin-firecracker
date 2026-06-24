@@ -8,10 +8,15 @@ import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
 
 function makeTempAssetsDir(
   arch: "aarch64" | "x86_64",
-  options: { includeKrunAssets?: boolean; splitAssetDirs?: boolean } = {},
+  options: {
+    includeKrunAssets?: boolean;
+    includeFirecrackerAssets?: boolean;
+    splitAssetDirs?: boolean;
+  } = {},
 ): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-arch-"));
   const includeKrunAssets = options.includeKrunAssets ?? true;
+  const includeFirecrackerAssets = options.includeFirecrackerAssets ?? true;
   const splitAssetDirs = options.splitAssetDirs ?? false;
 
   const kernelRel = splitAssetDirs ? "boot/vmlinuz-virt" : "vmlinuz-virt";
@@ -21,6 +26,9 @@ function makeTempAssetsDir(
   const rootfsRel = splitAssetDirs ? "img/rootfs.ext4" : "rootfs.ext4";
   const krunKernelRel = splitAssetDirs ? "boot/krun-kernel" : "krun-kernel";
   const krunInitrdRel = splitAssetDirs ? "boot/krun-initrd" : "krun-initrd";
+  const firecrackerKernelRel = splitAssetDirs
+    ? "boot/firecracker-kernel"
+    : "firecracker-kernel";
 
   // Required asset files (can be empty for this test).
   fs.mkdirSync(path.dirname(path.join(dir, kernelRel)), { recursive: true });
@@ -32,6 +40,9 @@ function makeTempAssetsDir(
   if (includeKrunAssets) {
     fs.writeFileSync(path.join(dir, krunKernelRel), "");
     fs.writeFileSync(path.join(dir, krunInitrdRel), "");
+  }
+  if (includeFirecrackerAssets) {
+    fs.writeFileSync(path.join(dir, firecrackerKernelRel), "");
   }
 
   // Manifest is what we use to detect the guest architecture.
@@ -56,6 +67,11 @@ function makeTempAssetsDir(
                 krunInitrd: krunInitrdRel,
               }
             : {}),
+          ...(includeFirecrackerAssets
+            ? {
+                firecrackerKernel: firecrackerKernelRel,
+              }
+            : {}),
         },
         checksums: {
           kernel: "",
@@ -65,6 +81,11 @@ function makeTempAssetsDir(
             ? {
                 krunKernel: "",
                 krunInitrd: "",
+              }
+            : {}),
+          ...(includeFirecrackerAssets
+            ? {
+                firecrackerKernel: "",
               }
             : {}),
         },
@@ -177,6 +198,216 @@ test("resolveSandboxServerOptions rejects invalid vmm backend", () => {
           vmm: "wat" as any,
         }),
       /invalid sandbox vmm backend/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions rejects firecracker on non-linux hosts", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions(
+          {
+            imagePath: dir,
+            vmm: "firecracker",
+          },
+          undefined,
+          { platform: "darwin" },
+        ),
+      /Firecracker backend requires Linux\/KVM/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions maps firecracker channels to vsock sockets", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  try {
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: dir,
+        vmm: "firecracker",
+        firecrackerVsockPath: "/tmp/gondolin-test-vsock.sock",
+      },
+      undefined,
+      { platform: "linux" },
+    );
+
+    assert.equal(resolved.vmm, "firecracker");
+    assert.equal(path.basename(resolved.kernelPath), "firecracker-kernel");
+    assert.equal(resolved.firecrackerPath, "firecracker");
+    assert.equal(resolved.firecrackerGuestCid, 3);
+    assert.equal(resolved.memory, "256M");
+    assert.equal(resolved.cpus, 1);
+    assert.equal(resolved.netEnabled, false);
+    assert.equal(
+      resolved.virtioSocketPath,
+      "/tmp/gondolin-test-vsock.sock_1024",
+    );
+    assert.equal(
+      resolved.virtioFsSocketPath,
+      "/tmp/gondolin-test-vsock.sock_1025",
+    );
+    assert.equal(
+      resolved.virtioSshSocketPath,
+      "/tmp/gondolin-test-vsock.sock_1026",
+    );
+    assert.equal(
+      resolved.virtioIngressSocketPath,
+      "/tmp/gondolin-test-vsock.sock_1027",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions uses GONDOLIN_RUNTIME_DIR for Firecracker sockets", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  const runtimeDir = fs.mkdtempSync("/tmp/gfc-");
+  const oldRuntimeDir = process.env.GONDOLIN_RUNTIME_DIR;
+  try {
+    process.env.GONDOLIN_RUNTIME_DIR = runtimeDir;
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: dir,
+        vmm: "firecracker",
+      },
+      undefined,
+      { platform: "linux" },
+    );
+
+    assert.equal(path.dirname(resolved.firecrackerApiSocketPath), runtimeDir);
+    assert.equal(path.dirname(resolved.firecrackerVsockPath), runtimeDir);
+    assert.equal(
+      resolved.virtioSocketPath,
+      `${resolved.firecrackerVsockPath}_1024`,
+    );
+  } finally {
+    if (oldRuntimeDir === undefined) delete process.env.GONDOLIN_RUNTIME_DIR;
+    else process.env.GONDOLIN_RUNTIME_DIR = oldRuntimeDir;
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions rejects oversized Firecracker socket paths", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  const longVsockPath = `/tmp/${"a".repeat(120)}.sock`;
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions(
+          {
+            imagePath: dir,
+            vmm: "firecracker",
+            firecrackerVsockPath: longVsockPath,
+          },
+          undefined,
+          { platform: "linux" },
+        ),
+      /sandbox\.firecrackerVsockPath is too long for a Linux Unix socket path/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions requires manifest firecrackerKernel for vmm=firecracker", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch, {
+    includeFirecrackerAssets: false,
+  });
+
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions(
+          {
+            imagePath: dir,
+            vmm: "firecracker",
+          },
+          undefined,
+          { platform: "linux" },
+        ),
+      /Selected image does not provide Firecracker boot assets/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions validates firecracker resource sizing", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions(
+          {
+            imagePath: dir,
+            vmm: "firecracker",
+            memory: "wat",
+          },
+          undefined,
+          { platform: "linux" },
+        ),
+      /invalid vm memory value for Firecracker backend/,
+    );
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions(
+          {
+            imagePath: dir,
+            vmm: "firecracker",
+            cpus: 0,
+          },
+          undefined,
+          { platform: "linux" },
+        ),
+      /invalid vm cpu count for Firecracker backend/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions rejects mediated networking for firecracker", () => {
+  const hostArch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const dir = makeTempAssetsDir(hostArch);
+  try {
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions(
+          {
+            imagePath: dir,
+            vmm: "firecracker",
+            netEnabled: true,
+          },
+          undefined,
+          { platform: "linux" },
+        ),
+      /does not yet support Gondolin mediated networking/,
+    );
+    assert.throws(
+      () =>
+        resolveSandboxServerOptions(
+          {
+            imagePath: dir,
+            vmm: "firecracker",
+            allowWebSockets: false,
+          },
+          undefined,
+          { platform: "linux" },
+        ),
+      /Unsupported sandbox option for vmm=firecracker: sandbox\.allowWebSockets/,
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

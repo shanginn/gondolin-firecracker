@@ -162,6 +162,28 @@ export function verifyAssets(assetDir: string): boolean {
     });
   }
 
+  if (manifest.assets.firecrackerKernel) {
+    if (!manifest.checksums.firecrackerKernel) {
+      return false;
+    }
+    assets.push({
+      name: "firecrackerKernel",
+      file: manifest.assets.firecrackerKernel,
+      expected: manifest.checksums.firecrackerKernel,
+    });
+  }
+
+  if (manifest.assets.firecrackerInitrd) {
+    if (!manifest.checksums.firecrackerInitrd) {
+      return false;
+    }
+    assets.push({
+      name: "firecrackerInitrd",
+      file: manifest.assets.firecrackerInitrd,
+      expected: manifest.checksums.firecrackerInitrd,
+    });
+  }
+
   for (const { name, file, expected } of assets) {
     const filePath = path.join(assetDir, file);
     if (!fs.existsSync(filePath)) {

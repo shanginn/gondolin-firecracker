@@ -165,27 +165,74 @@ export XDG_CACHE_HOME=/tmp/.cache
 export XDG_CONFIG_HOME=/tmp/.config
 export XDG_DATA_HOME=/tmp/.local/share
 export UV_CACHE_DIR=/tmp/.cache/uv
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export UV_SYSTEM_CERTS=true
 
-log "[init] /dev entries:"
-log_cmd ls -l /dev
-if [ -d /dev/virtio-ports ]; then
-  log "[init] /dev/virtio-ports:"
-  log_cmd ls -l /dev/virtio-ports
-else
-  log "[init] /dev/virtio-ports missing"
-fi
-if [ -d /sys/class/virtio-ports ]; then
-  log "[init] /sys/class/virtio-ports:"
-  log_cmd ls -l /sys/class/virtio-ports
-else
-  log "[init] /sys/class/virtio-ports missing"
+sandboxfs_mount="/data"
+sandboxfs_binds=""
+gondolin_transport="virtio"
+gondolin_net="on"
+gondolin_debug="1"
+vsock_control_port="1024"
+vsock_fs_port="1025"
+vsock_ssh_port="1026"
+vsock_ingress_port="1027"
+
+if [ -r /proc/cmdline ]; then
+  for arg in \$(cat /proc/cmdline); do
+    case "\${arg}" in
+      gondolin.transport=*)
+        gondolin_transport="\${arg#gondolin.transport=}"
+        ;;
+      gondolin.net=*)
+        gondolin_net="\${arg#gondolin.net=}"
+        ;;
+      gondolin.debug=*)
+        gondolin_debug="\${arg#gondolin.debug=}"
+        ;;
+      gondolin.vsock.control=*)
+        vsock_control_port="\${arg#gondolin.vsock.control=}"
+        ;;
+      gondolin.vsock.fs=*)
+        vsock_fs_port="\${arg#gondolin.vsock.fs=}"
+        ;;
+      gondolin.vsock.ssh=*)
+        vsock_ssh_port="\${arg#gondolin.vsock.ssh=}"
+        ;;
+      gondolin.vsock.ingress=*)
+        vsock_ingress_port="\${arg#gondolin.vsock.ingress=}"
+        ;;
+      sandboxfs.mount=*)
+        sandboxfs_mount="\${arg#sandboxfs.mount=}"
+        ;;
+      sandboxfs.bind=*)
+        sandboxfs_binds="\${arg#sandboxfs.bind=}"
+        ;;
+    esac
+  done
 fi
 
-if modprobe virtio_console > /dev/null 2>&1; then
-  log "[init] loaded virtio_console"
+if [ "\${gondolin_debug}" = "1" ]; then
+  log "[init] /dev entries:"
+  log_cmd ls -l /dev
+  if [ -d /dev/virtio-ports ]; then
+    log "[init] /dev/virtio-ports:"
+    log_cmd ls -l /dev/virtio-ports
+  else
+    log "[init] /dev/virtio-ports missing"
+  fi
+  if [ -d /sys/class/virtio-ports ]; then
+    log "[init] /sys/class/virtio-ports:"
+    log_cmd ls -l /sys/class/virtio-ports
+  else
+    log "[init] /sys/class/virtio-ports missing"
+  fi
 fi
-setup_virtio_ports
+
+if [ "\${gondolin_transport}" != "vsock" ] && modprobe virtio_console > /dev/null 2>&1; then
+  log "[init] loaded virtio_console"
+  setup_virtio_ports
+fi
 if modprobe virtio_rng > /dev/null 2>&1; then
   log "[init] loaded virtio_rng"
 fi
@@ -196,50 +243,54 @@ else
   log "[init] /dev/hwrng missing"
 fi
 
-if modprobe virtio_net > /dev/null 2>&1; then
-  log "[init] loaded virtio_net"
-fi
-
-if command -v ip > /dev/null 2>&1; then
-  ip link set lo up || true
-  ip link set eth0 up || true
-elif command -v ifconfig > /dev/null 2>&1; then
-  ifconfig lo up || true
-  ifconfig eth0 up || true
-else
-  log "[init] no network link tool (ip/ifconfig)"
-fi
-
-if command -v udhcpc > /dev/null 2>&1; then
-  UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
-  if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
-    UDHCPC_SCRIPT="/sbin/udhcpc.script"
+if [ "\${gondolin_net}" != "off" ]; then
+  if modprobe virtio_net > /dev/null 2>&1; then
+    log "[init] loaded virtio_net"
   fi
-  if [ -x "\${UDHCPC_SCRIPT}" ]; then
-    udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[init] udhcpc failed"
+
+  if command -v ip > /dev/null 2>&1; then
+    ip link set lo up || true
+    ip link set eth0 up || true
+  elif command -v ifconfig > /dev/null 2>&1; then
+    ifconfig lo up || true
+    ifconfig eth0 up || true
   else
-    udhcpc -i eth0 -q -n || log "[init] udhcpc failed"
+    log "[init] no network link tool (ip/ifconfig)"
+  fi
+
+  if command -v udhcpc > /dev/null 2>&1; then
+    UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
+    if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
+      UDHCPC_SCRIPT="/sbin/udhcpc.script"
+    fi
+    if [ -x "\${UDHCPC_SCRIPT}" ]; then
+      udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[init] udhcpc failed"
+    else
+      udhcpc -i eth0 -q -n || log "[init] udhcpc failed"
+    fi
+  fi
+else
+  if command -v ip > /dev/null 2>&1; then
+    ip link set lo up || true
+  elif command -v ifconfig > /dev/null 2>&1; then
+    ifconfig lo up || true
+  fi
+fi
+
+if [ "\${gondolin_transport}" = "vsock" ]; then
+  if modprobe vsock > /dev/null 2>&1; then
+    log "[init] loaded vsock"
+  fi
+  if modprobe vmw_vsock_virtio_transport > /dev/null 2>&1; then
+    log "[init] loaded vmw_vsock_virtio_transport"
+  fi
+  if modprobe virtio_vsock > /dev/null 2>&1; then
+    log "[init] loaded virtio_vsock"
   fi
 fi
 
 if modprobe fuse > /dev/null 2>&1; then
   log "[init] loaded fuse"
-fi
-
-sandboxfs_mount="/data"
-sandboxfs_binds=""
-
-if [ -r /proc/cmdline ]; then
-  for arg in \$(cat /proc/cmdline); do
-    case "\${arg}" in
-      sandboxfs.mount=*)
-        sandboxfs_mount="\${arg#sandboxfs.mount=}"
-        ;;
-      sandboxfs.bind=*)
-        sandboxfs_binds="\${arg#sandboxfs.bind=}"
-        ;;
-    esac
-  done
 fi
 
 wait_for_sandboxfs() {
@@ -257,7 +308,9 @@ mkdir -p "\${sandboxfs_mount}"
 sandboxfs_ready=0
 sandboxfs_error="sandboxfs mount not ready"
 
-setup_virtio_ports
+if [ "\${gondolin_transport}" != "vsock" ]; then
+  setup_virtio_ports
+fi
 
 if [ -x /usr/bin/sandboxfs ]; then
   log "[init] starting sandboxfs at \${sandboxfs_mount}"
@@ -265,9 +318,13 @@ if [ -x /usr/bin/sandboxfs ]; then
   if [ -z "\${SANDBOXFS_LOG}" ]; then
     SANDBOXFS_LOG="/dev/null"
   fi
-  sandboxfs_rpc_path="$(resolve_virtio_port_path virtio-fs)"
-  log "[init] sandboxfs rpc path \${sandboxfs_rpc_path}"
-  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" > "\${SANDBOXFS_LOG}" 2>&1 &
+  if [ "\${gondolin_transport}" = "vsock" ]; then
+    /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-vsock-port "\${vsock_fs_port}" > "\${SANDBOXFS_LOG}" 2>&1 &
+  else
+    sandboxfs_rpc_path="$(resolve_virtio_port_path virtio-fs)"
+    log "[init] sandboxfs rpc path \${sandboxfs_rpc_path}"
+    /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" > "\${SANDBOXFS_LOG}" 2>&1 &
+  fi
 
   if wait_for_sandboxfs; then
     sandboxfs_ready=1
@@ -307,21 +364,33 @@ setup_mitm_ca
 
 if [ -x /usr/bin/sandboxssh ]; then
   log "[init] starting sandboxssh"
-  /usr/bin/sandboxssh > "\${CONSOLE:-/dev/null}" 2>&1 &
+  if [ "\${gondolin_transport}" = "vsock" ]; then
+    /usr/bin/sandboxssh --vsock-port "\${vsock_ssh_port}" > "\${CONSOLE:-/dev/null}" 2>&1 &
+  else
+    /usr/bin/sandboxssh > "\${CONSOLE:-/dev/null}" 2>&1 &
+  fi
 else
   log "[init] /usr/bin/sandboxssh missing"
 fi
 
 if [ -x /usr/bin/sandboxingress ]; then
   log "[init] starting sandboxingress"
-  /usr/bin/sandboxingress > "\${CONSOLE:-/dev/null}" 2>&1 &
+  if [ "\${gondolin_transport}" = "vsock" ]; then
+    /usr/bin/sandboxingress --vsock-port "\${vsock_ingress_port}" > "\${CONSOLE:-/dev/null}" 2>&1 &
+  else
+    /usr/bin/sandboxingress > "\${CONSOLE:-/dev/null}" 2>&1 &
+  fi
 else
   log "[init] /usr/bin/sandboxingress missing"
 fi
 
 log "[init] starting sandboxd"
 
-exec /usr/bin/sandboxd
+if [ "\${gondolin_transport}" = "vsock" ]; then
+  exec /usr/bin/sandboxd --vsock-port "\${vsock_control_port}"
+else
+  exec /usr/bin/sandboxd
+fi
 `;
 
 export const INITRAMFS_INIT_SCRIPT = `#!/bin/sh
@@ -400,15 +469,30 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 root_device="/dev/vda"
 root_fstype="ext4"
+root_mount_opts="rw"
+gondolin_transport="virtio"
+gondolin_net="on"
 
 if [ -r /proc/cmdline ]; then
   for arg in \$(cat /proc/cmdline); do
     case "\${arg}" in
+      gondolin.transport=*)
+        gondolin_transport="\${arg#gondolin.transport=}"
+        ;;
+      gondolin.net=*)
+        gondolin_net="\${arg#gondolin.net=}"
+        ;;
       root=*)
         root_device="\${arg#root=}"
         ;;
       rootfstype=*)
         root_fstype="\${arg#rootfstype=}"
+        ;;
+      ro)
+        root_mount_opts="ro"
+        ;;
+      rw)
+        root_mount_opts="rw"
         ;;
     esac
   done
@@ -416,32 +500,44 @@ fi
 
 modprobe virtio_blk > /dev/null 2>&1 || true
 modprobe ext4 > /dev/null 2>&1 || true
-modprobe virtio_console > /dev/null 2>&1 || true
+if [ "\${gondolin_transport}" != "vsock" ]; then
+  modprobe virtio_console > /dev/null 2>&1 || true
+fi
 modprobe virtio_rng > /dev/null 2>&1 || true
-modprobe virtio_net > /dev/null 2>&1 || true
+if [ "\${gondolin_net}" != "off" ]; then
+  modprobe virtio_net > /dev/null 2>&1 || true
+fi
 modprobe fuse > /dev/null 2>&1 || true
 
-if ! wait_for_virtio_ports; then
+if [ "\${gondolin_transport}" != "vsock" ] && ! wait_for_virtio_ports; then
   log "[initramfs] virtio ports not ready"
 fi
 
-if command -v ip > /dev/null 2>&1; then
-  ip link set lo up || true
-  ip link set eth0 up || true
-elif command -v ifconfig > /dev/null 2>&1; then
-  ifconfig lo up || true
-  ifconfig eth0 up || true
-fi
-
-if command -v udhcpc > /dev/null 2>&1; then
-  UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
-  if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
-    UDHCPC_SCRIPT="/sbin/udhcpc.script"
+if [ "\${gondolin_net}" != "off" ]; then
+  if command -v ip > /dev/null 2>&1; then
+    ip link set lo up || true
+    ip link set eth0 up || true
+  elif command -v ifconfig > /dev/null 2>&1; then
+    ifconfig lo up || true
+    ifconfig eth0 up || true
   fi
-  if [ -x "\${UDHCPC_SCRIPT}" ]; then
-    udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[initramfs] udhcpc failed"
-  else
-    udhcpc -i eth0 -q -n || log "[initramfs] udhcpc failed"
+
+  if command -v udhcpc > /dev/null 2>&1; then
+    UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
+    if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
+      UDHCPC_SCRIPT="/sbin/udhcpc.script"
+    fi
+    if [ -x "\${UDHCPC_SCRIPT}" ]; then
+      udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[initramfs] udhcpc failed"
+    else
+      udhcpc -i eth0 -q -n || log "[initramfs] udhcpc failed"
+    fi
+  fi
+else
+  if command -v ip > /dev/null 2>&1; then
+    ip link set lo up || true
+  elif command -v ifconfig > /dev/null 2>&1; then
+    ifconfig lo up || true
   fi
 fi
 
@@ -462,7 +558,7 @@ if ! wait_for_block "\${root_device}"; then
 fi
 
 mkdir -p /newroot
-if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
+if ! mount -o "\${root_mount_opts}" -t "\${root_fstype}" "\${root_device}" /newroot; then
   log "[initramfs] failed to mount \${root_device}"
   exec sh
 fi

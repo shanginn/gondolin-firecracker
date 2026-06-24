@@ -410,6 +410,22 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
               manifest.assets.krunInitrd,
               "manifest.assets.krunInitrd",
             );
+      const sourceFirecrackerKernelPath =
+        manifest.assets?.firecrackerKernel === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              resolvedDir,
+              manifest.assets.firecrackerKernel,
+              "manifest.assets.firecrackerKernel",
+            );
+      const sourceFirecrackerInitrdPath =
+        manifest.assets?.firecrackerInitrd === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              resolvedDir,
+              manifest.assets.firecrackerInitrd,
+              "manifest.assets.firecrackerInitrd",
+            );
 
       if (!fs.existsSync(sourceKernelPath)) {
         throw new Error(
@@ -434,6 +450,22 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       if (sourceKrunInitrdPath && !fs.existsSync(sourceKrunInitrdPath)) {
         throw new Error(
           `missing manifest.assets.krunInitrd file at ${sourceKrunInitrdPath}`,
+        );
+      }
+      if (
+        sourceFirecrackerKernelPath &&
+        !fs.existsSync(sourceFirecrackerKernelPath)
+      ) {
+        throw new Error(
+          `missing manifest.assets.firecrackerKernel file at ${sourceFirecrackerKernelPath}`,
+        );
+      }
+      if (
+        sourceFirecrackerInitrdPath &&
+        !fs.existsSync(sourceFirecrackerInitrdPath)
+      ) {
+        throw new Error(
+          `missing manifest.assets.firecrackerInitrd file at ${sourceFirecrackerInitrdPath}`,
         );
       }
 
@@ -485,6 +517,22 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
               manifest.assets!.krunInitrd,
               "manifest.assets.krunInitrd",
             );
+      const targetFirecrackerKernelPath =
+        sourceFirecrackerKernelPath === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              tmpDir,
+              manifest.assets!.firecrackerKernel,
+              "manifest.assets.firecrackerKernel",
+            );
+      const targetFirecrackerInitrdPath =
+        sourceFirecrackerInitrdPath === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              tmpDir,
+              manifest.assets!.firecrackerInitrd,
+              "manifest.assets.firecrackerInitrd",
+            );
 
       fs.mkdirSync(path.dirname(targetKernelPath), {
         recursive: true,
@@ -500,6 +548,16 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       }
       if (targetKrunInitrdPath) {
         fs.mkdirSync(path.dirname(targetKrunInitrdPath), { recursive: true });
+      }
+      if (targetFirecrackerKernelPath) {
+        fs.mkdirSync(path.dirname(targetFirecrackerKernelPath), {
+          recursive: true,
+        });
+      }
+      if (targetFirecrackerInitrdPath) {
+        fs.mkdirSync(path.dirname(targetFirecrackerInitrdPath), {
+          recursive: true,
+        });
       }
 
       fs.copyFileSync(safeKernelPath, targetKernelPath);
@@ -520,6 +578,28 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
           "manifest.assets.krunInitrd",
         );
         fs.copyFileSync(safeKrunInitrdPath, targetKrunInitrdPath);
+      }
+      if (targetFirecrackerKernelPath && sourceFirecrackerKernelPath) {
+        const safeFirecrackerKernelPath = ensureSafeImportSourcePath(
+          resolvedDir,
+          sourceFirecrackerKernelPath,
+          "manifest.assets.firecrackerKernel",
+        );
+        fs.copyFileSync(
+          safeFirecrackerKernelPath,
+          targetFirecrackerKernelPath,
+        );
+      }
+      if (targetFirecrackerInitrdPath && sourceFirecrackerInitrdPath) {
+        const safeFirecrackerInitrdPath = ensureSafeImportSourcePath(
+          resolvedDir,
+          sourceFirecrackerInitrdPath,
+          "manifest.assets.firecrackerInitrd",
+        );
+        fs.copyFileSync(
+          safeFirecrackerInitrdPath,
+          targetFirecrackerInitrdPath,
+        );
       }
 
       fs.mkdirSync(imageObjectRootDir(), { recursive: true });

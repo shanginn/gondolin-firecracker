@@ -8,6 +8,7 @@
 const std = @import("std");
 const posix = @import("posix_compat.zig");
 const protocol = @import("protocol.zig");
+const vsock = @import("vsock.zig");
 
 const MAX_BUFFERED_VIRTIO: usize = 256 * 1024;
 const MAX_BUFFERED_TCP: usize = 256 * 1024;
@@ -28,14 +29,17 @@ const Conn = struct {
     backend_shutdown: bool,
 };
 
-pub fn run(virtio_port_name: []const u8, log: anytype) !void {
+pub fn run(virtio_port_name: []const u8, vsock_port: ?u32, log: anytype) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     log.info("starting", .{});
 
-    const virtio_fd = try openVirtioPort(virtio_port_name, log);
+    const virtio_fd = if (vsock_port) |port|
+        try openVsockPort(port, log)
+    else
+        try openVirtioPort(virtio_port_name, log);
     defer posix.close(virtio_fd);
 
     // Non-blocking virtio makes the event loop easier.
@@ -479,5 +483,18 @@ fn openVirtioPort(virtio_port_name: []const u8, log: anytype) !posix.fd_t {
         }
 
         posix.nanosleep(0, 100 * std.time.ns_per_ms);
+    }
+}
+
+fn openVsockPort(port: u32, log: anytype) !posix.fd_t {
+    var warned = false;
+    while (true) {
+        if (vsock.connectToHost(port)) |fd| return fd else |err| {
+            if (!warned) {
+                log.info("waiting for vsock port {d}: {s}", .{ port, @errorName(err) });
+                warned = true;
+            }
+            posix.nanosleep(0, 100 * std.time.ns_per_ms);
+        }
     }
 }

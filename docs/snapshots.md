@@ -10,9 +10,10 @@ stored as a JSON trailer appended to the end of the qcow2 file, including
 backend compatibility markers used during resume.
 
 > **Backend support:** checkpoints work with both `qemu` and `krun`.
+> Firecracker checkpoints are not supported yet.
 > Resume is allowed only when the checkpoint metadata declares the selected
 > backend as compatible.
-> See [VM Backends (QEMU vs krun)](./backends.md).
+> See [VM Backends](./backends.md).
 
 Cross-backend resume (for example `qemu` → `krun`) requires guest assets that
 provide krun boot artifacts in `manifest.json` (`assets.krunKernel`).

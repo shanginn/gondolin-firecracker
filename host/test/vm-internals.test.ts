@@ -27,6 +27,10 @@ function makeTempResolvedServerOptions() {
       vmm: "qemu" as const,
       qemuPath: "qemu-system-aarch64",
       krunRunnerPath: "gondolin-krun-runner",
+      firecrackerPath: "firecracker",
+      firecrackerApiSocketPath: path.join(dir, "firecracker-api.sock"),
+      firecrackerVsockPath: path.join(dir, "firecracker-vsock.sock"),
+      firecrackerGuestCid: 3,
       kernelPath,
       initrdPath,
       rootfsPath,
@@ -253,6 +257,35 @@ test("vm internals: rootfs option overrides manifest default", async () => {
   }
 });
 
+test("vm internals: firecracker defaults to readonly rootfs", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  (resolved as any).vmm = "firecracker";
+  fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
+
+  const vm = new VM(
+    {
+      autoStart: false,
+      vfs: null,
+    },
+    resolved as any,
+  );
+
+  try {
+    const resolvedOptions = (vm as any).resolvedSandboxOptions;
+    const rootDisk = (vm as any).rootDisk;
+
+    assert.equal(resolvedOptions.rootDiskPath, resolvedOptions.rootfsPath);
+    assert.equal(resolvedOptions.rootDiskFormat, "raw");
+    assert.equal(resolvedOptions.rootDiskReadOnly, true);
+    assert.equal(rootDisk.snapshot, false);
+    assert.equal(rootDisk.readOnly, true);
+    assert.equal(rootDisk.deleteOnClose, false);
+  } finally {
+    await vm.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("vm internals: rootfs cow mode uses throwaway qcow2 overlay", async (t) => {
   if (!hasQemuImg()) {
     t.skip("qemu-img unavailable");
@@ -278,6 +311,62 @@ test("vm internals: rootfs cow mode uses throwaway qcow2 overlay", async (t) => 
   } finally {
     await vm.close();
     cleanup();
+  }
+});
+
+test("vm internals: firecracker cow mode uses throwaway raw copy", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  (resolved as any).vmm = "firecracker";
+  fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
+
+  const vm = new VM(
+    {
+      autoStart: false,
+      vfs: null,
+      rootfs: { mode: "cow" },
+    },
+    resolved as any,
+  );
+
+  try {
+    const resolvedOptions = (vm as any).resolvedSandboxOptions;
+    const rootDisk = (vm as any).rootDisk;
+
+    assert.notEqual(resolvedOptions.rootDiskPath, resolvedOptions.rootfsPath);
+    assert.equal(resolvedOptions.rootDiskFormat, "raw");
+    assert.equal(rootDisk.snapshot, false);
+    assert.equal(rootDisk.readOnly, false);
+    assert.equal(rootDisk.deleteOnClose, true);
+    assert.equal(fs.readFileSync(rootDisk.path, "utf8"), "base-rootfs");
+  } finally {
+    await vm.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: firecracker rootfs size grows raw copy before boot", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  (resolved as any).vmm = "firecracker";
+  fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
+
+  const vm = new VM(
+    {
+      autoStart: false,
+      vfs: null,
+      rootfs: { mode: "cow", size: "1M" },
+    },
+    resolved as any,
+  );
+
+  try {
+    const rootDisk = (vm as any).rootDisk;
+
+    assert.equal(rootDisk.format, "raw");
+    assert.equal((vm as any).rootfsGuestResizePending, true);
+    assert.equal(fs.statSync(rootDisk.path).size, 1024 * 1024);
+  } finally {
+    await vm.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

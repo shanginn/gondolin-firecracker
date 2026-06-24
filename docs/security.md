@@ -32,7 +32,7 @@ Gondolin is not trying to defend against:
 - **A malicious host**: the Node.js process and the machine it runs on are trusted.
 - **A malicious local user** on the same host account: they can usually access
   the Unix sockets and cached files.
-- **VM escape / hypervisor bugs**: Gondolin uses QEMU; a QEMU escape is a host compromise.
+- **VM escape / hypervisor bugs**: Gondolin relies on the selected VM backend; a VM escape is a host compromise.
 - **Side channels** (timing/cache/etc.) between host and guest.
 - **Denial of service**: the guest can still burn CPU, allocate memory inside
   the VM, or cause large amounts of host work (there are some buffer caps, but no
@@ -60,7 +60,7 @@ the trust is divided.
 ### Trust Assumptions
 - The host process (your Node runtime + Gondolin library) is trusted.
 - The guest image is trusted *to the extent you trust its supply chain*.
-- The VM boundary provided by QEMU is trusted.
+- The VM boundary provided by the selected backend is trusted.
 
 ## System Architecture and Trust Boundaries
 
@@ -69,8 +69,8 @@ This is a rough overview of the system today.
 ### High-Level Components
 
 - **Host (TypeScript)**
-    - `SandboxController` spawns and manages QEMU
-    - `SandboxServer` implements the virtio-serial control plane, VFS RPC service, and network backend
+    - Backend controllers spawn and manage the selected VM backend
+    - `SandboxServer` implements the control plane, VFS RPC service, and network backend
     - `QemuNetworkBackend` implements an Ethernet/IP/TCP stack, HTTP/TLS mediation, optional SSH egress proxying, and optional explicit mapped TCP egress
     - VFS providers implement programmable filesystem behavior (based on NodeJS's upcoming VFS)
 
@@ -91,9 +91,9 @@ This is a rough overview of the system today.
 |   - secrets (real values)                                               |
 |   - VFS providers (host/virtual FS access)                              |
 |                                                                         |
-|   +---------------------- QEMU process boundary ---------------------+  |
+|   +----------------------- VM process boundary ----------------------+  |
 |   |  Guest Linux VM (untrusted code)                                 |  |
-|   |  - sees eth0, but traffic is intercepted by host                 |  |
+|   |  - sees eth0 on network-mediated backends                       |  |
 |   |  - sees /data (FUSE), but ops are served by host providers       |  |
 |   |  - runs arbitrary processes via sandboxd                         |  |
 |   +------------------------------------------------------------------+  |
@@ -111,16 +111,16 @@ This is what Gondolin actually enforces.
 
 > "guest code does not directly run on the host OS"
 
-- Guest code runs inside a QEMU VM.
-- The QEMU invocation is intentionally minimal (see `host/src/sandbox/controller.ts`):
+- Guest code runs inside the selected VM backend.
+- The default QEMU invocation is intentionally minimal (see `host/src/sandbox/controller.ts`):
 
     - `-nodefaults` (avoid unexpected devices)
     - `-no-reboot`, `-nographic`
     - virtio devices only (virtio-serial, virtio-net, virtio-blk, virtio-rng)
     - the root filesystem is attached as a copy-on-write disk (qcow2 overlay) so writes do not persist to the base image
 
-**Guarantee:** absent a QEMU escape, guest processes cannot directly access the
-*host kernel, host memory, or host filesystem.
+**Guarantee:** absent a VM backend escape, guest processes cannot directly access the
+**host kernel, host memory, or host filesystem**.
 
 ### Network Egress Confinement
 
@@ -409,7 +409,7 @@ Operational guidance:
 
 Guidance:
 - For high assurance, build images yourself and verify checksums.
-- Keep QEMU up to date; the VM boundary is fundamental.
+- Keep the selected VM backend up to date; the VM boundary is fundamental.
 
 ## Known Limitations and Sharp Edges
 
@@ -424,7 +424,7 @@ Guidance:
   destination.
 
 ### VM Escape Risk
-- The strongest guarantee depends on QEMU isolation.
+- The strongest guarantee depends on selected-backend isolation.
 
 ### Local Host Attacker
 - Virtio Unix sockets are created in a temp directory.  A local attacker with the

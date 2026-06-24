@@ -134,6 +134,20 @@ export function createTempQcow2Overlay(
   }
 }
 
+export function createTempRawCopy(sourcePath: string): string {
+  const copyPath = path.join(
+    tmpDir(),
+    `gondolin-disk-${randomUUID().slice(0, 8)}.raw`,
+  );
+  try {
+    fs.copyFileSync(sourcePath, copyPath);
+    return copyPath;
+  } catch (err) {
+    fs.rmSync(copyPath, { force: true });
+    throw err;
+  }
+}
+
 /**
  * Move a file to a new location, falling back to copy+unlink across devices.
  */
@@ -200,9 +214,16 @@ export function getImageVirtualSizeBytes(imagePath: string): number {
 export function ensureDiskImageMinimumSize(
   imagePath: string,
   sizeBytes: number,
+  format: "raw" | "qcow2" = inferDiskFormatFromPath(imagePath),
 ): void {
   if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
     throw new Error(`invalid disk resize target: ${String(sizeBytes)}`);
+  }
+  if (format === "raw") {
+    const stat = fs.statSync(imagePath);
+    if (stat.size >= sizeBytes) return;
+    fs.truncateSync(imagePath, sizeBytes);
+    return;
   }
   if (getImageVirtualSizeBytes(imagePath) >= sizeBytes) return;
   execFileSync("qemu-img", ["resize", imagePath, String(sizeBytes)], {

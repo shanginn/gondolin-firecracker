@@ -8,10 +8,10 @@ want to be able to tightly control the file system, for convenience of the agent
 and to control persistence.
 
 Gondolin gives you that. Lightweight micro-VMs (QEMU by default, optional
-libkrun backend) boot in under a second on your Mac or Linux machine. The
-network stack and virtual filesystem are implemented entirely in JavaScript,
-giving you complete programmatic control over what the sandbox can access and
-what secrets it can use.
+experimental libkrun and Firecracker backends) boot quickly on your Mac or
+Linux machine. The network stack and virtual filesystem are implemented
+entirely in JavaScript, giving you complete programmatic control over what the
+sandbox can access and what secrets it can use.
 
 This documentation helps you get started with it. We also welcome your feedback
 as this is an early project and we are eager to learn more about how you want
@@ -82,12 +82,13 @@ await vm.close();
 - [VFS Providers](./vfs.md): configure host-provided mounts and filesystem policies
 - [Snapshots](./snapshots.md): disk-only snapshots (qcow2 checkpoints)
 - [Custom Images](./custom-images.md): build custom guest images (kernel/initramfs/rootfs) and configure packages/init scripts
+- [Kubernetes](./kubernetes.md): run the Firecracker backend inside Kubernetes pods
 
 ## Design & Internals
 
 - [Architecture Overview](./architecture.md): high-level component overview and data flow
 - [Security Design](./security.md): threat model, guarantees, and safe operating envelope
 - [Network Stack](./network.md): HTTP/TLS mediation, optional mapped TCP/SSH egress, policy enforcement, DNS, and DNS rebinding protection
-- [VM Backends (QEMU vs krun)](./backends.md): backend capability matrix and constraints
+- [VM Backends](./backends.md): backend capability matrix and constraints
 - [QEMU Backend](./qemu.md): QEMU integration and macOS/Linux parity
 - [Limitations](./limitations.md): current limitations and missing features

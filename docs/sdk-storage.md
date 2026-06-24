@@ -28,8 +28,8 @@ const vm = await VM.create({
 
 ## Image Management
 
-Guest images (kernel, initramfs, rootfs, and optional krun boot artifacts) are
-resolved automatically from local overrides/store first, then from
+Guest images (kernel, initramfs, rootfs, and optional backend-specific boot
+artifacts) are resolved automatically from local overrides/store first, then from
 `builtin-image-registry.json` when needed.
 The default cache location is `~/.cache/gondolin/images/`.
 
@@ -101,10 +101,12 @@ You can control rootfs write behavior per VM:
 - `memory`: writable throwaway rootfs
     - on `qemu`, this uses backend-native snapshot mode
     - on `krun`, this is **not RAM-backed**; Gondolin creates a temporary qcow2 overlay on disk and deletes it on close
-- `cow`: writable qcow2 copy-on-write overlay (default)
+    - on `firecracker`, this is **not RAM-backed**; Gondolin creates a temporary raw copy on disk and deletes it on close
+- `cow`: writable qcow2 copy-on-write overlay (default for `qemu` and `krun`)
     - this does **not** write back into the original rootfs image
-    - by default it is a throwaway qcow2 overlay file that is deleted on close
-    - because it is a real qcow2 layer, it can be checkpointed
+    - by default it is a throwaway image file that is deleted on close
+    - on `qemu` and `krun`, it is a real qcow2 layer and can be checkpointed
+    - on `firecracker`, it is a temporary raw copy and cannot be checkpointed yet
 
 ```ts
 const vm = await VM.create({
@@ -113,7 +115,9 @@ const vm = await VM.create({
 ```
 
 If the guest asset `manifest.json` contains `runtimeDefaults.rootfsMode`, that
-value is used as the default when `rootfs.mode` is not provided.
+value is used as the default when `rootfs.mode` is not provided. Without a
+manifest default, Firecracker uses `readonly` by default to avoid a temporary raw
+rootfs copy on startup.
 
 ## Runtime Rootfs Size
 
@@ -127,11 +131,11 @@ const vm = await VM.create({
 ```
 
 Gondolin grows the writable root disk image on the host with `qemu-img resize`
-(no shrinking) and then runs `resize2fs /dev/vda` in the guest before
-`VM.start()` completes.
-The base rootfs image is not modified when using the default `cow` mode. When
-combined with `rootfs.mode="memory"`, Gondolin uses a temporary qcow2 overlay so
-the guest-side filesystem resize survives for the lifetime of that VM.
+(or direct raw-file truncation for Firecracker) and then runs
+`resize2fs /dev/vda` in the guest before `VM.start()` completes. The base rootfs
+image is not modified when using the default `cow` mode. When combined with
+`rootfs.mode="memory"`, Gondolin uses a temporary writable image so the
+guest-side filesystem resize survives for the lifetime of that VM.
 
 The guest image must include `resize2fs` (Alpine package: `e2fsprogs`). Newer
 `alpine-base` images include it; custom images should add it to
@@ -145,8 +149,9 @@ A checkpoint captures the VM's writable disk state and can be resumed cheaply
 using qcow2 backing files.
 
 > **Backend support:** checkpoints work with both `qemu` and `krun`.
+> Firecracker checkpoints are not supported yet.
 > Resume enforces checkpoint backend-compatibility metadata.
-> See [VM Backends (QEMU vs krun)](./backends.md).
+> See [VM Backends](./backends.md).
 
 See also: [Snapshots](./snapshots.md).
 
@@ -187,6 +192,8 @@ Notes:
   writable qcow2 layer explicitly
 - Cross-backend resume (`qemu` ↔ `krun`) requires guest assets with krun boot
   artifacts (`manifest.assets.krunKernel`)
+- Firecracker writable rootfs modes use temporary raw copies and are not
+  checkpointable yet
 - Some guest paths are tmpfs-backed by design (eg. `/root`, `/tmp`, `/var/log`); writes under those paths are not part of disk checkpoints
 
 ## Debug Logging

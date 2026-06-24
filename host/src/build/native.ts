@@ -11,6 +11,7 @@ import { decompressTarGz, extractTarGz, parseTar } from "../alpine/tar.ts";
 import { downloadFile, DownloadFileError } from "../alpine/utils.ts";
 import {
   DEFAULT_ROOTFS_PACKAGES,
+  FIRECRACKER_KERNEL_FILENAME,
   INITRAMFS_FILENAME,
   KERNEL_FILENAME,
   ROOTFS_FILENAME,
@@ -23,6 +24,7 @@ import {
   type BuildResult,
   type ResolvedAlpineConfig,
 } from "./shared.ts";
+import { materializeFirecrackerKernel } from "./firecracker-kernel.ts";
 
 const LIBKRUNFW_RELEASE_BASE_URL =
   "https://github.com/containers/libkrunfw/releases/download";
@@ -167,6 +169,14 @@ export async function buildNative(
     log,
   );
 
+  log("Preparing Firecracker-compatible kernel...");
+  materializeFirecrackerKernel({
+    sourceKernelPath: path.join(workDir, KERNEL_FILENAME),
+    outputKernelPath: path.join(workDir, FIRECRACKER_KERNEL_FILENAME),
+    arch: config.arch,
+    log,
+  });
+
   log("Copying assets to output directory...");
 
   const kernelSrc = path.join(workDir, KERNEL_FILENAME);
@@ -174,18 +184,26 @@ export async function buildNative(
   const rootfsSrc = path.join(workDir, ROOTFS_FILENAME);
   const krunKernelSrc = path.join(workDir, KRUN_KERNEL_FILENAME);
   const krunInitrdSrc = path.join(workDir, KRUN_INITRD_FILENAME);
+  const firecrackerKernelSrc = path.join(workDir, FIRECRACKER_KERNEL_FILENAME);
 
   const kernelDst = path.join(outputDir, KERNEL_FILENAME);
   const initramfsDst = path.join(outputDir, INITRAMFS_FILENAME);
   const rootfsDst = path.join(outputDir, ROOTFS_FILENAME);
   const krunKernelDst = path.join(outputDir, KRUN_KERNEL_FILENAME);
   const krunInitrdDst = path.join(outputDir, KRUN_INITRD_FILENAME);
+  const firecrackerKernelDst = path.join(
+    outputDir,
+    FIRECRACKER_KERNEL_FILENAME,
+  );
 
   fs.copyFileSync(kernelSrc, kernelDst);
   fs.copyFileSync(initramfsSrc, initramfsDst);
   fs.copyFileSync(rootfsSrc, rootfsDst);
   fs.copyFileSync(krunKernelSrc, krunKernelDst);
   fs.copyFileSync(krunInitrdSrc, krunInitrdDst);
+  if (fs.existsSync(firecrackerKernelSrc)) {
+    fs.copyFileSync(firecrackerKernelSrc, firecrackerKernelDst);
+  }
 
   log("Generating manifest...");
   const { manifestPath, manifest } = writeAssetManifest(

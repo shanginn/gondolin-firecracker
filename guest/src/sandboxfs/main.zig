@@ -3,6 +3,7 @@ const sandboxd = @import("sandboxd");
 const cbor = sandboxd.cbor;
 const fs_rpc = sandboxd.fs_rpc;
 const posix = sandboxd.posix;
+const vsock = sandboxd.vsock;
 const log = std.log.scoped(.sandboxfs);
 
 const FUSE_ROOT_ID: u64 = 1;
@@ -1050,6 +1051,7 @@ pub fn main(init: std.process.Init) !void {
 
     var mount_point: []const u8 = "/data";
     var rpc_path: []const u8 = "/dev/virtio-ports/virtio-fs";
+    var rpc_vsock_port: ?u32 = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -1063,16 +1065,25 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             continue;
         }
+        if (std.mem.eql(u8, args[i], "--rpc-vsock-port") and i + 1 < args.len) {
+            rpc_vsock_port = try std.fmt.parseInt(u32, args[i + 1], 10);
+            i += 1;
+            continue;
+        }
     }
 
     const fuse_fd = try posix.open("/dev/fuse", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
     defer posix.close(fuse_fd);
 
-    const rpc_fd = openRpcPort(rpc_path);
+    const rpc_fd = openRpcPort(rpc_path, rpc_vsock_port);
     var rpc_client: ?fs_rpc.FsRpcClient = null;
     if (rpc_fd) |fd| {
         rpc_client = fs_rpc.FsRpcClient.init(allocator, fd);
-        log.info("connected rpc at {s}", .{rpc_path});
+        if (rpc_vsock_port) |port| {
+            log.info("connected rpc at vsock port {d}", .{port});
+        } else {
+            log.info("connected rpc at {s}", .{rpc_path});
+        }
     } else {
         log.warn("rpc port {s} unavailable; running in stub mode", .{rpc_path});
     }
@@ -1116,7 +1127,9 @@ fn makeZ(allocator: std.mem.Allocator, text: []const u8) ![:0]u8 {
     return buf[0..text.len :0];
 }
 
-fn openRpcPort(path: []const u8) ?posix.fd_t {
+fn openRpcPort(path: []const u8, rpc_vsock_port: ?u32) ?posix.fd_t {
+    if (rpc_vsock_port) |port| return openVsockPort(port);
+
     const expected = std.fs.path.basename(path);
     var attempts: usize = 0;
     while (attempts < 50) : (attempts += 1) {
@@ -1126,6 +1139,18 @@ fn openRpcPort(path: []const u8) ?posix.fd_t {
             if (openVirtioPortByName(expected)) |fd| return fd;
         }
         posix.nanosleep(0, 100 * std.time.ns_per_ms);
+    }
+    return null;
+}
+
+fn openVsockPort(port: u32) ?posix.fd_t {
+    var attempts: usize = 0;
+    while (attempts < 50) : (attempts += 1) {
+        if (vsock.connectToHost(port)) |fd| {
+            return fd;
+        } else |_| {
+            posix.nanosleep(0, 100 * std.time.ns_per_ms);
+        }
     }
     return null;
 }

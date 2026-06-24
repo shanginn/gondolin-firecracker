@@ -60,7 +60,7 @@ options for configuring filesystem mounts and mediated network egress policy.
     - Select guest assets by path, build id, or local image ref (`name:tag`)
 
 - `--vmm BACKEND`
-    - Select backend per command: `qemu` or `krun`
+    - Select backend per command: `qemu`, `krun`, or `firecracker`
 
 - `--rootfs-size SIZE`
     - Ensure the rootfs virtual disk is at least `SIZE` before boot (for example `2G`)
@@ -255,7 +255,7 @@ If `-- COMMAND` is provided, the given command is run instead of the default
 - `--cwd PATH` -- set the working directory for the shell / command
 - `--env KEY=VALUE` -- set an environment variable (repeatable)
 - `--resume ID_OR_PATH` -- resume from a snapshot id (from cache) or `.qcow2` path
-- `--vmm BACKEND` -- backend selection (`qemu` or `krun`)
+- `--vmm BACKEND` -- backend selection (`qemu`, `krun`, or `firecracker`)
 - `--listen [HOST:PORT]` -- start a host ingress gateway (default: `127.0.0.1:0`)
 
 #### Debugging Options (bash only)
@@ -287,6 +287,9 @@ gondolin bash --resume 4a8f2b0c
 
 # Run with the krun backend
 gondolin bash --vmm krun
+
+# Run with Firecracker (Linux/KVM only, low-footprint defaults, no mediated network egress yet)
+gondolin bash --vmm firecracker
 ```
 
 ### `gondolin list`
@@ -483,7 +486,7 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 ## Environment Variables
 
 - `GONDOLIN_GUEST_DIR`
-    - Directory containing guest assets (`manifest.json`, kernel, initramfs, rootfs, optional krun boot assets)
+    - Directory containing guest assets (`manifest.json`, kernel, initramfs, rootfs, optional backend-specific boot assets)
     - If set, Gondolin uses this directory instead of downloading cached assets
 
 - `GONDOLIN_IMAGE_STORE`
@@ -495,11 +498,15 @@ Image selectors accepted by `--image` and `sandbox.imagePath` strings:
 
 - `GONDOLIN_VMM`
     - Default VM backend when `--vmm` / `sandbox.vmm` is not set
-    - Values: `qemu`, `krun` (default: `qemu`)
+    - Values: `qemu`, `krun`, `firecracker` (default: `qemu`)
 
 - `GONDOLIN_CPU`
     - QEMU CPU model override when `sandbox.cpu` is not set, for example `cortex-a72`
-    - Ignored by `krun`
+    - Ignored by `krun` and `firecracker`
+
+- `GONDOLIN_FIRECRACKER`
+    - Firecracker binary path when `sandbox.firecrackerPath` is not set
+    - Default: `firecracker`
 
 - `GONDOLIN_IMAGE_REGISTRY_URL`
     - Override builtin image registry JSON URL

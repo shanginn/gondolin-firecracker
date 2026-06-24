@@ -2,6 +2,7 @@ const std = @import("std");
 const sandboxd = @import("sandboxd");
 const protocol = sandboxd.protocol;
 const posix = sandboxd.posix;
+const vsock = sandboxd.vsock;
 const file_requests = @import("file_requests.zig");
 const c = @cImport({
     @cInclude("pty.h");
@@ -225,19 +226,28 @@ fn drainExecWakeFd(fd: posix.fd_t) void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const vsock_port = try parseVsockPort(args);
 
     log.info("starting", .{});
 
-    const virtio_fd = try openVirtioPort();
+    const virtio_fd = if (vsock_port) |port|
+        try openVsockPort(port)
+    else
+        try openVirtioPort();
     defer posix.close(virtio_fd);
 
     var tx = VirtioTx{ .fd = virtio_fd };
 
-    log.info("opened virtio port", .{});
+    if (vsock_port) |port| {
+        log.info("opened vsock port {d}", .{port});
+    } else {
+        log.info("opened virtio port", .{});
+    }
 
     sendVfsStatus(allocator, &tx) catch |err| {
         log.err("failed to send vfs status: {s}", .{@errorName(err)});
@@ -373,6 +383,16 @@ pub fn main() !void {
 
         _ = tx.sendError(allocator, 0, "invalid_request", "unsupported request type") catch {};
     }
+}
+
+fn parseVsockPort(args: []const [:0]const u8) !?u32 {
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--vsock-port") and i + 1 < args.len) {
+            return try std.fmt.parseInt(u32, args[i + 1], 10);
+        }
+    }
+    return null;
 }
 
 fn startExecSession(
@@ -617,6 +637,21 @@ fn openVirtioPort() !posix.fd_t {
         }
 
         posix.nanosleep(0, 100 * std.time.ns_per_ms);
+    }
+}
+
+fn openVsockPort(port: u32) !posix.fd_t {
+    var warned = false;
+
+    while (true) {
+        if (vsock.connectToHost(port)) |fd| return fd else |err| {
+            if (!warned) {
+                log.info("waiting for vsock port {d}: {s}", .{ port, @errorName(err) });
+                warned = true;
+            }
+
+            posix.nanosleep(0, 100 * std.time.ns_per_ms);
+        }
     }
 }
 

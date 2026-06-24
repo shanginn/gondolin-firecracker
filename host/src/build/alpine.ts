@@ -200,6 +200,7 @@ export async function buildAlpineImages(
   }
 
   ensureRuntimeDirs(rootfsDir);
+  ensureDefaultSandboxMountDirs(rootfsDir);
   ensureRuntimeDirs(initramfsDir);
 
   syncKernelModules(rootfsDir, initramfsDir, log, {
@@ -233,6 +234,14 @@ export async function buildAlpineImages(
 
 function ensureRuntimeDirs(rootDir: string): void {
   for (const sub of ["proc", "sys", "dev", "run"]) {
+    const targetDir = path.join(rootDir, sub);
+    assertSafeWritePath(targetDir, rootDir);
+    fs.mkdirSync(targetDir, { recursive: true });
+  }
+}
+
+function ensureDefaultSandboxMountDirs(rootDir: string): void {
+  for (const sub of ["data", path.join("etc", "gondolin")]) {
     const targetDir = path.join(rootDir, sub);
     assertSafeWritePath(targetDir, rootDir);
     fs.mkdirSync(targetDir, { recursive: true });

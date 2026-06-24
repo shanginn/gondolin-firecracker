@@ -30,6 +30,10 @@ import {
   type SandboxLogStream,
 } from "./controller.ts";
 import { KrunController, type KrunConfig } from "./krun-controller.ts";
+import {
+  FirecrackerController,
+  type FirecrackerConfig,
+} from "./firecracker-controller.ts";
 import { QemuNetworkBackend } from "../qemu/net.ts";
 import { FsRpcService } from "../vfs/rpc-service.ts";
 import { LINUX_ERRNO } from "../vfs/linux-errno.ts";
@@ -211,7 +215,7 @@ export class SandboxServer extends EventEmitter {
     const hint = this.selectQemuHintLine();
     if (!hint) return "";
     const truncated = hint.length > 300 ? hint.slice(0, 300) + "…" : hint;
-    const label = this.options.vmm === "krun" ? "krun" : "qemu";
+    const label = this.options.vmm;
     return ` (${label}: ${truncated})`;
   }
 
@@ -298,15 +302,17 @@ export class SandboxServer extends EventEmitter {
   private bootConfig: SandboxFsConfig | null = null;
 
   /** @internal resolved VM backend name */
-  getVmmBackend(): "qemu" | "krun" {
+  getVmmBackend(): "qemu" | "krun" | "firecracker" {
     return this.options.vmm;
   }
 
   /** @internal resolved VM backend binary path */
   getVmmPath(): string {
-    return this.options.vmm === "krun"
-      ? this.options.krunRunnerPath
-      : this.options.qemuPath;
+    if (this.options.vmm === "krun") return this.options.krunRunnerPath;
+    if (this.options.vmm === "firecracker") {
+      return this.options.firecrackerPath;
+    }
+    return this.options.qemuPath;
   }
 
   /** @internal resolved qemu binary path */
@@ -379,10 +385,30 @@ export class SandboxServer extends EventEmitter {
     const hostArch = getHostNodeArchCached();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
 
+    const firecrackerConsole =
+      this.options.console === "stdio" ? "console=ttyS0" : "8250.nr_uarts=0";
+    const firecrackerLogLevel =
+      this.options.console === "stdio" ? "" : "quiet loglevel=1";
     const defaultAppend =
       this.options.vmm === "krun"
         ? "console=hvc0 root=/dev/vda rootfstype=ext4 rw init=/init"
-        : `console=${consoleDevice} initramfs_async=1`;
+        : this.options.vmm === "firecracker"
+          ? [
+              firecrackerConsole,
+              firecrackerLogLevel,
+              "reboot=k",
+              "panic=1",
+              "root=/dev/vda",
+              "rootfstype=ext4",
+              this.options.rootDiskReadOnly ? "ro" : "rw",
+              "init=/init",
+              "gondolin.transport=vsock",
+              "gondolin.net=off",
+              "gondolin.debug=0",
+            ]
+              .filter(Boolean)
+              .join(" ")
+          : `console=${consoleDevice} initramfs_async=1`;
 
     const baseAppend = (this.options.append ?? defaultAppend).trim();
     this.baseAppend = baseAppend;
@@ -410,6 +436,24 @@ export class SandboxServer extends EventEmitter {
         autoRestart: this.options.autoRestart,
       };
       this.controller = new KrunController(krunConfig);
+    } else if (this.options.vmm === "firecracker") {
+      const firecrackerConfig: FirecrackerConfig = {
+        firecrackerPath: this.options.firecrackerPath,
+        apiSocketPath: this.options.firecrackerApiSocketPath,
+        vsockPath: this.options.firecrackerVsockPath,
+        guestCid: this.options.firecrackerGuestCid,
+        kernelPath: this.options.kernelPath,
+        initrdPath: this.options.initrdPath,
+        rootDiskPath: this.options.rootDiskPath,
+        rootDiskFormat: this.options.rootDiskFormat,
+        rootDiskReadOnly: this.options.rootDiskReadOnly,
+        memory: this.options.memory,
+        cpus: this.options.cpus,
+        append: this.baseAppend,
+        console: this.options.console,
+        autoRestart: this.options.autoRestart,
+      };
+      this.controller = new FirecrackerController(firecrackerConfig);
     } else {
       const sandboxConfig: SandboxConfig = {
         qemuPath: this.options.qemuPath,
