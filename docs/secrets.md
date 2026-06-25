@@ -1,17 +1,31 @@
 # Secrets
 
-The Firecracker runtime has no mediated guest egress path. Do not pass real
-secrets into guest environment variables or files unless the workload is allowed
-to read them.
+Do not pass real secrets into guest environment variables or files unless the
+workload is allowed to read them.
 
-`createHttpHooks()` remains exported for callers that want to build host-side
-HTTP policy objects, but VM creation rejects `httpHooks` because guest egress is
-disabled.
+For policy-mediated HTTP(S) egress, use `createHttpHooks()`. The guest receives
+placeholder values, and the host substitutes real secrets only for allowed
+destinations.
+
+```ts
+import { VM, createHttpHooks } from "@earendil-works/gondolin";
+
+const { httpHooks, env } = createHttpHooks({
+  allowedHosts: ["api.github.com"],
+  secrets: {
+    GITHUB_TOKEN: {
+      hosts: ["api.github.com"],
+      value: process.env.GITHUB_TOKEN,
+    },
+  },
+});
+
+const vm = await VM.create({ httpHooks, env });
+```
 
 For production workloads:
 
 - keep credentials in the host process
-- move data into the VM through VFS mounts or stdin only when the guest is
-  allowed to see it
-- use host-side services for outbound API calls
-- use Kubernetes or host network policy for the Node.js process itself
+- scope each secret to the smallest host allowlist
+- keep URL query secret replacement disabled unless it is required
+- use Kubernetes or host network policy for the Gondolin process itself

@@ -21,6 +21,7 @@ Common options:
 - `--listen [HOST:PORT]` - expose guest HTTP services on the host
 - `--ssh` - enable host-to-guest SSH access
 - `--allow-host HOST` - allow HTTP(S) egress to host pattern
+- `--host-secret NAME@HOST[,HOST...][=VALUE]` - inject an HTTP secret
 - `--dns MODE` - choose `synthetic`, `trusted`, or `open` DNS mode
 - `--tcp-map GUEST=UPSTREAM` - map guest TCP egress to a host target
 - `--ssh-allow-host HOST[:PORT]` - allow outbound SSH proxying

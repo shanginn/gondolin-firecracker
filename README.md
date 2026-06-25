@@ -60,6 +60,33 @@ and outbound SSH in the host process. Gondolin does not install host NAT rules;
 guest packets only leave through the configured policy hooks. Host-to-guest
 ingress and host-to-guest SSH use vsock-backed forwarders.
 
+## Benchmark Snapshot
+
+Measured on a single-vCPU KVM VPS on June 25, 2026 with warm guest assets:
+Debian Linux `6.12.85+deb13-amd64`, `1` vCPU (`AMD EPYC 7543` under KVM),
+`1.9 GiB` RAM, Firecracker `v1.16.0`, Node.js `v26.4.0`, Zig `0.16.0`.
+
+```bash
+node host/examples/backend-benchmark.ts --iterations 50
+```
+
+Each value is the median of `5` runs using the defaults: `1` vCPU, `256M`, no
+serial console, and guest networking disabled.
+
+| Metric | Median |
+| --- | ---: |
+| VM object creation | `7.5 ms` |
+| VM start to ready | `623 ms` |
+| First `/bin/true` exec | `5.0 ms` |
+| Warm `/bin/true` exec p50 | `8.9 ms` |
+| Warm `/bin/true` exec p95 | `16.0 ms` |
+| Firecracker RSS after warm execs | `111 MiB` |
+| Firecracker VSZ after warm execs | `264 MiB` |
+| VM close | `36.7 ms` |
+
+This benchmark isolates VM lifecycle and tiny command latency. Network, VFS, and
+agent workload benchmarks should be measured separately.
+
 ## Development
 
 ```bash

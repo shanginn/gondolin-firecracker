@@ -28,6 +28,8 @@ fn milliTimestamp() i64 {
 
 /// max buffered stdin per exec session in `bytes`
 const max_queued_stdin_bytes: usize = 4 * 1024 * 1024;
+// ponytail: pidfd/SIGCHLD wakeups if silent exec CPU matters
+const exec_poll_timeout_ms = 10;
 
 const Termination = struct {
     exit_code: i32,
@@ -1025,7 +1027,7 @@ fn runExecSession(session: *ExecSession) !void {
         }
 
         if (nfds > 0) {
-            _ = try posix.poll(pollfds[0..nfds], 100);
+            _ = try posix.poll(pollfds[0..nfds], exec_poll_timeout_ms);
         } else {
             if (status == null) {
                 const res = posix.waitpid(pid, posix.W.NOHANG);

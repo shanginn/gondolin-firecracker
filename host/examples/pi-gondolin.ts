@@ -18,10 +18,12 @@
  * Notes:
  *   - The VM is started on `session_start` (and lazily if a tool is used before that)
  *   - User `!` commands are also executed inside the VM
+ *   - Bash env forwarding is opt-in via GONDOLIN_PI_ENV_ALLOW=NAME,NAME
  *   - Module resolution happens relative to this file, so keeping it inside the
  *     gondolin repo (or installing `@earendil-works/gondolin` next to it) is easiest
  */
 
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
 import type {
@@ -64,22 +66,11 @@ function createGondolinReadOps(vm: VM, localCwd: string): ReadOperations {
   return {
     readFile: async (p) => {
       const guestPath = toGuestPath(localCwd, p);
-      const r = await vm.exec(["/bin/cat", guestPath]);
-      if (!r.ok) {
-        throw new Error(`cat failed (${r.exitCode}): ${r.stderr}`);
-      }
-      return r.stdoutBuffer;
+      return vm.fs.readFile(guestPath);
     },
     access: async (p) => {
       const guestPath = toGuestPath(localCwd, p);
-      const r = await vm.exec([
-        "/bin/sh",
-        "-lc",
-        `test -r ${shQuote(guestPath)}`,
-      ]);
-      if (!r.ok) {
-        throw new Error(`not readable: ${p}`);
-      }
+      return vm.fs.access(guestPath, { mode: fsConstants.R_OK });
     },
     detectImageMimeType: async (p) => {
       const guestPath = toGuestPath(localCwd, p);
@@ -109,26 +100,12 @@ function createGondolinWriteOps(vm: VM, localCwd: string): WriteOperations {
     writeFile: async (p, content) => {
       const guestPath = toGuestPath(localCwd, p);
       const dir = path.posix.dirname(guestPath);
-
-      // Base64 roundtrip to avoid quoting issues
-      const b64 = Buffer.from(content, "utf8").toString("base64");
-      const script = [
-        `set -eu`,
-        `mkdir -p ${shQuote(dir)}`,
-        `echo ${shQuote(b64)} | base64 -d > ${shQuote(guestPath)}`,
-      ].join("\n");
-
-      const r = await vm.exec(["/bin/sh", "-lc", script]);
-      if (!r.ok) {
-        throw new Error(`write failed (${r.exitCode}): ${r.stderr}`);
-      }
+      await vm.fs.mkdir(dir, { recursive: true });
+      await vm.fs.writeFile(guestPath, content);
     },
     mkdir: async (dir) => {
       const guestDir = toGuestPath(localCwd, dir);
-      const r = await vm.exec(["/bin/mkdir", "-p", guestDir]);
-      if (!r.ok) {
-        throw new Error(`mkdir failed (${r.exitCode}): ${r.stderr}`);
-      }
+      await vm.fs.mkdir(guestDir, { recursive: true });
     },
   };
 }
@@ -143,11 +120,20 @@ function sanitizeEnv(
   env?: NodeJS.ProcessEnv,
 ): Record<string, string> | undefined {
   if (!env) return undefined;
+
+  const allow = new Set(
+    (process.env.GONDOLIN_PI_ENV_ALLOW ?? "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean),
+  );
+  if (allow.size === 0) return undefined;
+
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
-    if (typeof v === "string") out[k] = v;
+    if (allow.has(k) && typeof v === "string") out[k] = v;
   }
-  return out;
+  return Object.keys(out).length === 0 ? undefined : out;
 }
 
 function createGondolinBashOps(vm: VM, localCwd: string): BashOperations {
@@ -241,7 +227,14 @@ export default function (pi: ExtensionAPI) {
         "info",
       );
       return created;
-    })();
+    })().catch((err) => {
+      vmStarting = null;
+      ctx?.ui.setStatus(
+        "gondolin",
+        ctx.ui.theme.fg("error", "Gondolin: failed to start"),
+      );
+      throw err;
+    });
 
     return vmStarting;
   }

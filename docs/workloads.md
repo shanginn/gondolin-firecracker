@@ -65,3 +65,18 @@ in keeping a VM alive across long idle periods:
 
 A reasonable default: spin up a VM at the start of a task, run all the
 commands the agent needs, persist results, and tear it down.
+
+## Pi Agent Extension
+
+`host/examples/pi-gondolin.ts` is a Pi extension that runs read, write, edit,
+bash, and user `!` commands inside one Gondolin VM with the host project mounted
+at `/workspace`.
+
+```bash
+cd /path/to/project
+pi -e /absolute/path/to/gondolin/host/examples/pi-gondolin.ts
+```
+
+Bash environment forwarding is denied by default. Set
+`GONDOLIN_PI_ENV_ALLOW=NAME,NAME` when a specific non-secret variable must be
+passed into the guest.

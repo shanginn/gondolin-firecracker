@@ -31,9 +31,10 @@ The base rootfs is attached read-only by default. `rootfs.mode="cow"` and
 
 ## Network
 
-Guest egress is disabled. `netEnabled: true`, `httpHooks`, DNS overrides, mapped
-TCP, and outbound SSH proxying are rejected. This avoids accidentally exposing a
-generic network path without Gondolin policy enforcement.
+Guest egress is disabled by default. `netEnabled: true`, `httpHooks`, DNS
+overrides, mapped TCP, or outbound SSH proxying enable a short-lived Firecracker
+TAP device that is mediated by the host policy stack. Gondolin does not install
+generic host NAT rules.
 
 Host-to-guest ingress and host-to-guest SSH are supported over vsock-backed
 forwarders.

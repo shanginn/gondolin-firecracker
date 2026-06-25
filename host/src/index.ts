@@ -104,9 +104,18 @@ export type {
   HttpHooks,
   HttpFetch,
 } from "./net/backend.ts";
-export type { SshOptions, SshCredential } from "./net/ssh.ts";
+export type {
+  SshOptions,
+  SshCredential,
+  SshExecRequest,
+  SshExecDecision,
+  SshExecPolicy,
+} from "./net/ssh.ts";
 export type { TcpOptions } from "./net/tcp.ts";
 export { HttpRequestBlockedError } from "./http/utils.ts";
+
+// SSH helpers
+export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh/exec.ts";
 
 // Debug helpers
 export {

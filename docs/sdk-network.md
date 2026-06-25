@@ -1,10 +1,34 @@
 # SDK: Network, Ingress, and SSH
 
-The Firecracker runtime disables guest egress networking. `httpHooks`, DNS
-overrides, mapped TCP, outbound SSH proxying, and `netEnabled: true` are
-rejected.
+The Firecracker runtime disables guest egress networking by default. Passing
+`httpHooks`, DNS overrides, mapped TCP, outbound SSH proxying, or
+`sandbox.netEnabled: true` enables mediated TAP egress.
 
-Supported network features are host-to-guest:
+## Mediated Guest Egress
+
+```ts
+import { VM, createHttpHooks } from "@earendil-works/gondolin";
+
+const { httpHooks, env } = createHttpHooks({
+  allowedHosts: ["api.github.com"],
+  secrets: {
+    GITHUB_TOKEN: {
+      hosts: ["api.github.com"],
+      value: process.env.GITHUB_TOKEN,
+    },
+  },
+});
+
+const vm = await VM.create({ httpHooks, env });
+await vm.exec(
+  'curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user',
+);
+await vm.close();
+```
+
+Host requirements for mediated egress are listed in [Network](./network.md).
+
+## Host-To-Guest Features
 
 - `vm.enableIngress()` exposes guest HTTP services on the host.
 - `vm.enableSsh()` exposes guest SSH on a host-local TCP port.
