@@ -23,6 +23,11 @@ Gondolin has one VM backend: Firecracker.
   - `1026` host-to-guest SSH
   - `1027` ingress
 
+The default image is not designed for sub-`50M` guest memory. On x86_64,
+Firecracker needs an uncompressed ELF kernel, and the default Alpine-derived
+kernel asset is `38M` before initramfs and userspace memory. Use a custom tiny
+kernel/image profile for that target.
+
 ## Storage
 
 The base rootfs is attached read-only by default. `rootfs.mode="cow"` and

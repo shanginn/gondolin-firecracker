@@ -146,6 +146,10 @@ and memory footprint:
 - no guest DHCP/network device setup unless mediated egress is enabled
 - `rootfs.mode="readonly"` by default
 
+Do not size the default image for sub-`50M` guests. The x86_64 Firecracker
+kernel asset is an uncompressed ELF and currently weighs `38M`; a separate
+tiny-kernel image profile is required for that class of pod density.
+
 The read-only rootfs avoids a full raw rootfs copy before boot. Guest paths such
 as `/tmp`, `/root`, `/var/tmp`, `/var/cache`, and `/var/log` are tmpfs-backed.
 The default image pre-creates `/data` and `/etc/gondolin` for the default VFS

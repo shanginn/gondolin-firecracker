@@ -99,6 +99,16 @@ passed only `9/10` boots; `76M` failed `5/5`. The initramfs prune reduced the
 default compressed initramfs from `5.9M` to `2.3M` (`11M` to `3.6M`
 uncompressed).
 
+Sub-`50M` is not a supported target for the default Alpine image. On x86_64,
+Firecracker boots an uncompressed ELF kernel; the current Alpine-derived
+Firecracker kernel asset is `38M` before the initramfs and guest userspace are
+loaded. A June 25, 2026 sweep with VFS disabled (`vfs: null`) still failed at
+`48M`, `50M`, `52M`, `56M`, `60M`, `64M`, and `72M`, then passed at `80M`.
+Booting the compressed Alpine `vmlinuz-virt` directly failed, and stripping BTF
+metadata from the ELF produced a smaller kernel that hung at `80M`, so those
+paths are not shipped. Getting below `50M` requires a separate tiny-kernel image
+track rather than further package trimming.
+
 This benchmark isolates VM lifecycle and tiny command latency. Network, VFS, and
 agent workload benchmarks should be measured separately.
 
