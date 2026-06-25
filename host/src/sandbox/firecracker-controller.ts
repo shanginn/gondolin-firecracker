@@ -64,6 +64,10 @@ export type FirecrackerConfig = {
   console?: "stdio" | "none";
   /** whether to restart the vm automatically on exit */
   autoRestart: boolean;
+  /** host TAP interface name for mediated egress */
+  netTapName?: string;
+  /** guest mac address */
+  netMac?: string;
 };
 
 type FirecrackerJson =
@@ -421,6 +425,19 @@ async function configureFirecracker(config: FirecrackerConfig): Promise<void> {
     guest_cid: config.guestCid,
     uds_path: config.vsockPath,
   });
+
+  if (config.netTapName) {
+    await firecrackerRequest(
+      config.apiSocketPath,
+      "PUT",
+      "/network-interfaces/net1",
+      {
+        iface_id: "net1",
+        host_dev_name: config.netTapName,
+        guest_mac: config.netMac ?? "02:00:00:00:00:01",
+      },
+    );
+  }
 }
 
 function validateCpuCount(value: number): void {

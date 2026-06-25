@@ -22,8 +22,9 @@ console.log(result.stdout);
 await vm.close();
 ```
 
-Guest egress networking is disabled in the Firecracker runtime. Host-to-guest
-ingress and SSH are supported.
+Guest egress networking is disabled by default. When enabled, Firecracker uses a
+TAP device and Gondolin mediates DNS, TCP, HTTP(S), mapped TCP, and outbound SSH
+in the host process. Host-to-guest ingress and SSH are supported separately.
 
 ## Using Gondolin
 

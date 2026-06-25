@@ -11,13 +11,15 @@ policy.
 - Linux worker node with KVM enabled
 - `/dev/kvm` available inside the pod with read/write device-cgroup access
 - Firecracker binary in the container image or configured with `GONDOLIN_FIRECRACKER`
+- Python 3 and `ip` from iproute2 in the container image when guest egress is enabled
 - Node.js `>=23.6`
 - Guest image assets that include `manifest.assets.firecrackerKernel`
 - Same architecture for node and guest image (`x86_64` on x86 nodes, `aarch64` on ARM nodes)
 
 The Firecracker backend uses vsock for Gondolin control, VFS, SSH, and ingress
-channels. It does not create TAP devices and does not require `NET_ADMIN` for
-the current no-guest-network Firecracker path.
+channels. Guest egress is disabled by default and needs no TAP device. When
+`netEnabled` or egress policy options are used, Gondolin creates a short-lived
+TAP device and needs `/dev/net/tun`, `CAP_NET_ADMIN`, and `CAP_NET_RAW`.
 
 ## Pod Configuration
 
@@ -105,6 +107,23 @@ volumes:
       type: CharDevice
 ```
 
+For mediated guest egress, add `/dev/net/tun` and the network capabilities:
+
+```yaml
+securityContext:
+  capabilities:
+    drop: ["ALL"]
+    add: ["NET_ADMIN", "NET_RAW"]
+volumeMounts:
+  - name: tun
+    mountPath: /dev/net/tun
+volumes:
+  - name: tun
+    hostPath:
+      path: /dev/net/tun
+      type: CharDevice
+```
+
 ## Runtime Directories
 
 Set `GONDOLIN_RUNTIME_DIR` to a short writable path such as `/run/gondolin`.
@@ -124,7 +143,7 @@ and memory footprint:
 - `1` vCPU
 - `256M` guest memory
 - no serial console unless `console: "stdio"` is requested
-- no guest DHCP/network device setup
+- no guest DHCP/network device setup unless mediated egress is enabled
 - `rootfs.mode="readonly"` by default
 
 The read-only rootfs avoids a full raw rootfs copy before boot. Guest paths such
@@ -137,17 +156,19 @@ provision `TMPDIR` storage for one raw rootfs copy per concurrent VM.
 
 ## Network And Secrets
 
-Firecracker currently rejects `netEnabled: true`, `httpHooks`, DNS overrides,
-mapped TCP/SSH egress, and certificate-injection options. This is intentional:
-a generic TAP/NAT device would bypass Gondolin's existing network mediation
-semantics.
+Guest egress is disabled by default. SDK network policy options or
+`sandbox.netEnabled: true` enable a Firecracker TAP device that is mediated by
+Gondolin's DHCP/DNS/TCP/HTTP(S)/SSH policy stack. Gondolin does not add NAT or
+iptables rules, so guest packets cannot bypass the host policy stack through the
+pod network namespace.
 
 For Kubernetes:
 
-- use Firecracker for no-guest-network workloads, VFS-backed workloads, and
-  host-mediated ingress/SSH/control-plane use cases
-- apply Kubernetes `NetworkPolicy` to the pod itself, because the host process
-  still has normal pod network access
+- keep egress disabled for the lowest-capability pod profile and fastest startup
+- enable `/dev/net/tun`, `NET_ADMIN`, and `NET_RAW` only for workloads that need
+  controlled guest internet access
+- apply Kubernetes `NetworkPolicy` to the pod itself, because mediated guest
+  requests are made by the host process and use normal pod network access
 
 ## Operational Notes
 

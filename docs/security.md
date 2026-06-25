@@ -20,18 +20,22 @@ escape bugs, side channels, or complete denial of service by a workload.
 - VFS access is explicit and host-provided.
 - Host-to-guest SSH and ingress bind through host-controlled forwarders.
 - Guest egress networking is disabled by default.
-- Network policy options are rejected instead of silently creating generic NAT.
+- When guest egress is enabled, TAP frames are mediated by Gondolin policy
+  hooks; Gondolin does not install generic host NAT rules.
 
 ## Secrets
 
 Do not pass real secrets into guest environment variables or files unless the
-workload is allowed to read them. The old HTTP secret-injection path depends on
-mediated guest egress and is disabled in the Firecracker runtime.
+workload is allowed to read them. HTTP secret injection is available only for
+policy-mediated guest HTTP(S) egress and should be scoped with `--allow-host` or
+equivalent SDK hooks.
 
 ## Host Requirements
 
 - Linux/KVM host with `/dev/kvm`
 - Firecracker on `PATH` or `GONDOLIN_FIRECRACKER`
+- Python 3, iproute2, `/dev/net/tun`, `CAP_NET_ADMIN`, and `CAP_NET_RAW` for
+  mediated guest egress
 - short writable `GONDOLIN_RUNTIME_DIR` for Unix sockets
 - writable image cache
 - scratch storage sized for temporary raw rootfs copies when using writable root

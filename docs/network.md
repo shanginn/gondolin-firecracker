@@ -1,21 +1,26 @@
 # Network
 
-The Firecracker runtime does not attach a guest egress network device.
+Guest egress is disabled by default. This keeps the default Firecracker profile
+small: no TAP setup, no guest DHCP, and no extra container capabilities.
 
-Supported network-adjacent features:
+When `sandbox.netEnabled: true` or SDK/CLI egress policy options are used,
+Gondolin creates a short-lived TAP device for Firecracker and handles guest
+frames in the host process. The host policy stack provides:
 
-- host-to-guest ingress with `vm.enableIngress()` or `gondolin bash --listen`
-- host-to-guest SSH with `vm.enableSsh()` or `gondolin bash --ssh`
-- VFS-backed file exchange
+- DHCP and default route configuration
+- DNS modes: `synthetic`, `trusted`, and `open`
+- HTTP(S) interception through `httpHooks` and CLI `--allow-host`
+- mapped TCP egress through `tcp` or CLI `--tcp-map`
+- outbound SSH proxying through `ssh` or CLI `--ssh-allow-host`
 
-Unsupported and rejected:
+Gondolin does not install host NAT or iptables rules. Guest packets leave only
+through the mediated host sockets, so Kubernetes or host firewall policy should
+be applied to the Gondolin process/pod.
 
-- `netEnabled: true`
-- `httpHooks`
-- DNS overrides
-- mapped TCP egress
-- outbound SSH proxying
+Host requirements for mediated egress:
 
-This is intentional. A generic TAP/NAT path would give the guest network access
-without Gondolin policy enforcement. Add egress only with a Firecracker path that
-keeps the host as the enforcement point.
+- Python 3
+- `ip` from iproute2
+- `/dev/net/tun`
+- `CAP_NET_ADMIN`
+- `CAP_NET_RAW`

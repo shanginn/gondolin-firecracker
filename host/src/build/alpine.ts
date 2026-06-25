@@ -192,6 +192,13 @@ export async function buildAlpineImages(
   writeExecutable(path.join(rootfsDir, "init"), rootfsInitContent, rootfsDir);
   writeExecutable(path.join(initramfsDir, "init"), initramfsInitContent);
 
+  const resolvConf = path.join(rootfsDir, "etc/resolv.conf");
+  assertSafeWritePath(resolvConf, rootfsDir);
+  fs.mkdirSync(path.dirname(resolvConf), { recursive: true });
+  fs.writeFileSync(resolvConf, "nameserver 192.168.127.1\n", {
+    mode: 0o644,
+  });
+
   const python3 = path.join(rootfsDir, "usr/bin/python3");
   const python = path.join(rootfsDir, "usr/bin/python");
   if (fs.existsSync(python3) && !fs.existsSync(python)) {

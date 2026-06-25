@@ -45,6 +45,7 @@ import {
   registerSession,
   unregisterSession,
 } from "../session-registry.ts";
+import { resolveMitmMounts } from "./mitm-vfs.ts";
 import type { EnvInput, VMOptions, VmVfsOptions } from "./types.ts";
 import {
   buildShellEnv,
@@ -124,9 +125,43 @@ function normalizeStartTimeoutMs(
   return Math.max(0, Math.trunc(value));
 }
 
-function rejectRemovedEgressOptions(options: VMOptions): void {
-  const raw = options as Record<string, unknown>;
-  const unsupported = [
+function applyNetworkOptions(
+  options: VMOptions,
+  sandboxOptions: SandboxServerOptions,
+): void {
+  if (options.httpHooks && sandboxOptions.httpHooks === undefined) {
+    sandboxOptions.httpHooks = options.httpHooks;
+  }
+  if (options.dns && sandboxOptions.dns === undefined) {
+    sandboxOptions.dns = options.dns;
+  }
+  if (options.ssh && sandboxOptions.ssh === undefined) {
+    sandboxOptions.ssh = options.ssh;
+  }
+  if (options.tcp && sandboxOptions.tcp === undefined) {
+    sandboxOptions.tcp = options.tcp;
+  }
+  if (
+    options.maxHttpBodyBytes !== undefined &&
+    sandboxOptions.maxHttpBodyBytes === undefined
+  ) {
+    sandboxOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
+  }
+  if (
+    options.maxHttpResponseBodyBytes !== undefined &&
+    sandboxOptions.maxHttpResponseBodyBytes === undefined
+  ) {
+    sandboxOptions.maxHttpResponseBodyBytes = options.maxHttpResponseBodyBytes;
+  }
+  if (
+    options.allowWebSockets !== undefined &&
+    sandboxOptions.allowWebSockets === undefined
+  ) {
+    sandboxOptions.allowWebSockets = options.allowWebSockets;
+  }
+
+  const raw = sandboxOptions as Record<string, unknown>;
+  const wantsNetwork = [
     "httpHooks",
     "dns",
     "ssh",
@@ -134,12 +169,15 @@ function rejectRemovedEgressOptions(options: VMOptions): void {
     "maxHttpBodyBytes",
     "maxHttpResponseBodyBytes",
     "allowWebSockets",
-  ].filter((key) => Object.hasOwn(raw, key));
+  ].some((key) => Object.hasOwn(raw, key));
 
-  if (unsupported.length === 0) return;
-  throw new Error(
-    `Firecracker runtime does not support mediated guest egress; remove ${unsupported.join(", ")}. Use vm.enableIngress({ allowWebSockets }) for ingress WebSocket policy.`,
-  );
+  if (!wantsNetwork) return;
+  if (sandboxOptions.netEnabled === false) {
+    throw new Error(
+      "network policy options require sandbox.netEnabled !== false",
+    );
+  }
+  sandboxOptions.netEnabled ??= true;
 }
 
 const DEFAULT_VFS_READY_TIMEOUT_MS = 30000;
@@ -296,13 +334,13 @@ export class VM {
    * @returns A configured VM instance
    */
   static async create(options: VMOptions = {}): Promise<VM> {
-    rejectRemovedEgressOptions(options);
     if (options.rootfs?.size !== undefined) {
       parseDiskSizeToBytes(options.rootfs.size);
     }
 
     // Resolve sandbox options with async asset fetching
     const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
+    applyNetworkOptions(options, sandboxOptions);
 
     // Build the combined sandbox options
     if (options.fetch && sandboxOptions.fetch === undefined) {
@@ -337,7 +375,6 @@ export class VM {
     options: VMOptions = {},
     resolvedSandboxOptions?: ResolvedSandboxServerOptions,
   ) {
-    rejectRemovedEgressOptions(options);
     this.id = randomUUID();
     this.baseOptionsForClone = { ...options };
     this.autoStart = options.autoStart ?? true;
@@ -347,6 +384,13 @@ export class VM {
       options.rootfs?.size === undefined
         ? null
         : parseDiskSizeToBytes(options.rootfs.size);
+    const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
+    applyNetworkOptions(options, sandboxOptions);
+    const mitmMounts = resolveMitmMounts(
+      options.vfs,
+      sandboxOptions.mitmCertDir,
+      sandboxOptions.netEnabled ?? false,
+    );
     // Inject a guarded /etc/gondolin mount (host-authoritative ingress configuration)
     let gondolinMounts: Record<string, VirtualProvider> = {};
     let gondolinHooks: VfsHooks = {};
@@ -375,6 +419,7 @@ export class VM {
           };
 
     const resolvedVfs = resolveVmVfs(vfsOptions, {
+      ...mitmMounts,
       ...gondolinMounts,
     });
     this.vfs = resolvedVfs.provider;
@@ -384,13 +429,26 @@ export class VM {
     this.fuseMount = fuseConfig.fuseMount;
     this.fuseBinds = fuseConfig.fuseBinds;
 
-    const sandboxOptions: SandboxServerOptions = { ...options.sandbox };
     if (sandboxOptions.vfsProvider && options.vfs) {
       throw new Error("VM cannot specify both vfs and sandbox.vfsProvider");
     }
     if (sandboxOptions.vfsProvider) {
-      this.vfs = wrapProvider(sandboxOptions.vfsProvider, {});
-      fuseMounts = { "/": sandboxOptions.vfsProvider };
+      const injectedMounts = resolveMitmMounts(
+        undefined,
+        sandboxOptions.mitmCertDir,
+        sandboxOptions.netEnabled ?? false,
+      );
+      if (Object.keys(injectedMounts).length > 0) {
+        const normalized = normalizeMountMap({
+          "/": sandboxOptions.vfsProvider,
+          ...injectedMounts,
+        });
+        this.vfs = wrapProvider(new MountRouterProvider(normalized), {});
+        fuseMounts = { "/": sandboxOptions.vfsProvider, ...injectedMounts };
+      } else {
+        this.vfs = wrapProvider(sandboxOptions.vfsProvider, {});
+        fuseMounts = { "/": sandboxOptions.vfsProvider };
+      }
       fuseConfig = resolveFuseConfig(options.vfs, fuseMounts);
       this.fuseMount = fuseConfig.fuseMount;
       this.fuseBinds = fuseConfig.fuseBinds;

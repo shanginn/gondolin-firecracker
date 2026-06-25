@@ -25,13 +25,15 @@ npx @earendil-works/gondolin bash --resume <snapshot-id-or-raw-path>
 
 - Linux host with `/dev/kvm`
 - Firecracker binary on `PATH` or `GONDOLIN_FIRECRACKER=/path/to/firecracker`
+- Python 3 and `ip` from iproute2 when mediated guest egress is enabled
+- `/dev/net/tun` plus `CAP_NET_ADMIN`/`CAP_NET_RAW` when mediated guest egress is enabled
 - Node.js `>=23.6`
 - Guest assets with `manifest.assets.firecrackerKernel`
 
 Defaults are tuned for low memory and startup cost: `1` vCPU, `256M`, no serial
-console, no guest network device, and read-only base rootfs. Use VFS mounts for
-workspace data. Use `rootfs.mode="cow"` only when the workload must write into
-the root disk.
+console, no guest network device unless `netEnabled` is set, and read-only base
+rootfs. Use VFS mounts for workspace data. Use `rootfs.mode="cow"` only when the
+workload must write into the root disk.
 
 ## SDK Example
 
@@ -52,10 +54,11 @@ await vm.close();
 
 ## Network Model
 
-Guest egress is disabled in the Firecracker runtime. `httpHooks`, DNS overrides,
-mapped TCP, outbound SSH proxying, and `netEnabled: true` are rejected instead of
-silently bypassing policy. Host-to-guest ingress and host-to-guest SSH still use
-vsock-backed forwarders.
+Guest egress is disabled by default. When enabled, Firecracker attaches to a
+short-lived TAP device and Gondolin mediates DHCP, DNS, TCP, HTTP(S), mapped TCP,
+and outbound SSH in the host process. Gondolin does not install host NAT rules;
+guest packets only leave through the configured policy hooks. Host-to-guest
+ingress and host-to-guest SSH use vsock-backed forwarders.
 
 ## Development
 

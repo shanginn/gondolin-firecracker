@@ -19,6 +19,14 @@ import {
 } from "../assets.ts";
 import { ensureImageSelector, resolveImageSelector } from "../images.ts";
 import type { HttpFetch } from "../http/contracts.ts";
+import {
+  DEFAULT_MAX_HTTP_BODY_BYTES,
+  DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
+  type DnsOptions,
+  type HttpHooks,
+} from "../net/backend.ts";
+import type { SshOptions } from "../net/ssh.ts";
+import type { TcpOptions } from "../net/tcp.ts";
 import { assertRawDiskImage } from "../disk/image.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
 
@@ -73,10 +81,14 @@ export type SandboxServerOptions = {
 
   /** vsock ingress socket path */
   virtioIngressSocketPath?: string;
+  /** host TAP interface name */
+  netTapName?: string;
   /** guest mac address */
   netMac?: string;
   /** whether to enable networking */
   netEnabled?: boolean;
+  /** whether to allow WebSocket upgrades for guest egress */
+  allowWebSockets?: boolean;
   /**
    * Root disk image path (attached as `/dev/vda`)
    *
@@ -125,6 +137,20 @@ export type SandboxServerOptions = {
   maxQueuedExecs?: number;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
+  /** http interception hooks */
+  httpHooks?: HttpHooks;
+  /** dns configuration */
+  dns?: DnsOptions;
+  /** ssh egress configuration */
+  ssh?: SshOptions;
+  /** explicit host-mapped tcp egress configuration */
+  tcp?: TcpOptions;
+  /** max intercepted http request body size in `bytes` */
+  maxHttpBodyBytes?: number;
+  /** max buffered upstream http response body size in `bytes` */
+  maxHttpResponseBodyBytes?: number;
+  /** mitm ca directory path */
+  mitmCertDir?: string;
   /** vfs provider to expose under the fuse mount */
   vfsProvider?: VirtualProvider;
 };
@@ -167,10 +193,14 @@ export type ResolvedSandboxServerOptions = {
 
   /** vsock ingress socket path */
   virtioIngressSocketPath: string;
+  /** host TAP interface name */
+  netTapName: string;
   /** guest mac address */
   netMac: string;
   /** whether networking is enabled */
   netEnabled: boolean;
+  /** whether to allow WebSocket upgrades for guest egress */
+  allowWebSockets: boolean;
   /** enabled debug components */
   debug: DebugFlag[];
   /** guest console mode */
@@ -190,6 +220,20 @@ export type ResolvedSandboxServerOptions = {
   maxQueuedExecs: number;
   /** http fetch implementation for asset downloads */
   fetch?: HttpFetch;
+  /** http interception hooks */
+  httpHooks?: HttpHooks;
+  /** dns configuration */
+  dns?: DnsOptions;
+  /** ssh egress configuration */
+  ssh?: SshOptions;
+  /** explicit host-mapped tcp egress configuration */
+  tcp?: TcpOptions;
+  /** max intercepted http request body size in `bytes` */
+  maxHttpBodyBytes: number;
+  /** max buffered upstream http response body size in `bytes` */
+  maxHttpResponseBodyBytes: number;
+  /** mitm ca directory path */
+  mitmCertDir?: string;
   /** vfs provider to expose under the fuse mount */
   vfsProvider: VirtualProvider | null;
 };
@@ -349,6 +393,15 @@ function validateFirecrackerSocketPaths(
       platform,
     );
   }
+}
+
+function validateTapName(value: string): string {
+  if (!/^[A-Za-z0-9_.-]{1,15}$/.test(value)) {
+    throw new Error(
+      `invalid sandbox.netTapName: ${JSON.stringify(value)} (expected 1-15 chars: A-Z a-z 0-9 _ . -)`,
+    );
+  }
+  return value;
 }
 
 type FirecrackerKernelOverride = {
@@ -633,12 +686,18 @@ export function resolveSandboxServerOptions(
   const vmm: SandboxVmm = "firecracker";
   const memory = options.memory ?? DEFAULT_FIRECRACKER_MEMORY;
   const cpus = options.cpus ?? DEFAULT_FIRECRACKER_CPUS;
-  const firecrackerPath = options.firecrackerPath ?? resolveDefaultFirecrackerPath();
+  const firecrackerPath =
+    options.firecrackerPath ?? resolveDefaultFirecrackerPath();
   const firecrackerApiSocketPath =
     options.firecrackerApiSocketPath ?? defaultFirecrackerApiSocket;
   const firecrackerVsockPath =
     options.firecrackerVsockPath ?? defaultFirecrackerVsock;
   const firecrackerGuestCid = options.firecrackerGuestCid ?? 3;
+  const netEnabled = options.netEnabled ?? false;
+  const netTapName = validateTapName(
+    options.netTapName ?? `gtap${randomUUID().replace(/-/g, "").slice(0, 8)}`,
+  );
+  const netMac = options.netMac ?? "02:00:00:00:00:01";
 
   const supportedKeys = new Set([
     "firecrackerPath",
@@ -653,6 +712,9 @@ export function resolveSandboxServerOptions(
     "rootDiskReadOnly",
     "rootDiskDeleteOnClose",
     "netEnabled",
+    "netTapName",
+    "netMac",
+    "allowWebSockets",
     "debug",
     "console",
     "autoRestart",
@@ -662,6 +724,13 @@ export function resolveSandboxServerOptions(
     "maxTotalQueuedStdinBytes",
     "maxQueuedExecs",
     "fetch",
+    "httpHooks",
+    "dns",
+    "ssh",
+    "tcp",
+    "maxHttpBodyBytes",
+    "maxHttpResponseBodyBytes",
+    "mitmCertDir",
     "vfsProvider",
   ]);
   const unsupported = Object.keys(options)
@@ -683,12 +752,6 @@ export function resolveSandboxServerOptions(
   if (!Number.isInteger(firecrackerGuestCid) || firecrackerGuestCid < 3) {
     throw new Error(
       `invalid sandbox.firecrackerGuestCid: ${String(firecrackerGuestCid)} (expected integer >= 3)`,
-    );
-  }
-
-  if (options.netEnabled === true) {
-    throw new Error(
-      "Firecracker mediated networking is not implemented; leave sandbox.netEnabled unset or false.",
     );
   }
 
@@ -788,8 +851,10 @@ export function resolveSandboxServerOptions(
     virtioFsSocketPath: `${firecrackerVsockPath}_1025`,
     virtioSshSocketPath: `${firecrackerVsockPath}_1026`,
     virtioIngressSocketPath: `${firecrackerVsockPath}_1027`,
-    netMac: "02:00:00:00:00:01",
-    netEnabled: false,
+    netTapName,
+    netMac,
+    netEnabled,
+    allowWebSockets: options.allowWebSockets ?? true,
     debug,
     console: options.console,
     autoRestart: options.autoRestart ?? false,
@@ -799,6 +864,14 @@ export function resolveSandboxServerOptions(
     maxTotalQueuedStdinBytes,
     maxQueuedExecs: options.maxQueuedExecs ?? DEFAULT_MAX_QUEUED_EXECS,
     fetch: options.fetch,
+    httpHooks: options.httpHooks,
+    dns: options.dns,
+    ssh: options.ssh,
+    tcp: options.tcp,
+    maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
+    maxHttpResponseBodyBytes:
+      options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
+    mitmCertDir: options.mitmCertDir,
     vfsProvider: options.vfsProvider ?? null,
   };
 }
@@ -832,4 +905,5 @@ export async function resolveSandboxServerOptionsAsync(
 export const __test = {
   resolveRuntimeDir,
   validateLinuxUnixSocketPath,
+  validateTapName,
 };

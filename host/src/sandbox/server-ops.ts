@@ -629,7 +629,7 @@ export class SandboxServerOps {
     if (this.started) return;
 
     this.started = true;
-    this.network?.start();
+    await this.network?.start();
     this.bridge.connect();
     this.fsBridge.connect();
     this.sshBridge.connect();

@@ -20,6 +20,10 @@ Common options:
 - `--mount-memfs PATH` - mount an in-memory provider
 - `--listen [HOST:PORT]` - expose guest HTTP services on the host
 - `--ssh` - enable host-to-guest SSH access
+- `--allow-host HOST` - allow HTTP(S) egress to host pattern
+- `--dns MODE` - choose `synthetic`, `trusted`, or `open` DNS mode
+- `--tcp-map GUEST=UPSTREAM` - map guest TCP egress to a host target
+- `--ssh-allow-host HOST[:PORT]` - allow outbound SSH proxying
 - `--resume ID_OR_PATH` - resume from a snapshot id or `.raw` path
 - `--env KEY=VALUE` - set command environment
 - `--cwd PATH` - set command working directory
@@ -81,6 +85,9 @@ gondolin build --config images/alpine-base.json --output ./guest/image/out
 
 ## Network
 
-Guest egress networking is disabled in the Firecracker runtime. CLI egress
-policy flags are rejected. Host-to-guest ingress (`--listen`) and host-to-guest
-SSH (`--ssh`) are supported.
+Guest egress networking is disabled by default. `--allow-host`, `--dns`,
+`--tcp-map`, `--ssh-allow-host`, and related flags enable mediated Firecracker
+TAP egress. Gondolin handles DHCP, DNS, TCP, HTTP(S), mapped TCP, and outbound
+SSH in the host process and does not add generic host NAT rules. Host-to-guest
+ingress (`--listen`) and host-to-guest SSH (`--ssh`) are separate vsock-backed
+features.

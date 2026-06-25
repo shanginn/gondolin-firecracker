@@ -220,6 +220,9 @@ if [ "\${gondolin_net}" != "off" ]; then
       udhcpc -i eth0 -q -n || log "[init] udhcpc failed"
     fi
   fi
+  if [ ! -s /etc/resolv.conf ]; then
+    printf "nameserver 192.168.127.1\n" > /etc/resolv.conf || true
+  fi
 else
   if command -v ip > /dev/null 2>&1; then
     ip link set lo up || true
@@ -309,6 +312,16 @@ if [ "\${sandboxfs_ready}" -eq 1 ]; then
   printf "ok\\n" > /run/sandboxfs.ready
 else
   printf "%s\\n" "\${sandboxfs_error}" > /run/sandboxfs.failed
+fi
+
+if [ -r /etc/gondolin/mitm/ca.crt ] && [ -r /etc/ssl/certs/ca-certificates.crt ]; then
+  cat /etc/ssl/certs/ca-certificates.crt /etc/gondolin/mitm/ca.crt > /tmp/gondolin-ca-certificates.crt || true
+  if [ -s /tmp/gondolin-ca-certificates.crt ]; then
+    export SSL_CERT_FILE=/tmp/gondolin-ca-certificates.crt
+    export CURL_CA_BUNDLE=/tmp/gondolin-ca-certificates.crt
+    export REQUESTS_CA_BUNDLE=/tmp/gondolin-ca-certificates.crt
+    export NODE_EXTRA_CA_CERTS=/etc/gondolin/mitm/ca.crt
+  fi
 fi
 
 if [ -x /usr/bin/sandboxssh ]; then
@@ -481,6 +494,9 @@ if [ "\${gondolin_net}" != "off" ]; then
     else
       udhcpc -i eth0 -q -n || log "[initramfs] udhcpc failed"
     fi
+  fi
+  if [ ! -s /etc/resolv.conf ]; then
+    printf "nameserver 192.168.127.1\n" > /etc/resolv.conf || true
   fi
 else
   if command -v ip > /dev/null 2>&1; then

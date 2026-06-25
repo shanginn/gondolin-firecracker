@@ -72,11 +72,9 @@ test("resolveSandboxServerOptions rejects non-Linux hosts", () => {
   try {
     assert.throws(
       () =>
-        resolveSandboxServerOptions(
-          { imagePath: dir },
-          undefined,
-          { platform: "darwin" },
-        ),
+        resolveSandboxServerOptions({ imagePath: dir }, undefined, {
+          platform: "darwin",
+        }),
       /requires Linux\/KVM/,
     );
   } finally {
@@ -89,11 +87,9 @@ test("resolveSandboxServerOptions requires Firecracker boot assets", () => {
   try {
     assert.throws(
       () =>
-        resolveSandboxServerOptions(
-          { imagePath: dir },
-          undefined,
-          { platform: "linux" },
-        ),
+        resolveSandboxServerOptions({ imagePath: dir }, undefined, {
+          platform: "linux",
+        }),
       /does not provide Firecracker boot assets/,
     );
   } finally {
@@ -101,7 +97,7 @@ test("resolveSandboxServerOptions requires Firecracker boot assets", () => {
   }
 });
 
-test("resolveSandboxServerOptions rejects unsupported and mediated network options", () => {
+test("resolveSandboxServerOptions rejects unsupported options and accepts mediated networking", () => {
   const dir = makeAssets();
   try {
     assert.throws(
@@ -114,15 +110,20 @@ test("resolveSandboxServerOptions rejects unsupported and mediated network optio
       /Unsupported Firecracker option: sandbox\.machineType/,
     );
 
-    assert.throws(
-      () =>
-        resolveSandboxServerOptions(
-          { imagePath: dir, netEnabled: true },
-          undefined,
-          { platform: "linux" },
-        ),
-      /mediated networking is not implemented/,
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: dir,
+        netEnabled: true,
+        netTapName: "gtaptest0",
+        allowWebSockets: false,
+      },
+      undefined,
+      { platform: "linux" },
     );
+
+    assert.equal(resolved.netEnabled, true);
+    assert.equal(resolved.netTapName, "gtaptest0");
+    assert.equal(resolved.allowWebSockets, false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -111,10 +111,10 @@ test("vm internals: VM.create validates rootfs size before asset resolution", as
   );
 });
 
-test("vm internals: VM.create rejects removed egress options", async () => {
+test("vm internals: network policy options require enabled networking", async () => {
   await assert.rejects(
-    () => VM.create({ httpHooks: {} } as any),
-    /does not support mediated guest egress/,
+    () => VM.create({ httpHooks: {}, sandbox: { netEnabled: false } } as any),
+    /network policy options require sandbox\.netEnabled !== false/,
   );
 });
 
@@ -431,8 +431,7 @@ test("vm internals: start timeout includes server diagnostic hint", async () => 
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
   (vm as any).ensureVfsReady = async () => {};
   (vm as any).ensureSessionIpc = async () => {};
-  (vm as any).server.getStartupDiagnostic = () =>
-    " (firecracker: boot hung)";
+  (vm as any).server.getStartupDiagnostic = () => " (firecracker: boot hung)";
 
   try {
     await assert.rejects(

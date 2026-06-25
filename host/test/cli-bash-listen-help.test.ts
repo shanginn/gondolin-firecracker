@@ -20,5 +20,6 @@ test("cli: gondolin bash --help documents --listen and --resume", () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout ?? "", /--listen/);
   assert.match(result.stdout ?? "", /--resume/);
-  assert.match(result.stdout ?? "", /Firecracker guest egress is disabled/);
+  assert.match(result.stdout ?? "", /--allow-host/);
+  assert.match(result.stdout ?? "", /--dns/);
 });

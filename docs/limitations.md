@@ -5,11 +5,12 @@
 The runtime requires Linux with `/dev/kvm`. macOS and Windows hosts are not
 supported by the Firecracker backend.
 
-## No Guest Egress Network
+## Mediated Guest Egress Requires Host Network Capabilities
 
-Guest egress networking is disabled. HTTP hooks, DNS overrides, mapped TCP, and
-outbound SSH proxying are rejected until a Firecracker network path can enforce
-the same policy without generic NAT.
+Guest egress is disabled by default. Enabling it creates a TAP device and
+requires Python 3, iproute2, `/dev/net/tun`, `CAP_NET_ADMIN`, and `CAP_NET_RAW`.
+The guest still cannot use generic host NAT; DHCP, DNS, TCP, HTTP(S), mapped
+TCP, and outbound SSH are mediated by the host policy stack.
 
 ## No Full VM Save/Restore
 

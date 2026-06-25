@@ -27,6 +27,7 @@ import {
   FirecrackerController,
   type FirecrackerConfig,
 } from "./firecracker-controller.ts";
+import { MediatedNetworkBackend } from "../net/backend.ts";
 import { FsRpcService } from "../vfs/rpc-service.ts";
 import { LINUX_ERRNO } from "../vfs/linux-errno.ts";
 import { SandboxVfsProvider } from "../vfs/provider.ts";
@@ -50,6 +51,7 @@ import {
   VirtioBridge,
   estimateBase64Bytes,
   isValidRequestId,
+  parseMac,
 } from "./server-transport.ts";
 import {
   type SandboxClient,
@@ -125,8 +127,7 @@ type SandboxControllerLike = {
   ): unknown;
 };
 
-type SandboxServerInternalOptions = {
-};
+type SandboxServerInternalOptions = {};
 
 export class SandboxServer extends EventEmitter {
   private emitDebug(component: DebugComponent, message: string) {
@@ -220,7 +221,7 @@ export class SandboxServer extends EventEmitter {
   private readonly fsBridge: VirtioBridge;
   private readonly sshBridge: VirtioBridge;
   private readonly ingressBridge: VirtioBridge;
-  private readonly network: null = null;
+  private readonly network: MediatedNetworkBackend | null;
   private readonly internalOptions: SandboxServerInternalOptions;
 
   private tcpStreams = new Map<number, TcpForwardStream>();
@@ -376,7 +377,7 @@ export class SandboxServer extends EventEmitter {
       this.options.rootDiskReadOnly ? "ro" : "rw",
       "init=/init",
       "gondolin.transport=vsock",
-      "gondolin.net=off",
+      this.options.netEnabled ? "gondolin.net=on" : "gondolin.net=off",
       "gondolin.debug=0",
     ]
       .filter(Boolean)
@@ -400,6 +401,8 @@ export class SandboxServer extends EventEmitter {
       append: this.baseAppend,
       console: this.options.console,
       autoRestart: this.options.autoRestart,
+      netTapName: this.options.netEnabled ? this.options.netTapName : undefined,
+      netMac: this.options.netMac,
     };
     this.controller = new FirecrackerController(firecrackerConfig);
 
@@ -439,6 +442,36 @@ export class SandboxServer extends EventEmitter {
             : undefined,
         })
       : null;
+    const mac =
+      parseMac(this.options.netMac) ?? Buffer.from([0x02, 0, 0, 0, 0, 1]);
+    this.network = this.options.netEnabled
+      ? new MediatedNetworkBackend({
+          tapName: this.options.netTapName,
+          vmMac: mac,
+          debug: this.hasDebug("net"),
+          fetch: this.options.fetch,
+          httpHooks: this.options.httpHooks,
+          dns: this.options.dns,
+          ssh: this.options.ssh,
+          tcp: this.options.tcp,
+          mitmCertDir: this.options.mitmCertDir,
+          maxHttpBodyBytes: this.options.maxHttpBodyBytes,
+          maxHttpResponseBodyBytes: this.options.maxHttpResponseBodyBytes,
+          allowWebSockets: this.options.allowWebSockets,
+        })
+      : null;
+
+    if (this.network) {
+      this.network.on("debug", (component: DebugComponent, message: string) => {
+        this.emitDebug(component, message);
+      });
+      this.network.on("error", (err) => {
+        this.emit("error", err);
+      });
+      this.network.on("guest-activity-change", () => {
+        this.scheduleControllerIdlePause();
+      });
+    }
 
     this.controller.on("state", (state) => {
       if (state === "running") {

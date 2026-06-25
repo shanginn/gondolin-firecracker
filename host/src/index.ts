@@ -103,7 +103,9 @@ export type {
   HttpIpAllowInfo,
   HttpHooks,
   HttpFetch,
-} from "./http/contracts.ts";
+} from "./net/backend.ts";
+export type { SshOptions, SshCredential } from "./net/ssh.ts";
+export type { TcpOptions } from "./net/tcp.ts";
 export { HttpRequestBlockedError } from "./http/utils.ts";
 
 // Debug helpers
