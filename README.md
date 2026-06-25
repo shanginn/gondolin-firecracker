@@ -64,25 +64,27 @@ ingress and host-to-guest SSH use vsock-backed forwarders.
 
 Measured on a single-vCPU KVM VPS on June 25, 2026 with warm guest assets:
 Debian Linux `6.12.85+deb13-amd64`, `1` vCPU (`AMD EPYC 7543` under KVM),
-`1.9 GiB` RAM, Firecracker `v1.16.0`, Node.js `v26.4.0`, Zig `0.16.0`.
+`1.9 GiB` RAM, Firecracker `v1.16.0`, QEMU `10.0.8`, Node.js `v26.4.0`,
+Zig `0.16.0`.
 
 ```bash
 node host/examples/backend-benchmark.ts --iterations 50
 ```
 
-Each value is the median of `5` runs using the defaults: `1` vCPU, `256M`, no
-serial console, and guest networking disabled.
+Each value is the median of `5` runs with `1` vCPU, `256M`, no serial console,
+and guest networking disabled. The QEMU numbers use the QEMU-era
+`@earendil-works/gondolin@0.12.0` host package against the same guest assets.
 
-| Metric | Median |
-| --- | ---: |
-| VM object creation | `7.5 ms` |
-| VM start to ready | `623 ms` |
-| First `/bin/true` exec | `5.0 ms` |
-| Warm `/bin/true` exec p50 | `8.9 ms` |
-| Warm `/bin/true` exec p95 | `16.0 ms` |
-| Firecracker RSS after warm execs | `111 MiB` |
-| Firecracker VSZ after warm execs | `264 MiB` |
-| VM close | `36.7 ms` |
+| Metric | Firecracker | QEMU |
+| --- | ---: | ---: |
+| VM object creation | `7.8 ms` | `26.9 ms` |
+| VM start to ready | `601 ms` | `4.00 s` |
+| First `/bin/true` exec | `4.0 ms` | `27.8 ms` |
+| Warm `/bin/true` exec p50 | `11.5 ms` | `23.8 ms` |
+| Warm `/bin/true` exec p95 | `16.6 ms` | `35.0 ms` |
+| VMM RSS after warm execs | `111 MiB` | `188 MiB` |
+| VMM VSZ after warm execs | `264 MiB` | `653 MiB` |
+| VM close | `40.0 ms` | `29.0 ms` |
 
 This benchmark isolates VM lifecycle and tiny command latency. Network, VFS, and
 agent workload benchmarks should be measured separately.
