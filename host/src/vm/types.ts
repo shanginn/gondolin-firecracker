@@ -52,9 +52,9 @@ export type VMOptions = {
   vfs?: VmVfsOptions | null;
   /** default environment variables */
   env?: EnvInput;
-  /** vm memory size (default: "256M") */
+  /** vm memory size (default: "84M") */
   memory?: string;
-  /** vm cpu count (default: 2) */
+  /** vm cpu count (default: 1) */
   cpus?: number;
   /** startup timeout while waiting for guest readiness in `ms` (`<= 0` disables timeout) */
   startTimeoutMs?: number;

@@ -3,8 +3,8 @@
 **Linux micro-VMs for agent workloads, backed only by Firecracker.**
 
 Gondolin runs untrusted code inside a Firecracker VM and exposes a small host
-control plane for command execution, VFS mounts, host-to-guest SSH, ingress, and
-disk checkpoints. The runtime is Linux/KVM only.
+control plane for command execution, VFS mounts, optional host-to-guest SSH,
+ingress, and disk checkpoints. The runtime is Linux/KVM only.
 
 ## Quick Start
 
@@ -30,10 +30,15 @@ npx @earendil-works/gondolin bash --resume <snapshot-id-or-raw-path>
 - Node.js `>=23.6`
 - Guest assets with `manifest.assets.firecrackerKernel`
 
-Defaults are tuned for low memory and startup cost: `1` vCPU, `256M`, no serial
+Defaults are tuned for low memory and startup cost: `1` vCPU, `84M`, no serial
 console, no guest network device unless `netEnabled` is set, and read-only base
 rootfs. Use VFS mounts for workspace data. Use `rootfs.mode="cow"` only when the
 workload must write into the root disk.
+
+The default Alpine image keeps the guest base intentionally small:
+`linux-virt`, `bash`, `ca-certificates`, and `curl`. Add packages such as
+`openssh`, `python3`, `nodejs`, `npm`, `uv`, or `e2fsprogs` through a custom
+image when a workload actually needs them.
 
 ## SDK Example
 
@@ -71,20 +76,28 @@ Zig `0.16.0`.
 node host/examples/backend-benchmark.ts --iterations 50
 ```
 
-Each value is the median of `5` runs with `1` vCPU, `256M`, no serial console,
-and guest networking disabled. The QEMU numbers use the QEMU-era
-`@earendil-works/gondolin@0.12.0` host package against the same guest assets.
+Each Firecracker value is the median of `5` runs with `1` vCPU, `84M`, no
+serial console, guest networking disabled, and the optimized default Alpine
+image. The QEMU numbers are the original Gondolin/QEMU baseline measured on the
+same host with `1` vCPU and `256M` using `@earendil-works/gondolin@0.12.0`.
 
 | Metric | Firecracker | QEMU |
 | --- | ---: | ---: |
-| VM object creation | `7.8 ms` | `26.9 ms` |
-| VM start to ready | `601 ms` | `4.00 s` |
-| First `/bin/true` exec | `4.0 ms` | `27.8 ms` |
-| Warm `/bin/true` exec p50 | `11.5 ms` | `23.8 ms` |
-| Warm `/bin/true` exec p95 | `16.6 ms` | `35.0 ms` |
-| VMM RSS after warm execs | `111 MiB` | `188 MiB` |
-| VMM VSZ after warm execs | `264 MiB` | `653 MiB` |
-| VM close | `40.0 ms` | `29.0 ms` |
+| VM object creation | `8.4 ms` | `26.9 ms` |
+| VM start to ready | `610 ms` | `4.00 s` |
+| First `/bin/true` exec | `14.2 ms` | `27.8 ms` |
+| Warm `/bin/true` exec p50 | `13.2 ms` | `23.8 ms` |
+| Warm `/bin/true` exec p95 | `15.5 ms` | `35.0 ms` |
+| VMM RSS after warm execs | `90.8 MiB` | `188 MiB` |
+| VMM VSZ after warm execs | `92.1 MiB` | `653 MiB` |
+| VM close | `37.6 ms` | `29.0 ms` |
+
+Memory floor smoke tests used `console: "none"`, `netEnabled: true`, bash, and
+an outbound HTTP fetch from the guest. The optimized image passed `84M` for
+`20/20` boots. `80M` was intentionally not chosen as the default because it
+passed only `9/10` boots; `76M` failed `5/5`. The initramfs prune reduced the
+default compressed initramfs from `5.9M` to `2.3M` (`11M` to `3.6M`
+uncompressed).
 
 This benchmark isolates VM lifecycle and tiny command latency. Network, VFS, and
 agent workload benchmarks should be measured separately.

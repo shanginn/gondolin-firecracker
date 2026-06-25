@@ -6,6 +6,7 @@ import { VM } from "../src/vm/core.ts";
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
 const DEFAULT_START_TIMEOUT_MS = 60_000;
+const DEFAULT_TEST_MEMORY = "256M";
 
 const SIGNAL_NAMES: Record<number, string> = {
   1: "SIGHUP",
@@ -184,6 +185,7 @@ async function main() {
       : "none";
 
   const vm = new VM({
+    memory: process.env.GONDOLIN_GUEST_TEST_MEMORY ?? DEFAULT_TEST_MEMORY,
     startTimeoutMs: envPositiveInteger(
       "GONDOLIN_GUEST_TEST_START_TIMEOUT_MS",
       DEFAULT_START_TIMEOUT_MS,

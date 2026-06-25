@@ -187,9 +187,11 @@ fi
 if modprobe virtio_rng > /dev/null 2>&1; then
   log "[init] loaded virtio_rng"
 fi
-if [ -e /dev/hwrng ]; then
+if [ -e /dev/hwrng ] && command -v rngd > /dev/null 2>&1; then
   log "[init] starting rngd"
   rngd -r /dev/hwrng -o /dev/random > /dev/null 2>&1 &
+elif [ -e /dev/hwrng ]; then
+  log "[init] rngd unavailable"
 else
   log "[init] /dev/hwrng missing"
 fi

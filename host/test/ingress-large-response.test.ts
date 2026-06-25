@@ -134,7 +134,9 @@ async function resolveGuestHttpServer(
       "elif command -v python >/dev/null 2>&1; then",
       "  echo python;",
       "elif busybox --list 2>/dev/null | grep -qx httpd && busybox --list 2>/dev/null | grep -qx wget; then",
-      "  echo busybox;",
+      "  echo busybox-httpd;",
+      "elif busybox --list 2>/dev/null | grep -qx nc && busybox --list 2>/dev/null | grep -qx wget; then",
+      "  echo busybox-nc;",
       "else",
       "  exit 1;",
       "fi",
@@ -166,10 +168,23 @@ async function resolveGuestHttpServer(
     };
   }
 
-  if (serverKind === "busybox") {
+  if (serverKind === "busybox-httpd") {
     return {
       launchCommand:
         "busybox httpd -f -p 127.0.0.1:18080 -h /tmp/ingress-large-www",
+      readinessCommand:
+        "busybox wget -qO - http://127.0.0.1:18080/asset.bin | wc -c",
+    };
+  }
+
+  if (serverKind === "busybox-nc") {
+    return {
+      launchCommand: [
+        "while :; do",
+        "len=$(wc -c < /tmp/ingress-large-www/asset.bin | tr -d '[:space:]');",
+        "{ printf 'HTTP/1.1 200 OK\\r\\nContent-Length: %s\\r\\nConnection: close\\r\\n\\r\\n' \"$len\"; cat /tmp/ingress-large-www/asset.bin; } | busybox nc -l -p 18080 -w 5;",
+        "done",
+      ].join(" "),
       readinessCommand:
         "busybox wget -qO - http://127.0.0.1:18080/asset.bin | wc -c",
     };

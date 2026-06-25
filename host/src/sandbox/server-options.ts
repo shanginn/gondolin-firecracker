@@ -47,7 +47,7 @@ const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_QUEUED_EXECS = 64;
-const DEFAULT_FIRECRACKER_MEMORY = "256M";
+const DEFAULT_FIRECRACKER_MEMORY = "84M";
 const DEFAULT_FIRECRACKER_CPUS = 1;
 
 /**
@@ -180,7 +180,7 @@ export type ResolvedSandboxServerOptions = {
   /** readonly mode for the root disk */
   rootDiskReadOnly: boolean;
 
-  /** vm memory size (e.g. "256M") */
+  /** vm memory size (e.g. "84M") */
   memory: string;
   /** vm cpu count */
   cpus: number;

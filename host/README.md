@@ -45,10 +45,10 @@ await vm.close();
 
 - Firecracker only
 - `1` vCPU
-- `256M` guest memory
+- `84M` guest memory
 - read-only base rootfs
 - raw root disks only
-- vsock control, VFS, SSH, and ingress channels
+- vsock control, VFS, SSH helper, and ingress channels
 - no guest egress network
 
 Use `rootfs.mode="cow"` when the workload must write to the root disk. Use VFS

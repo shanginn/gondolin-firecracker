@@ -92,8 +92,8 @@ command without the recommended options.
 
 ## Notes and Limitations
 
-- The guest image must include `sshd` (OpenSSH) and `sandboxssh`. Default images
-  are expected to include them.
+- The guest image must include `sshd` (OpenSSH) and `sandboxssh`. The default
+  low-memory image omits OpenSSH; add `openssh` in a custom image for this API.
 - The SSH server is only reachable through the host-local forwarder. It is not
   exposed on the guest network.
 - Port forwarding is intentionally disabled. If you need host <-> guest

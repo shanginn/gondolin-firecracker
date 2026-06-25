@@ -12,7 +12,7 @@ Gondolin has one VM backend: Firecracker.
 ## Defaults
 
 - `1` vCPU
-- `256M` guest memory
+- `84M` guest memory
 - raw root disks only
 - read-only base rootfs
 - no serial console unless requested
@@ -36,8 +36,8 @@ overrides, mapped TCP, or outbound SSH proxying enable a short-lived Firecracker
 TAP device that is mediated by the host policy stack. Gondolin does not install
 generic host NAT rules.
 
-Host-to-guest ingress and host-to-guest SSH are supported over vsock-backed
-forwarders.
+Host-to-guest ingress and optional host-to-guest SSH are supported over
+vsock-backed forwarders. SSH requires a guest image with OpenSSH installed.
 
 ## Production Notes
 

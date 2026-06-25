@@ -28,7 +28,7 @@ booting Firecracker.
     "version": "3.23.0",
     "kernelPackage": "linux-virt",
     "kernelImage": "vmlinuz-virt",
-    "rootfsPackages": ["linux-virt", "bash", "ca-certificates", "e2fsprogs"],
+    "rootfsPackages": ["linux-virt", "bash", "ca-certificates", "curl"],
     "initramfsPackages": []
   },
   "rootfs": {
@@ -42,6 +42,7 @@ booting Firecracker.
 - Guest architecture must match the host architecture.
 - Include `e2fsprogs` when using `rootfs.size`.
 - Include `openssh` when using `vm.enableSsh()` or `gondolin bash --ssh`.
+- Include `python3`, `nodejs`, `npm`, or `uv` only for workloads that need them.
 - Put persistent data on VFS mounts; the default rootfs is read-only.
 
 ## Using Assets

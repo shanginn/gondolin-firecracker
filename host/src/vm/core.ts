@@ -829,7 +829,7 @@ fi
     }
     if (setupResult.exitCode === 127) {
       throw new Error(
-        "sshd not available in guest image. Rebuild guest assets with openssh installed (default images should include it).",
+        "sshd not available in guest image. Rebuild guest assets with openssh installed.",
       );
     }
     if (setupResult.exitCode === 126) {

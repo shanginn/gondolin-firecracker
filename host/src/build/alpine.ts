@@ -213,6 +213,9 @@ export async function buildAlpineImages(
   syncKernelModules(rootfsDir, initramfsDir, log, {
     copyRootfsToInitramfs: !opts.ociRootfs,
   });
+  if (initramfsPackages.length === 0 && !opts.initramfsInit) {
+    pruneDefaultInitramfs(initramfsDir);
+  }
 
   fs.rmSync(path.join(rootfsDir, "boot"), { recursive: true, force: true });
 
@@ -252,5 +255,42 @@ function ensureDefaultSandboxMountDirs(rootDir: string): void {
     const targetDir = path.join(rootDir, sub);
     assertSafeWritePath(targetDir, rootDir);
     fs.mkdirSync(targetDir, { recursive: true });
+  }
+}
+
+function pruneDefaultInitramfs(initramfsDir: string): void {
+  const remove = (relativePath: string) => {
+    const target = path.join(initramfsDir, relativePath);
+    assertSafeWritePath(target, initramfsDir);
+    fs.rmSync(target, { recursive: true, force: true });
+  };
+
+  for (const relativePath of [
+    "etc/apk",
+    "etc/secfixes.d",
+    "etc/ssl",
+    "lib/apk",
+    "sbin/apk",
+    "usr/share/apk",
+    "usr/bin/scanelf",
+    "usr/bin/ssl_client",
+    "usr/lib/engines-3",
+    "usr/lib/ossl-modules",
+    "var/cache/apk",
+    "var/lib/apk",
+  ]) {
+    remove(relativePath);
+  }
+
+  const usrLib = path.join(initramfsDir, "usr/lib");
+  if (!fs.existsSync(usrLib)) return;
+  for (const entry of fs.readdirSync(usrLib)) {
+    if (
+      entry === "libapk.so.3.0.0" ||
+      entry.startsWith("libcrypto.so.") ||
+      entry.startsWith("libssl.so.")
+    ) {
+      remove(path.join("usr/lib", entry));
+    }
   }
 }

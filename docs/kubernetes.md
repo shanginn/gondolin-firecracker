@@ -64,11 +64,11 @@ spec:
           resources:
             requests:
               cpu: "1"
-              memory: 384Mi
+              memory: 192Mi
               ephemeral-storage: 2Gi
               devices.kubevirt.io/kvm: "1"
             limits:
-              memory: 512Mi
+              memory: 384Mi
               ephemeral-storage: 4Gi
               devices.kubevirt.io/kvm: "1"
           securityContext:
@@ -141,7 +141,7 @@ The Kubernetes-oriented Firecracker profile is optimized for low startup time
 and memory footprint:
 
 - `1` vCPU
-- `256M` guest memory
+- `84M` guest memory
 - no serial console unless `console: "stdio"` is requested
 - no guest DHCP/network device setup unless mediated egress is enabled
 - `rootfs.mode="readonly"` by default
@@ -175,8 +175,8 @@ For Kubernetes:
 - Pin workloads to KVM-capable node pools.
 - Avoid sandboxed pod runtimes that hide or virtualize `/dev/kvm` unless nested
   virtualization is known to work.
-- Size pod memory as guest memory plus Node.js/controller overhead. A `256M`
-  Firecracker guest should usually request at least `384Mi`.
+- Size pod memory as guest memory plus Node.js/controller overhead. An `84M`
+  Firecracker guest should usually request at least `192Mi`.
 - Keep `GONDOLIN_RUNTIME_DIR` on memory-backed `emptyDir`; keep root disk copies
   on disk-backed `emptyDir` or persistent scratch storage.
 - Use `rootfs.mode="readonly"` whenever the workload writes only to tmpfs and

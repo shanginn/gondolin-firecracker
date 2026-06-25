@@ -1,5 +1,7 @@
 import path from "path";
 
+import { DEFAULT_ROOTFS_PACKAGES } from "./shared.ts";
+
 /**
  * Build configuration schema for custom Linux kernel and rootfs builds.
  *
@@ -192,19 +194,7 @@ export function getDefaultBuildConfig(): BuildConfig {
       version: "3.23.0",
       kernelPackage: "linux-virt",
       kernelImage: "vmlinuz-virt",
-      rootfsPackages: [
-        "linux-virt",
-        "rng-tools",
-        "bash",
-        "ca-certificates",
-        "curl",
-        "e2fsprogs",
-        "nodejs",
-        "npm",
-        "uv",
-        "python3",
-        "openssh",
-      ],
+      rootfsPackages: [...DEFAULT_ROOTFS_PACKAGES],
       initramfsPackages: [],
     },
     rootfs: {
