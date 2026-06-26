@@ -19,12 +19,6 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
-  examples/multitenant-sim:
-    dependencies:
-      '@earendil-works/gondolin':
-        specifier: workspace:*
-        version: link:../../host
-
   host:
     dependencies:
       cbor2:
