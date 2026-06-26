@@ -67,30 +67,29 @@ ingress and host-to-guest SSH use vsock-backed forwarders.
 
 ## Benchmark Snapshot
 
-Measured on a single-vCPU KVM VPS on June 25, 2026 with warm guest assets:
+Measured on a single-vCPU KVM VPS on June 26, 2026 with warm guest assets:
 Debian Linux `6.12.85+deb13-amd64`, `1` vCPU (`AMD EPYC 7543` under KVM),
 `1.9 GiB` RAM, Firecracker `v1.16.0`, QEMU `10.0.8`, Node.js `v26.4.0`,
 Zig `0.16.0`.
 
-```bash
-node host/examples/backend-benchmark.ts --iterations 50
-```
+Each value is the median of `5` runs with `1` vCPU, no serial console, guest
+networking disabled, and `50` warm `/bin/true` execs per run. The default
+Firecracker and QEMU columns use the checked-in `images/alpine-base.json`
+x86_64 image. The tiny Firecracker column uses
+`images/alpine-tiny-firecracker.json`. The QEMU column is the original
+Gondolin/QEMU runtime from `@earendil-works/gondolin@0.12.0`, using the same
+default x86_64 image.
 
-Each Firecracker value is the median of `5` runs with `1` vCPU, `84M`, no
-serial console, guest networking disabled, and the optimized default Alpine
-image. The QEMU numbers are the original Gondolin/QEMU baseline measured on the
-same host with `1` vCPU and `256M` using `@earendil-works/gondolin@0.12.0`.
-
-| Metric | Firecracker | QEMU |
-| --- | ---: | ---: |
-| VM object creation | `8.4 ms` | `26.9 ms` |
-| VM start to ready | `610 ms` | `4.00 s` |
-| First `/bin/true` exec | `14.2 ms` | `27.8 ms` |
-| Warm `/bin/true` exec p50 | `13.2 ms` | `23.8 ms` |
-| Warm `/bin/true` exec p95 | `15.5 ms` | `35.0 ms` |
-| VMM RSS after warm execs | `90.8 MiB` | `188 MiB` |
-| VMM VSZ after warm execs | `92.1 MiB` | `653 MiB` |
-| VM close | `37.6 ms` | `29.0 ms` |
+| Metric | Firecracker default (`84M`) | Firecracker tiny (`29M`) | QEMU original (`256M`) |
+| --- | ---: | ---: | ---: |
+| VM object creation | `1.7 ms` | `1.7 ms` | `366 ms` |
+| VM start to ready | `1.72 s` | `1.01 s` | `4.38 s` |
+| First `/bin/true` exec | `6.1 ms` | `13.9 ms` | `9.0 ms` |
+| Warm `/bin/true` exec p50 | `12.5 ms` | `15.9 ms` | `23.6 ms` |
+| Warm `/bin/true` exec p95 | `18.3 ms` | `16.9 ms` | `31.7 ms` |
+| VMM RSS after warm execs | `84.7 MiB` | `28.3 MiB` | `171.5 MiB` |
+| VMM VSZ after warm execs | `92.1 MiB` | `37.1 MiB` | `649.9 MiB` |
+| VM close | `41.2 ms` | `37.4 ms` | `23.7 ms` |
 
 Memory floor smoke tests used `console: "none"`, `netEnabled: true`, bash, and
 an outbound HTTP fetch from the guest. The optimized image passed `84M` for
