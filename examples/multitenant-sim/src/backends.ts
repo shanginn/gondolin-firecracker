@@ -95,6 +95,8 @@ type GondolinVm = {
   close(): Promise<void>;
 };
 
+const GUEST_WORKSPACE_ROOT = "/tmp/gondolin-workspace";
+
 async function makeGondolinBackend(
   config: SimulatorConfig,
 ): Promise<SessionBackend> {
@@ -120,11 +122,11 @@ async function makeGondolinBackend(
         sandbox,
         vfs: {
           mounts: {
-            "/workspace": new mod.MemoryProvider(),
+            [GUEST_WORKSPACE_ROOT]: new mod.MemoryProvider(),
           },
         },
       });
-      const workspace = `/workspace/users/${user.id}`;
+      const workspace = `${GUEST_WORKSPACE_ROOT}/users/${user.id}`;
       await vm.fs.mkdir(workspace, { recursive: true });
 
       return {
