@@ -186,7 +186,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex libssl-dev lz4 xz-utils
+          sudo apt-get install -y bc bison build-essential flex libelf-dev libssl-dev lz4 xz-utils
           curl -LsSf https://astral.sh/uv/install.sh | sh
 
           UV_BIN_DIR=""
