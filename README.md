@@ -40,6 +40,18 @@ The default Alpine image keeps the guest base intentionally small:
 `openssh`, `python3`, `nodejs`, `npm`, `uv`, or `e2fsprogs` through a custom
 image when a workload actually needs them.
 
+For lower cold-start and memory floors, the repo also includes:
+
+- `scripts/build-fast-agent-init.sh`: builds a stripped static `/init` for the
+  agent profile
+- `images/alpine-fast-firecracker.json`: tiny kernel, static init, ext4 rootfs,
+  no Firecracker initrd
+- `images/alpine-initramfs-firecracker.json`: tiny kernel plus static init
+  running directly from initramfs
+- `VM#getStartupTimings()`, `VM#createFirecrackerSnapshot()`, and
+  `VM.restoreFirecrackerSnapshot()` for phase timing and same-host snapshot
+  restore experiments
+
 ## SDK Example
 
 ```ts
@@ -80,16 +92,16 @@ x86_64 image. The tiny Firecracker column uses
 Gondolin/QEMU runtime from `@earendil-works/gondolin@0.12.0`, using the same
 default x86_64 image.
 
-| Metric | Firecracker default (`84M`) | Firecracker tiny (`29M`) | QEMU original (`256M`) |
-| --- | ---: | ---: | ---: |
-| VM object creation | `1.7 ms` | `1.7 ms` | `366 ms` |
-| VM start to ready | `1.72 s` | `1.01 s` | `4.38 s` |
-| First `/bin/true` exec | `6.1 ms` | `13.9 ms` | `9.0 ms` |
-| Warm `/bin/true` exec p50 | `12.5 ms` | `15.9 ms` | `23.6 ms` |
-| Warm `/bin/true` exec p95 | `18.3 ms` | `16.9 ms` | `31.7 ms` |
-| VMM RSS after warm execs | `84.7 MiB` | `28.3 MiB` | `171.5 MiB` |
-| VMM VSZ after warm execs | `92.1 MiB` | `37.1 MiB` | `649.9 MiB` |
-| VM close | `41.2 ms` | `37.4 ms` | `23.7 ms` |
+| Metric                    | Firecracker default (`84M`) | Firecracker tiny (`29M`) | QEMU original (`256M`) |
+| ------------------------- | --------------------------: | -----------------------: | ---------------------: |
+| VM object creation        |                    `1.7 ms` |                 `1.7 ms` |               `366 ms` |
+| VM start to ready         |                    `1.72 s` |                 `1.01 s` |               `4.38 s` |
+| First `/bin/true` exec    |                    `6.1 ms` |                `13.9 ms` |               `9.0 ms` |
+| Warm `/bin/true` exec p50 |                   `12.5 ms` |                `15.9 ms` |              `23.6 ms` |
+| Warm `/bin/true` exec p95 |                   `18.3 ms` |                `16.9 ms` |              `31.7 ms` |
+| VMM RSS after warm execs  |                  `84.7 MiB` |               `28.3 MiB` |            `171.5 MiB` |
+| VMM VSZ after warm execs  |                  `92.1 MiB` |               `37.1 MiB` |            `649.9 MiB` |
+| VM close                  |                   `41.2 ms` |                `37.4 ms` |              `23.7 ms` |
 
 Memory floor smoke tests used `console: "none"`, `netEnabled: true`, bash, and
 an outbound HTTP fetch from the guest. The optimized image passed `84M` for
@@ -111,14 +123,19 @@ Firecracker initrd in the image manifest:
 
 ```bash
 scripts/build-tiny-firecracker-kernel.sh
+scripts/build-fast-agent-init.sh
 gondolin build --config images/alpine-tiny-firecracker.json --output ./guest/image/tiny
+gondolin build --config images/alpine-fast-firecracker.json --output ./guest/image/fast
+gondolin build --config images/alpine-initramfs-firecracker.json --output ./guest/image/initramfs
 ```
 
 The tiny profile uses a Linux `6.1.142` `tinyconfig`-derived PVH/KVM guest
 kernel (`15M` uncompressed ELF) with virtio block, virtio net, vsock, ext4,
 FUSE, ptys, IPv4, and bash-capable process support built in. It keeps
 `bash` and `ca-certificates` in the rootfs and sets
-`manifest.assets.firecrackerInitrd` to `null`.
+`manifest.assets.firecrackerInitrd` to `null`. The fast profile swaps the shell
+init script for the static init. The initramfs profile copies `sandboxd`,
+`sandboxfs`, bash, and certificates into initramfs and skips `switch_root`.
 
 A June 26, 2026 smoke sweep on the same KVM host used `netEnabled: true`, a
 VFS-backed file write/read, `/bin/bash`, and an outbound HTTP fetch. `29M`

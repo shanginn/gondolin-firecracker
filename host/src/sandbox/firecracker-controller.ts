@@ -68,6 +68,15 @@ export type FirecrackerConfig = {
   netTapName?: string;
   /** guest mac address */
   netMac?: string;
+  /** snapshot state loaded instead of cold boot configuration */
+  snapshotLoad?: FirecrackerSnapshotLoadConfig;
+};
+
+export type FirecrackerSnapshotLoadConfig = {
+  /** microVM state snapshot path */
+  snapshotPath: string;
+  /** guest memory snapshot path */
+  memPath: string;
 };
 
 type FirecrackerJson =
@@ -104,6 +113,32 @@ export class FirecrackerController extends EventEmitter {
     return this.child?.pid ?? null;
   }
 
+  async createSnapshot(snapshotPath: string, memPath: string): Promise<void> {
+    if (!this.child || this.state !== "running") {
+      throw new Error("Firecracker snapshot requires a running VM");
+    }
+
+    await firecrackerRequest(this.config.apiSocketPath, "PATCH", "/vm", {
+      state: "Paused",
+    });
+    try {
+      await firecrackerRequest(
+        this.config.apiSocketPath,
+        "PUT",
+        "/snapshot/create",
+        {
+          snapshot_type: "Full",
+          snapshot_path: snapshotPath,
+          mem_file_path: memPath,
+        },
+      );
+    } finally {
+      await firecrackerRequest(this.config.apiSocketPath, "PATCH", "/vm", {
+        state: "Resumed",
+      }).catch(() => {});
+    }
+  }
+
   async start() {
     if (this.child) return;
 
@@ -111,6 +146,7 @@ export class FirecrackerController extends EventEmitter {
 
     this.manualStop = false;
     this.setState("starting");
+    this.emitStartupTiming("firecracker_start");
     this.cleanupSockets();
 
     this.child = child_process.spawn(
@@ -124,6 +160,7 @@ export class FirecrackerController extends EventEmitter {
         ],
       },
     );
+    this.emitStartupTiming("firecracker_spawned");
     trackChild(this.child);
 
     this.child.stdout?.on("data", (chunk) => {
@@ -188,7 +225,21 @@ export class FirecrackerController extends EventEmitter {
       } finally {
         cleanupStartupFailure();
       }
+      this.emitStartupTiming("firecracker_api_ready");
+
+      if (this.config.snapshotLoad) {
+        this.setState("running");
+        await waitForSocketPaths(
+          firecrackerVsockChannelPaths(this.config.vsockPath),
+        );
+        this.emitStartupTiming("host_vsock_paths_ready");
+        await loadFirecrackerSnapshot(this.config);
+        this.emitStartupTiming("snapshot_loaded");
+        return;
+      }
+
       await configureFirecracker(this.config);
+      this.emitStartupTiming("firecracker_configured");
 
       // Let SandboxServer create the host Unix listeners that Firecracker will
       // target for guest-initiated vsock connections before the guest boots.
@@ -196,10 +247,12 @@ export class FirecrackerController extends EventEmitter {
       await waitForSocketPaths(
         firecrackerVsockChannelPaths(this.config.vsockPath),
       );
+      this.emitStartupTiming("host_vsock_paths_ready");
 
       await firecrackerRequest(this.config.apiSocketPath, "PUT", "/actions", {
         action_type: "InstanceStart",
       });
+      this.emitStartupTiming("instance_started");
     } catch (err) {
       await this.close();
       throw err;
@@ -277,6 +330,10 @@ export class FirecrackerController extends EventEmitter {
     if (this.state === state) return;
     this.state = state;
     this.emit("state", state);
+  }
+
+  private emitStartupTiming(name: string) {
+    this.emit("startup-timing", name);
   }
 }
 
@@ -438,6 +495,32 @@ async function configureFirecracker(config: FirecrackerConfig): Promise<void> {
       },
     );
   }
+}
+
+async function loadFirecrackerSnapshot(
+  config: FirecrackerConfig,
+): Promise<void> {
+  const snapshot = config.snapshotLoad;
+  if (!snapshot) return;
+
+  await firecrackerRequest(config.apiSocketPath, "PUT", "/snapshot/load", {
+    snapshot_path: snapshot.snapshotPath,
+    mem_file_path: snapshot.memPath,
+    resume_vm: true,
+    vsock_override: {
+      uds_path: config.vsockPath,
+    },
+    ...(config.netTapName
+      ? {
+          network_overrides: [
+            {
+              iface_id: "net1",
+              host_dev_name: config.netTapName,
+            },
+          ],
+        }
+      : {}),
+  });
 }
 
 function validateCpuCount(value: number): void {

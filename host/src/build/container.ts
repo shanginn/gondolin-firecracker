@@ -134,6 +134,16 @@ export async function buildInContainer(
     );
     containerConfig.init.rootfsInit = "/work/rootfs-init";
   }
+  if (containerConfig.init?.rootfsInitBinary) {
+    copyExecutable(
+      resolveConfigPath(
+        containerConfig.init.rootfsInitBinary,
+        options.configDir,
+      ),
+      "rootfs-init-binary",
+    );
+    containerConfig.init.rootfsInitBinary = "/work/rootfs-init-binary";
+  }
   if (containerConfig.init?.initramfsInit) {
     copyExecutable(
       resolveConfigPath(containerConfig.init.initramfsInit, options.configDir),

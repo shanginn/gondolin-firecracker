@@ -68,6 +68,7 @@ import {
   type SandboxFsConfig,
 } from "./server-boot-config.ts";
 import { SandboxServerOps, installSandboxServerOps } from "./server-ops.ts";
+import type { StartupTimingEntry } from "../startup-timing.ts";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 
@@ -112,11 +113,13 @@ type SandboxControllerLike = {
   resumeForActivity?(): Promise<void> | void;
   scheduleIdlePause?(): void;
   cancelIdlePause?(): void;
+  createSnapshot?(snapshotPath: string, memPath: string): Promise<void>;
   on(event: "state", listener: (state: SandboxState) => void): unknown;
   on(
     event: "log",
     listener: (chunkOrEntry: string | any, stream?: SandboxLogStream) => void,
   ): unknown;
+  on(event: "startup-timing", listener: (name: string) => void): unknown;
   on(
     event: "exit",
     listener: (info: {
@@ -290,6 +293,8 @@ export class SandboxServer extends EventEmitter {
   private vfsReady = false;
   private vfsReadyTimer: NodeJS.Timeout | null = null;
   private bootConfig: SandboxFsConfig | null = null;
+  private startupTimingOriginMs = 0;
+  private startupTimings: StartupTimingEntry[] = [];
 
   /** @internal resolved VM backend name */
   getVmmBackend(): "firecracker" {
@@ -385,6 +390,9 @@ export class SandboxServer extends EventEmitter {
 
     const baseAppend = (this.options.append ?? defaultAppend).trim();
     this.baseAppend = baseAppend;
+    if (this.options.firecrackerSnapshot?.bootConfig) {
+      this.bootConfig = this.options.firecrackerSnapshot.bootConfig;
+    }
 
     const firecrackerConfig: FirecrackerConfig = {
       firecrackerPath: this.options.firecrackerPath,
@@ -403,8 +411,17 @@ export class SandboxServer extends EventEmitter {
       autoRestart: this.options.autoRestart,
       netTapName: this.options.netEnabled ? this.options.netTapName : undefined,
       netMac: this.options.netMac,
+      snapshotLoad: this.options.firecrackerSnapshot
+        ? {
+            snapshotPath: this.options.firecrackerSnapshot.snapshotPath,
+            memPath: this.options.firecrackerSnapshot.memPath,
+          }
+        : undefined,
     };
     this.controller = new FirecrackerController(firecrackerConfig);
+    this.controller.on("startup-timing", (name: string) => {
+      this.recordStartupTiming(name);
+    });
 
     // The virtio control channel can briefly accumulate a lot of data (notably
     // when streaming large stdin payloads). The default 8MiB buffer is too

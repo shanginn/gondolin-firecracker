@@ -128,6 +128,24 @@ test("build-config: accepts custom Firecracker boot assets", () => {
   assert.equal(parsed.firecrackerInitrdPath, null);
 });
 
+test("build-config: accepts fast init options", () => {
+  const cfg = {
+    arch: "x86_64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    init: {
+      rootfsInitBinary: "./gondolin-init",
+      initramfsRoot: true,
+    },
+  };
+
+  assert.equal(validateBuildConfig(cfg), true);
+
+  const parsed = parseBuildConfig(JSON.stringify(cfg));
+  assert.equal(parsed.init?.rootfsInitBinary, "./gondolin-init");
+  assert.equal(parsed.init?.initramfsRoot, true);
+});
+
 test("build-config: rejects invalid custom Firecracker boot assets", () => {
   const invalid = {
     arch: "x86_64",

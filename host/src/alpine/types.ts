@@ -47,8 +47,12 @@ export interface AlpineBuildOptions {
   rootfsSizeMb?: number;
   /** rootfs init script content (built-in when undefined) */
   rootfsInit?: string;
+  /** rootfs init binary path copied to `/init` */
+  rootfsInitBinary?: string;
   /** initramfs init script content (built-in when undefined) */
   initramfsInit?: string;
+  /** use initramfs as the boot root instead of switch_root to ext4 */
+  initramfsRoot?: boolean;
   /** extra shell script content appended to rootfs init before sandboxd starts */
   rootfsInitExtra?: string;
   /** host files or directories copied into rootfs before post-build commands */

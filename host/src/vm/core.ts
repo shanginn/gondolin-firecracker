@@ -20,6 +20,7 @@ import {
   registerVmCreate,
   type VmCheckpointData,
 } from "../checkpoint.ts";
+import type { StartupTimingEntry } from "../startup-timing.ts";
 import { loadAssetManifest } from "../assets.ts";
 import { isRootfsMode, type RootfsMode } from "../build/config.ts";
 
@@ -583,6 +584,66 @@ export class VM {
    */
   getHostPid(): number | null {
     return this.server?.getHostPid() ?? null;
+  }
+
+  /**
+   * Return startup phase timings for the current VM run.
+   */
+  getStartupTimings(): StartupTimingEntry[] {
+    return this.server?.getStartupTimings?.() ?? [];
+  }
+
+  /**
+   * Create a Firecracker VM-state snapshot (`.fc` + `.mem`).
+   */
+  async createFirecrackerSnapshot(
+    outputDir: string,
+  ): Promise<FirecrackerVmSnapshot> {
+    if (this.rootDisk?.deleteOnClose) {
+      throw new Error(
+        "Firecracker snapshots require a persistent root disk; use rootfs.mode='readonly' or provide sandbox.rootDiskPath without rootDiskDeleteOnClose",
+      );
+    }
+
+    await this.start();
+    const server = this.server;
+    if (!server?.createFirecrackerSnapshot) {
+      throw new Error("Firecracker snapshots are not available");
+    }
+
+    const dir = path.resolve(outputDir);
+    fs.mkdirSync(dir, { recursive: true });
+    const snapshotPath = path.join(dir, "vm.fc");
+    const memPath = path.join(dir, "vm.mem");
+    await server.createFirecrackerSnapshot(snapshotPath, memPath);
+    return {
+      snapshotPath,
+      memPath,
+      bootConfig: {
+        fuseMount: this.fuseMount,
+        fuseBinds: [...this.fuseBinds],
+      },
+    };
+  }
+
+  /**
+   * Restore a VM from a Firecracker VM-state snapshot.
+   */
+  static async restoreFirecrackerSnapshot(
+    snapshot: FirecrackerVmSnapshot,
+    options: VMOptions = {},
+  ): Promise<VM> {
+    return await VM.create({
+      ...options,
+      sandbox: {
+        ...options.sandbox,
+        firecrackerSnapshot: {
+          snapshotPath: snapshot.snapshotPath,
+          memPath: snapshot.memPath,
+          bootConfig: snapshot.bootConfig,
+        },
+      },
+    });
   }
 
   /**
@@ -1189,25 +1250,30 @@ fi
         this.ensureStartupGeneration(startupGeneration);
         this.ensureVmmAvailable();
 
-        if (this.server) {
-          await this.server.start();
-        }
+        if (this.server) await this.server.start();
 
         this.ensureStartupGeneration(startupGeneration);
+        this.server?.recordStartupTiming?.("vm_connect_begin");
         await this.ensureConnection();
+        this.server?.recordStartupTiming?.("vm_connect_done");
 
         this.ensureStartupGeneration(startupGeneration);
+        this.server?.recordStartupTiming?.("guest_running_begin");
         await this.ensureRunning();
+        this.server?.recordStartupTiming?.("guest_running_done");
 
         this.ensureStartupGeneration(startupGeneration);
         await this.ensureRootfsResized();
 
         this.ensureStartupGeneration(startupGeneration);
         // If VFS is configured, also wait for mounts to be ready.
+        this.server?.recordStartupTiming?.("vfs_wait_begin");
         await this.ensureVfsReady();
+        this.server?.recordStartupTiming?.("vfs_wait_done");
 
         this.ensureStartupGeneration(startupGeneration);
         await this.ensureSessionIpc(startupGeneration);
+        this.server?.recordStartupTiming?.("session_ipc_ready");
 
         this.ensureStartupGeneration(startupGeneration);
       },
@@ -2023,6 +2089,20 @@ fi
     this.connection.send(message);
   }
 }
+
+export type FirecrackerVmSnapshot = {
+  /** microVM state snapshot path */
+  snapshotPath: string;
+  /** guest memory snapshot path */
+  memPath: string;
+  /** boot config captured at snapshot time */
+  bootConfig: {
+    /** FUSE mount path inside the guest */
+    fuseMount: string;
+    /** bind mount paths backed by the FUSE mount */
+    fuseBinds: string[];
+  };
+};
 
 registerVmCreate((options) => VM.create(options));
 

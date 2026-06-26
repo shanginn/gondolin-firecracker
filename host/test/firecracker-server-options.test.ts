@@ -156,3 +156,36 @@ test("resolveSandboxServerOptions rejects unsupported options and accepts mediat
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("resolveSandboxServerOptions normalizes Firecracker snapshot paths", () => {
+  const dir = makeAssets();
+  try {
+    const resolved = resolveSandboxServerOptions(
+      {
+        imagePath: dir,
+        firecrackerSnapshot: {
+          snapshotPath: "./vm.fc",
+          memPath: "./vm.mem",
+          bootConfig: {
+            fuseMount: "/data",
+            fuseBinds: ["/workspace"],
+          },
+        },
+      },
+      undefined,
+      { platform: "linux" },
+    );
+
+    assert.equal(
+      resolved.firecrackerSnapshot?.snapshotPath,
+      path.resolve("vm.fc"),
+    );
+    assert.equal(resolved.firecrackerSnapshot?.memPath, path.resolve("vm.mem"));
+    assert.deepEqual(resolved.firecrackerSnapshot?.bootConfig, {
+      fuseMount: "/data",
+      fuseBinds: ["/workspace"],
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

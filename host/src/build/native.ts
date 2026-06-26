@@ -81,19 +81,26 @@ export async function buildNative(
   }
 
   const { kernelPackage } = resolveKernelConfig(alpineConfig);
-  if (!hasOciRootfs(config) && !usesCustomFirecrackerNoInitrd(config)) {
+  if (!hasOciRootfs(config) && !usesCustomFirecrackerKernel(config)) {
     warnOnKernelPackageMismatch(alpineConfig.rootfsPackages, kernelPackage);
   }
 
   const cacheDir = path.join(os.homedir(), ".cache", "gondolin", "build");
 
   let rootfsInit: string | undefined;
+  let rootfsInitBinary: string | undefined;
   let initramfsInit: string | undefined;
   let rootfsInitExtra: string | undefined;
   if (config.init?.rootfsInit) {
     rootfsInit = fs.readFileSync(
       resolveConfigPath(config.init.rootfsInit, configDir),
       "utf8",
+    );
+  }
+  if (config.init?.rootfsInitBinary) {
+    rootfsInitBinary = resolveConfigPath(
+      config.init.rootfsInitBinary,
+      configDir,
     );
   }
   if (config.init?.initramfsInit) {
@@ -139,7 +146,9 @@ export async function buildNative(
     rootfsLabel: config.rootfs?.label ?? "gondolin-root",
     rootfsSizeMb: config.rootfs?.sizeMb,
     rootfsInit,
+    rootfsInitBinary,
     initramfsInit,
+    initramfsRoot: config.init?.initramfsRoot,
     rootfsInitExtra,
     postBuildCopy,
     postBuildCommands: config.postBuild?.commands ?? [],
@@ -214,11 +223,8 @@ export async function buildNative(
   };
 }
 
-function usesCustomFirecrackerNoInitrd(config: BuildConfig): boolean {
-  return (
-    Boolean(config.firecrackerKernelPath) &&
-    config.firecrackerInitrdPath === null
-  );
+function usesCustomFirecrackerKernel(config: BuildConfig): boolean {
+  return Boolean(config.firecrackerKernelPath);
 }
 
 type AlpineKernelConfig = {

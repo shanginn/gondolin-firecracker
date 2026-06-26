@@ -45,6 +45,7 @@ import {
   type SandboxFsConfig,
 } from "./server-boot-config.ts";
 import { stripTrailingNewline } from "../debug.ts";
+import { nowMs, type StartupTimingEntry } from "../startup-timing.ts";
 
 type BridgeWritableWaiter = {
   resolve: () => void;
@@ -93,6 +94,28 @@ export class SandboxServerOps {
 
   getFsMetrics() {
     return this.fsService?.metrics ?? null;
+  }
+
+  resetStartupTimings(): void {
+    this.startupTimingOriginMs = nowMs();
+    this.startupTimings = [];
+  }
+
+  recordStartupTiming(name: string): StartupTimingEntry {
+    if (typeof this.startupTimingOriginMs !== "number") {
+      this.resetStartupTimings();
+    }
+    const entry = {
+      name,
+      atMs: nowMs() - this.startupTimingOriginMs,
+    };
+    this.startupTimings.push(entry);
+    this.emit("startup-timing", entry);
+    return entry;
+  }
+
+  getStartupTimings(): StartupTimingEntry[] {
+    return [...this.startupTimings];
   }
 
   resumeControllerForActivity(): Promise<void> | void {
@@ -587,6 +610,7 @@ export class SandboxServerOps {
     }
     if (this.vfsReady) return;
     this.vfsReady = true;
+    this.recordStartupTiming("guest_vfs_ready");
     this.clearVfsReadyTimer();
     if (this.controller.getState() === "running" && this.status !== "running") {
       this.status = "running";
@@ -629,11 +653,15 @@ export class SandboxServerOps {
     if (this.started) return;
 
     this.started = true;
+    this.resetStartupTimings();
+    this.recordStartupTiming("server_start");
     await this.network?.start();
+    if (this.network) this.recordStartupTiming("network_ready");
     this.bridge.connect();
     this.fsBridge.connect();
     this.sshBridge.connect();
     this.ingressBridge.connect();
+    this.recordStartupTiming("host_vsock_listeners_ready");
   }
 
   async closeInternal() {
@@ -670,6 +698,19 @@ export class SandboxServerOps {
     await this.fsService?.close();
 
     this.started = false;
+  }
+
+  async createFirecrackerSnapshot(
+    snapshotPath: string,
+    memPath: string,
+  ): Promise<void> {
+    await this.start();
+    if (!this.controller.createSnapshot) {
+      throw new Error(
+        "Firecracker snapshots are not supported by this controller",
+      );
+    }
+    await this.controller.createSnapshot(snapshotPath, memPath);
   }
 
   attachClient(client: SandboxClient) {
@@ -929,6 +970,7 @@ export class SandboxServerOps {
   }
 
   async handleBoot(client: SandboxClient, message: BootCommandMessage) {
+    this.recordStartupTiming("boot_request");
     let config: SandboxFsConfig;
     try {
       config = normalizeSandboxFsConfig(message);
@@ -959,7 +1001,9 @@ export class SandboxServerOps {
       }
 
       if (state === "stopped") {
+        this.recordStartupTiming("vmm_start_begin");
         await this.controller.start();
+        this.recordStartupTiming("vmm_start_done");
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -980,6 +1024,7 @@ export class SandboxServerOps {
     }
 
     sendJson(client, { type: "status", state: this.status });
+    this.recordStartupTiming("boot_status_sent");
   }
 
   startExecNow(entry: {

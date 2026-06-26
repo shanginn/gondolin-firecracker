@@ -30,6 +30,12 @@ agent sandbox profile, build `scripts/build-tiny-firecracker-kernel.sh` and use
 `images/alpine-tiny-firecracker.json`; that no-initrd profile passed VFS,
 `/bin/bash`, and mediated HTTP smoke tests at `29M` on June 26, 2026.
 
+For startup work, call `vm.getStartupTimings()` after `vm.start()` to inspect
+host, Firecracker API, guest boot, VFS, and session IPC phases. Same-host
+Firecracker snapshots are exposed through `vm.createFirecrackerSnapshot(dir)`
+and `VM.restoreFirecrackerSnapshot(snapshot, options)`. Keep the same kernel,
+root disk, helper paths, memory shape, and host class when restoring.
+
 ## Storage
 
 The base rootfs is attached read-only by default. `rootfs.mode="cow"` and

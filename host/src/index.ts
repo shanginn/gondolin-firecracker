@@ -8,6 +8,7 @@
 // Main VM interface
 export {
   VM,
+  type FirecrackerVmSnapshot,
   type VMOptions,
   type VMState,
   type EnableSshOptions,

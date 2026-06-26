@@ -132,6 +132,27 @@ test("vm internals: getHostPid returns null before start", () => {
   }
 });
 
+test("vm internals: exposes startup timings", () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+    rootfs: { mode: "readonly" },
+  });
+
+  try {
+    const server = (vm as any).server;
+    server.resetStartupTimings();
+    server.recordStartupTiming("probe");
+
+    const timings = vm.getStartupTimings();
+    assert.equal(timings.length, 1);
+    assert.equal(timings[0].name, "probe");
+    assert.equal(typeof timings[0].atMs, "number");
+  } finally {
+    cleanup();
+  }
+});
+
 test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
@@ -301,6 +322,26 @@ test("vm internals: rootfs cow mode uses throwaway raw copy", async () => {
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: Firecracker snapshots reject temporary root disks", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+    rootfs: { mode: "cow" },
+  });
+
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-snapshot-"));
+  try {
+    await assert.rejects(
+      () => vm.createFirecrackerSnapshot(outDir),
+      /persistent root disk/,
+    );
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+    await vm.close();
+    cleanup();
   }
 });
 

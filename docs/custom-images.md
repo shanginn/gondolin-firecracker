@@ -45,7 +45,10 @@ build the tiny PVH/KVM kernel first:
 
 ```bash
 scripts/build-tiny-firecracker-kernel.sh
+scripts/build-fast-agent-init.sh
 gondolin build --config images/alpine-tiny-firecracker.json --output ./guest/image/tiny
+gondolin build --config images/alpine-fast-firecracker.json --output ./guest/image/fast
+gondolin build --config images/alpine-initramfs-firecracker.json --output ./guest/image/initramfs
 ```
 
 The kernel build needs `build-essential`, `bc`, `bison`, `flex`, `libelf-dev`,
@@ -53,6 +56,21 @@ The kernel build needs `build-essential`, `bc`, `bison`, `flex`, `libelf-dev`,
 block, virtio net, vsock, ext4, FUSE, ptys, IPv4, and shell process support,
 then drops the Firecracker initrd. On June 26, 2026, this profile passed `20/20`
 smoke boots at `29M`; use `30M` for a small guard band.
+
+`images/alpine-fast-firecracker.json` additionally uses a stripped static
+`/init` built by `scripts/build-fast-agent-init.sh`. It starts only the agent
+path: mounts, optional DHCP, `sandboxfs`, and `sandboxd`.
+
+`images/alpine-initramfs-firecracker.json` boots the same static init directly
+from `initramfs.cpio.lz4`. It copies `sandboxd`, `sandboxfs`, bash, and
+certificates into initramfs, so it can skip the rootfs mount path. Gondolin still
+emits `rootfs.ext4` because the asset manifest format expects one.
+
+Build config knobs:
+
+- `init.rootfsInitBinary`: copy this executable to `/init`
+- `init.initramfsRoot`: copy the root init path into initramfs `/init` instead
+  of using the default `switch_root` initramfs script
 
 ## Runtime Requirements
 

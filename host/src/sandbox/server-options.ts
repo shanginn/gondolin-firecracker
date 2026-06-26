@@ -66,6 +66,8 @@ export type SandboxServerOptions = {
   firecrackerVsockPath?: string;
   /** firecracker guest vsock CID */
   firecrackerGuestCid?: number;
+  /** Firecracker snapshot to restore instead of cold boot */
+  firecrackerSnapshot?: FirecrackerSnapshotRestoreOptions;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (e.g. "1G") */
@@ -155,6 +157,20 @@ export type SandboxServerOptions = {
   vfsProvider?: VirtualProvider;
 };
 
+export type FirecrackerSnapshotRestoreOptions = {
+  /** microVM state snapshot path */
+  snapshotPath: string;
+  /** guest memory snapshot path */
+  memPath: string;
+  /** boot config captured when the snapshot was created */
+  bootConfig?: {
+    /** FUSE mount path inside the guest */
+    fuseMount: string;
+    /** bind mount paths backed by the FUSE mount */
+    fuseBinds: string[];
+  };
+};
+
 export type ResolvedSandboxServerOptions = {
   /** vm backend implementation */
   vmm: SandboxVmm;
@@ -166,6 +182,8 @@ export type ResolvedSandboxServerOptions = {
   firecrackerVsockPath: string;
   /** firecracker guest vsock CID */
   firecrackerGuestCid: number;
+  /** Firecracker snapshot to restore instead of cold boot */
+  firecrackerSnapshot?: FirecrackerSnapshotRestoreOptions;
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -707,6 +725,7 @@ export function resolveSandboxServerOptions(
     "firecrackerApiSocketPath",
     "firecrackerVsockPath",
     "firecrackerGuestCid",
+    "firecrackerSnapshot",
     "imagePath",
     "memory",
     "cpus",
@@ -842,6 +861,9 @@ export function resolveSandboxServerOptions(
     firecrackerApiSocketPath,
     firecrackerVsockPath,
     firecrackerGuestCid,
+    firecrackerSnapshot: normalizeFirecrackerSnapshot(
+      options.firecrackerSnapshot,
+    ),
     kernelPath,
     initrdPath,
     rootfsPath,
@@ -876,6 +898,41 @@ export function resolveSandboxServerOptions(
       options.maxHttpResponseBodyBytes ?? DEFAULT_MAX_HTTP_RESPONSE_BODY_BYTES,
     mitmCertDir: options.mitmCertDir,
     vfsProvider: options.vfsProvider ?? null,
+  };
+}
+
+function normalizeFirecrackerSnapshot(
+  value: FirecrackerSnapshotRestoreOptions | undefined,
+): FirecrackerSnapshotRestoreOptions | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !value ||
+    typeof value.snapshotPath !== "string" ||
+    typeof value.memPath !== "string"
+  ) {
+    throw new Error(
+      "sandbox.firecrackerSnapshot requires snapshotPath and memPath",
+    );
+  }
+  if (value.bootConfig !== undefined) {
+    if (
+      !value.bootConfig ||
+      typeof value.bootConfig.fuseMount !== "string" ||
+      !Array.isArray(value.bootConfig.fuseBinds) ||
+      value.bootConfig.fuseBinds.some((entry) => typeof entry !== "string")
+    ) {
+      throw new Error("sandbox.firecrackerSnapshot.bootConfig is invalid");
+    }
+  }
+  return {
+    snapshotPath: path.resolve(value.snapshotPath),
+    memPath: path.resolve(value.memPath),
+    bootConfig: value.bootConfig
+      ? {
+          fuseMount: value.bootConfig.fuseMount,
+          fuseBinds: [...value.bootConfig.fuseBinds],
+        }
+      : undefined,
   };
 }
 

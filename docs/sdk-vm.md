@@ -58,6 +58,35 @@ including:
 - while `vm.close()` is in progress, after Gondolin has released its runner handle
 - if a backend fails before spawning its runner, or a future backend does not expose a PID
 
+## Startup Timing
+
+`vm.getStartupTimings()` returns phase markers for the current start attempt:
+
+```ts
+await vm.start();
+console.table(vm.getStartupTimings());
+```
+
+The timings are relative `ms` offsets from server startup. They are intended for
+boot profiling and regression checks.
+
+## Firecracker Snapshots
+
+Firecracker VM-state snapshots are available for same-host restore experiments:
+
+```ts
+const snapshot = await vm.createFirecrackerSnapshot("./snapshot");
+await vm.close();
+
+const restored = await VM.restoreFirecrackerSnapshot(snapshot, {
+  sandbox: { imagePath: "./guest/image/fast" },
+});
+await restored.start();
+```
+
+Restore expects the same host class and compatible image/kernel/root disk paths.
+Use VFS mounts for workspace state you want to survive across restored VMs.
+
 ## `vm.exec()`
 
 This is the most common operation. It returns an `ExecProcess` (a running
@@ -87,15 +116,15 @@ Buffered usage (most common):
 const result = await vm.exec("echo hello; echo err >&2; exit 7");
 
 console.log("exitCode:", result.exitCode); // 7
-console.log("ok:", result.ok);             // false
-console.log("stdout:\n", result.stdout);  // "hello\n"
-console.log("stderr:\n", result.stderr);  // "err\n"
+console.log("ok:", result.ok); // false
+console.log("stdout:\n", result.stdout); // "hello\n"
+console.log("stderr:\n", result.stderr); // "err\n"
 ```
 
 ### What Is in `ExecResult`
 
 An `ExecResult` is **always returned**, even on non-zero exit codes (non-zero
-exit codes do *not* throw). You typically check:
+exit codes do _not_ throw). You typically check:
 
 - `result.exitCode: number`: process exit code
 - `result.signal?: number`: termination signal (if the guest reports one)
@@ -109,7 +138,9 @@ exit codes do *not* throw). You typically check:
 You can stream output while the command runs:
 
 ```ts
-const proc = vm.exec("for i in 1 2 3; do echo $i; sleep 1; done", { stdout: "pipe" });
+const proc = vm.exec("for i in 1 2 3; do echo $i; sleep 1; done", {
+  stdout: "pipe",
+});
 
 for await (const chunk of proc) {
   // default async iteration yields stdout chunks as strings
@@ -130,7 +161,7 @@ Backpressure: in streaming modes (`stdout: "pipe"` / `stderr: "pipe"` or a writa
 Gondolin uses a host<->guest credit window to keep buffered output bounded.
 You can tune the window size with `windowBytes` (default: 256 KiB).
 
-If you need both streaming *and* to keep a copy of output, capture it yourself
+If you need both streaming _and_ to keep a copy of output, capture it yourself
 from the piped streams:
 
 ```ts
@@ -145,7 +176,9 @@ console.log(stdout);
 To stream both stdout and stderr with labels, use `proc.output()`:
 
 ```ts
-for await (const { stream, text } of vm.exec("echo out; echo err >&2", { stdout: "pipe", stderr: "pipe" }).output()) {
+for await (const { stream, text } of vm
+  .exec("echo out; echo err >&2", { stdout: "pipe", stderr: "pipe" })
+  .output()) {
   process.stdout.write(`[${stream}] ${text}`);
 }
 ```
@@ -190,7 +223,9 @@ Notes:
 For commands that may produce a lot of output, set `buffer: false` (drops stdout/stderr):
 
 ```ts
-const result = await vm.exec(["/bin/cat", "/some/huge/file"], { buffer: false });
+const result = await vm.exec(["/bin/cat", "/some/huge/file"], {
+  buffer: false,
+});
 console.log("exitCode:", result.exitCode);
 
 // Or stream it with backpressure:

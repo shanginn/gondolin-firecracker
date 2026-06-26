@@ -1,0 +1,20 @@
+{
+  "imageName": "alpine-initramfs-firecracker",
+  "arch": "x86_64",
+  "distro": "alpine",
+  "alpine": {
+    "version": "3.23.0",
+    "kernelPackage": "linux-virt",
+    "kernelImage": "vmlinuz-virt",
+    "rootfsPackages": [],
+    "initramfsPackages": ["bash", "ca-certificates"]
+  },
+  "init": {
+    "rootfsInitBinary": "../tmp/fast-agent-init/gondolin-init",
+    "initramfsRoot": true
+  },
+  "firecrackerKernelPath": "../tmp/firecracker-tiny-kernel/firecracker-kernel",
+  "rootfs": {
+    "label": "gondolin-root"
+  }
+}
