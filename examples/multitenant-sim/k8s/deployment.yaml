@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gondolin-user-sim
+  labels:
+    app.kubernetes.io/name: gondolin-user-sim
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gondolin-user-sim
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gondolin-user-sim
+    spec:
+      serviceAccountName: gondolin-user-sim
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        gondolin.dev/kvm: "true"
+      containers:
+        - name: simulator
+          image: ghcr.io/example/gondolin-user-sim:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SIM_BACKEND
+              value: gondolin
+            - name: SIM_PAUSED_ON_START
+              value: "true"
+            - name: SIM_MAX_ACTIVE_USERS
+              value: "12"
+            - name: SIM_TARGET_USERS
+              value: "4"
+            - name: SIM_MAX_ACTIVE_VMS
+              value: "4"
+            - name: SIM_SPAWN_RATE_PER_MINUTE
+              value: "2"
+            - name: SIM_MAX_SPAWN_RATE_PER_MINUTE
+              value: "20"
+            - name: SIM_TEMPO
+              value: "1"
+            - name: SIM_MAX_TEMPO
+              value: "6"
+            - name: SIM_VM_MEMORY
+              value: 30M
+            - name: SIM_VM_CPUS
+              value: "1"
+            - name: SIM_VM_ROOTFS_MODE
+              value: readonly
+            - name: SIM_VM_IMAGE
+              value: alpine-tiny-firecracker:latest
+            - name: SIM_VM_NET_ENABLED
+              value: "false"
+            - name: GONDOLIN_FIRECRACKER
+              value: /usr/local/bin/firecracker
+            - name: GONDOLIN_RUNTIME_DIR
+              value: /run/gondolin
+            - name: XDG_CACHE_HOME
+              value: /cache
+            - name: TMPDIR
+              value: /work/tmp
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+              ephemeral-storage: 4Gi
+              devices.kubevirt.io/kvm: "1"
+            limits:
+              memory: 1Gi
+              ephemeral-storage: 8Gi
+              devices.kubevirt.io/kvm: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: runtime
+              mountPath: /run/gondolin
+            - name: cache
+              mountPath: /cache
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+        - name: cache
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: work
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
