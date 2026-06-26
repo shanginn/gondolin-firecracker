@@ -11,6 +11,7 @@ command -v zig >/dev/null 2>&1 || {
 }
 
 mkdir -p "$out_dir"
+out_dir="$(cd "$out_dir" && pwd)"
 zig cc -target "$target" -Os -s -static -fno-stack-protector \
   -o "$out_dir/gondolin-init" "$src"
 

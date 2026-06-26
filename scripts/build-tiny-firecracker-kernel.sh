@@ -21,6 +21,7 @@ for cmd in bc bison curl flex gcc make openssl tar xz; do
 done
 
 mkdir -p "$cache_dir" "$out_dir"
+out_dir="$(cd "$out_dir" && pwd)"
 
 if [ ! -d "$src_dir" ]; then
   if [ ! -f "$tarball" ]; then
