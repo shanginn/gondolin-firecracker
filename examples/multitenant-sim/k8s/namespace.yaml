@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: gondolin-sim
-  labels:
-    app.kubernetes.io/name: gondolin-user-sim

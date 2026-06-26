@@ -192,10 +192,3 @@ For Kubernetes:
   on disk-backed `emptyDir` or persistent scratch storage.
 - Use `rootfs.mode="readonly"` whenever the workload writes only to tmpfs and
   VFS mounts.
-
-## Load Simulator Example
-
-`examples/multitenant-sim` contains a dashboard-driven Kubernetes example that
-simulates many users, assigns each user a behavior profile, and backs active
-sessions with Gondolin VMs without calling an LLM. The base manifests are
-generic, start paused, and intentionally avoid embedding cluster context names.
