@@ -439,6 +439,24 @@ export function dashboardHtml(): string {
               <div class="bar"><span id="res-guest-bar"></span></div>
             </div>
             <div class="resource-item">
+              <div class="resource-label">Pod Disk</div>
+              <div id="res-disk" class="resource-value">-</div>
+              <div id="res-disk-meta" class="resource-meta">request / limit</div>
+              <div class="bar"><span id="res-disk-bar"></span></div>
+            </div>
+            <div class="resource-item">
+              <div class="resource-label">Node Disk</div>
+              <div id="res-node-disk" class="resource-value">-</div>
+              <div id="res-node-disk-meta" class="resource-meta">used / capacity</div>
+              <div class="bar"><span id="res-node-disk-bar"></span></div>
+            </div>
+            <div class="resource-item">
+              <div class="resource-label">Image Cache</div>
+              <div id="res-image-disk" class="resource-value">-</div>
+              <div id="res-image-disk-meta" class="resource-meta">used / capacity</div>
+              <div class="bar"><span id="res-image-disk-bar"></span></div>
+            </div>
+            <div class="resource-item">
               <div class="resource-label">Pod</div>
               <div id="res-pod" class="resource-value">-</div>
               <div id="res-pod-meta" class="resource-meta">phase / restarts</div>
@@ -499,6 +517,15 @@ export function dashboardHtml(): string {
       resGuest: document.getElementById("res-guest"),
       resGuestMeta: document.getElementById("res-guest-meta"),
       resGuestBar: document.getElementById("res-guest-bar"),
+      resDisk: document.getElementById("res-disk"),
+      resDiskMeta: document.getElementById("res-disk-meta"),
+      resDiskBar: document.getElementById("res-disk-bar"),
+      resNodeDisk: document.getElementById("res-node-disk"),
+      resNodeDiskMeta: document.getElementById("res-node-disk-meta"),
+      resNodeDiskBar: document.getElementById("res-node-disk-bar"),
+      resImageDisk: document.getElementById("res-image-disk"),
+      resImageDiskMeta: document.getElementById("res-image-disk-meta"),
+      resImageDiskBar: document.getElementById("res-image-disk-bar"),
       resPod: document.getElementById("res-pod"),
       resPodMeta: document.getElementById("res-pod-meta"),
       canvas: document.getElementById("arena")
@@ -536,6 +563,22 @@ export function dashboardHtml(): string {
     function pct(value, max) {
       if (!value || !max) return 0;
       return Math.max(0, Math.min(100, (value / max) * 100));
+    }
+
+    function fmtPct(value, max) {
+      if (!value || !max) return "-";
+      return Math.round(pct(value, max)) + "%";
+    }
+
+    function diskMeta(stats) {
+      if (!stats) return "-";
+      return fmtBytes(stats.usedBytes) + " / " + fmtBytes(stats.capacityBytes) + " used";
+    }
+
+    function volumeMeta(volumes) {
+      const visible = (volumes || []).filter((volume) => volume.usedBytes).slice(0, 2);
+      if (visible.length === 0) return "volumes quiet";
+      return visible.map((volume) => volume.name + " " + fmtBytes(volume.usedBytes)).join(" / ");
     }
 
     async function api(path, body) {
@@ -596,6 +639,9 @@ export function dashboardHtml(): string {
         els.resCpu.textContent = "-";
         els.resMem.textContent = "-";
         els.resGuest.textContent = "-";
+        els.resDisk.textContent = "-";
+        els.resNodeDisk.textContent = "-";
+        els.resImageDisk.textContent = "-";
         els.resPod.textContent = "-";
         return;
       }
@@ -618,9 +664,24 @@ export function dashboardHtml(): string {
       els.resGuestMeta.textContent = vms.activeSlots + "/" + vms.configuredSlots + " slots x " + fmtBytes(vms.guestMemoryBytesEach) + " max";
       els.resGuestBar.style.width = pct(vms.activeSlots, vms.configuredSlots) + "%";
 
+      const disk = resources.storage;
+      els.resDisk.textContent = fmtBytes(disk.usageBytes);
+      els.resDiskMeta.textContent = volumeMeta(disk.volumes) + " - " + fmtBytes(disk.limitBytes) + " limit";
+      els.resDiskBar.style.width = pct(disk.usageBytes, disk.limitBytes || disk.requestBytes) + "%";
+
+      const nodeDisk = resources.node && resources.node.filesystem;
+      els.resNodeDisk.textContent = fmtPct(nodeDisk && nodeDisk.usedBytes, nodeDisk && nodeDisk.capacityBytes);
+      els.resNodeDiskMeta.textContent = diskMeta(nodeDisk);
+      els.resNodeDiskBar.style.width = pct(nodeDisk && nodeDisk.usedBytes, nodeDisk && nodeDisk.capacityBytes) + "%";
+
+      const imageDisk = resources.node && resources.node.imageFilesystem;
+      els.resImageDisk.textContent = fmtPct(imageDisk && imageDisk.usedBytes, imageDisk && imageDisk.capacityBytes);
+      els.resImageDiskMeta.textContent = diskMeta(imageDisk);
+      els.resImageDiskBar.style.width = pct(imageDisk && imageDisk.usedBytes, imageDisk && imageDisk.capacityBytes) + "%";
+
       const podName = resources.pod.name || "-";
       els.resPod.textContent = podName.length > 18 ? podName.slice(0, 18) + "..." : podName;
-      els.resPodMeta.textContent = (resources.pod.phase || "-") + " / " + String(resources.pod.restartCount ?? 0) + " restarts";
+      els.resPodMeta.textContent = (resources.pod.phase || "-") + " / " + String(resources.pod.restartCount ?? 0) + " restarts / " + (resources.pod.nodeName || "-");
     }
 
     function labelControls() {

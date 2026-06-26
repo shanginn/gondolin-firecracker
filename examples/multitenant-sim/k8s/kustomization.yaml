@@ -3,6 +3,7 @@ kind: Kustomization
 namespace: gondolin-sim
 resources:
   - namespace.yaml
+  - rbac.yaml
   - deployment.yaml
   - service.yaml
   - network-policy.yaml

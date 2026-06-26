@@ -23,6 +23,8 @@ export type ResourceSnapshot = {
     namespace: string | null;
     /** Pod name */
     name: string | null;
+    /** Scheduled node name */
+    nodeName: string | null;
     /** Container restart count */
     restartCount: number | null;
     /** Pod phase */
@@ -45,10 +47,26 @@ export type ResourceSnapshot = {
     limitBytes: number | null;
   };
   storage: {
+    /** Live pod ephemeral storage usage in `bytes` */
+    usageBytes: number | null;
     /** Ephemeral storage request in `bytes` */
     requestBytes: number | null;
     /** Ephemeral storage limit in `bytes` */
     limitBytes: number | null;
+    /** Container writable layer usage in `bytes` */
+    rootfsBytes: number | null;
+    /** Container log usage in `bytes` */
+    logsBytes: number | null;
+    /** Pod volume usage samples */
+    volumes: VolumeDiskSnapshot[];
+  };
+  node: {
+    /** Scheduled node name */
+    name: string | null;
+    /** Node filesystem usage sample */
+    filesystem: DiskSnapshot;
+    /** Container image filesystem usage sample */
+    imageFilesystem: DiskSnapshot;
   };
   vms: {
     /** Active or starting VM slots */
@@ -62,6 +80,20 @@ export type ResourceSnapshot = {
   };
 };
 
+export type DiskSnapshot = {
+  /** Available space in `bytes` */
+  availableBytes: number | null;
+  /** Total capacity in `bytes` */
+  capacityBytes: number | null;
+  /** Used space in `bytes` */
+  usedBytes: number | null;
+};
+
+export type VolumeDiskSnapshot = DiskSnapshot & {
+  /** Volume name */
+  name: string;
+};
+
 type KubePod = {
   metadata?: { name?: string; namespace?: string };
   status?: {
@@ -72,6 +104,7 @@ type KubePod = {
     }>;
   };
   spec?: {
+    nodeName?: string;
     containers?: Array<{
       name?: string;
       resources?: {
@@ -87,6 +120,40 @@ type PodMetrics = {
     name?: string;
     usage?: Record<string, string>;
   }>;
+};
+
+type KubeFsStats = {
+  availableBytes?: number;
+  capacityBytes?: number;
+  usedBytes?: number;
+};
+
+type KubeVolumeStats = KubeFsStats & {
+  name?: string;
+};
+
+type KubePodStats = {
+  podRef?: {
+    namespace?: string;
+    name?: string;
+  };
+  containers?: Array<{
+    name?: string;
+    rootfs?: KubeFsStats;
+    logs?: KubeFsStats;
+  }>;
+  "ephemeral-storage"?: KubeFsStats;
+  volume?: KubeVolumeStats[];
+};
+
+type KubeNodeStatsSummary = {
+  node?: {
+    fs?: KubeFsStats;
+    runtime?: {
+      imageFs?: KubeFsStats;
+    };
+  };
+  pods?: KubePodStats[];
 };
 
 export class ResourceMonitor {
@@ -123,6 +190,12 @@ export class ResourceMonitor {
           `/apis/metrics.k8s.io/v1beta1/namespaces/${encodeURIComponent(this.namespace)}/pods/${encodeURIComponent(this.podName)}`,
         ).catch(() => null),
       ]);
+      const nodeName = pod.spec?.nodeName ?? null;
+      const nodeStats = nodeName
+        ? await kubeJson<KubeNodeStatsSummary>(
+            `/api/v1/nodes/${encodeURIComponent(nodeName)}/proxy/stats/summary`,
+          ).catch(() => null)
+        : null;
 
       const podContainer = pod.spec?.containers?.find(
         (c) => c.name === this.containerName,
@@ -133,6 +206,14 @@ export class ResourceMonitor {
       const status = pod.status?.containerStatuses?.find(
         (c) => c.name === this.containerName,
       );
+      const podStats = nodeStats?.pods?.find(
+        (p) =>
+          p.podRef?.namespace === this.namespace &&
+          p.podRef?.name === this.podName,
+      );
+      const containerStats = podStats?.containers?.find(
+        (c) => c.name === this.containerName,
+      );
 
       return {
         ...base,
@@ -141,6 +222,7 @@ export class ResourceMonitor {
         pod: {
           namespace: pod.metadata?.namespace ?? this.namespace,
           name: pod.metadata?.name ?? this.podName,
+          nodeName,
           restartCount: status?.restartCount ?? null,
           phase: pod.status?.phase ?? null,
         },
@@ -159,12 +241,21 @@ export class ResourceMonitor {
           limitBytes: parseByteQuantity(podContainer?.resources?.limits?.memory),
         },
         storage: {
+          usageBytes: statBytes(podStats?.["ephemeral-storage"]?.usedBytes),
           requestBytes: parseByteQuantity(
             podContainer?.resources?.requests?.["ephemeral-storage"],
           ),
           limitBytes: parseByteQuantity(
             podContainer?.resources?.limits?.["ephemeral-storage"],
           ),
+          rootfsBytes: statBytes(containerStats?.rootfs?.usedBytes),
+          logsBytes: statBytes(containerStats?.logs?.usedBytes),
+          volumes: volumeSnapshots(podStats?.volume),
+        },
+        node: {
+          name: nodeName,
+          filesystem: diskSnapshot(nodeStats?.node?.fs),
+          imageFilesystem: diskSnapshot(nodeStats?.node?.runtime?.imageFs),
         },
       };
     } catch (err) {
@@ -186,6 +277,7 @@ export class ResourceMonitor {
       pod: {
         namespace: this.namespace,
         name: this.podName,
+        nodeName: null,
         restartCount: null,
         phase: null,
       },
@@ -200,8 +292,17 @@ export class ResourceMonitor {
         limitBytes: null,
       },
       storage: {
+        usageBytes: null,
         requestBytes: null,
         limitBytes: null,
+        rootfsBytes: null,
+        logsBytes: null,
+        volumes: [],
+      },
+      node: {
+        name: null,
+        filesystem: emptyDiskSnapshot(),
+        imageFilesystem: emptyDiskSnapshot(),
       },
       vms: {
         activeSlots: input.activeSlots,
@@ -214,6 +315,38 @@ export class ResourceMonitor {
       },
     };
   }
+}
+
+function emptyDiskSnapshot(): DiskSnapshot {
+  return {
+    availableBytes: null,
+    capacityBytes: null,
+    usedBytes: null,
+  };
+}
+
+function diskSnapshot(stats: KubeFsStats | undefined): DiskSnapshot {
+  if (!stats) return emptyDiskSnapshot();
+  return {
+    availableBytes: statBytes(stats.availableBytes),
+    capacityBytes: statBytes(stats.capacityBytes),
+    usedBytes: statBytes(stats.usedBytes),
+  };
+}
+
+function volumeSnapshots(
+  volumes: KubeVolumeStats[] | undefined,
+): VolumeDiskSnapshot[] {
+  return [...(volumes ?? [])]
+    .map((volume) => ({
+      name: volume.name ?? "unknown",
+      ...diskSnapshot(volume),
+    }))
+    .sort((a, b) => (b.usedBytes ?? 0) - (a.usedBytes ?? 0));
+}
+
+function statBytes(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 async function kubeJson<T>(path: string): Promise<T> {
