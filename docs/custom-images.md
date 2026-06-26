@@ -15,7 +15,8 @@ Required output files:
 - `rootfs.ext4`
 
 The manifest records `assets.firecrackerKernel`; Gondolin uses that kernel when
-booting Firecracker.
+booting Firecracker. `assets.firecrackerInitrd: null` tells Gondolin to boot
+Firecracker without an initrd.
 
 ## Minimal Config
 
@@ -36,6 +37,22 @@ booting Firecracker.
   }
 }
 ```
+
+## Tiny Firecracker Profile
+
+For bash, VFS file edits, and mediated HTTP at the lowest measured memory floor,
+build the tiny PVH/KVM kernel first:
+
+```bash
+scripts/build-tiny-firecracker-kernel.sh
+gondolin build --config images/alpine-tiny-firecracker.json --output ./guest/image/tiny
+```
+
+The kernel build needs `build-essential`, `bc`, `bison`, `flex`, `libelf-dev`,
+`libssl-dev`, and `xz-utils` on Debian/Ubuntu hosts. The config keeps virtio
+block, virtio net, vsock, ext4, FUSE, ptys, IPv4, and shell process support,
+then drops the Firecracker initrd. On June 26, 2026, this profile passed `20/20`
+smoke boots at `29M`; use `30M` for a small guard band.
 
 ## Runtime Requirements
 

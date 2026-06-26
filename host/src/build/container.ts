@@ -151,6 +151,26 @@ export async function buildInContainer(
     );
     containerConfig.init.rootfsInitExtra = "/work/rootfs-init-extra";
   }
+  if (containerConfig.firecrackerKernelPath) {
+    copyExecutable(
+      resolveConfigPath(
+        containerConfig.firecrackerKernelPath,
+        options.configDir,
+      ),
+      "firecracker-kernel",
+    );
+    containerConfig.firecrackerKernelPath = "/work/firecracker-kernel";
+  }
+  if (typeof containerConfig.firecrackerInitrdPath === "string") {
+    copyExecutable(
+      resolveConfigPath(
+        containerConfig.firecrackerInitrdPath,
+        options.configDir,
+      ),
+      "firecracker-initrd",
+    );
+    containerConfig.firecrackerInitrdPath = "/work/firecracker-initrd";
+  }
   copyExecutable(sandboxHelpers.sandboxdPath, "sandboxd");
   containerConfig.sandboxdPath = "/work/sandboxd";
   copyExecutable(sandboxHelpers.sandboxfsPath, "sandboxfs");

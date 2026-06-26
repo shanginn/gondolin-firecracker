@@ -552,6 +552,8 @@ export function writeAssetManifest(
   if (fs.existsSync(firecrackerInitrdDst)) {
     assets.firecrackerInitrd = FIRECRACKER_INITRD_FILENAME;
     checksums.firecrackerInitrd = computeFileHash(firecrackerInitrdDst);
+  } else if (config.firecrackerInitrdPath === null) {
+    assets.firecrackerInitrd = null;
   }
 
   const manifest: AssetManifest = {

@@ -25,8 +25,10 @@ Gondolin has one VM backend: Firecracker.
 
 The default image is not designed for sub-`50M` guest memory. On x86_64,
 Firecracker needs an uncompressed ELF kernel, and the default Alpine-derived
-kernel asset is `38M` before initramfs and userspace memory. Use a custom tiny
-kernel/image profile for that target.
+kernel asset is `38M` before initramfs and userspace memory. For the smallest
+agent sandbox profile, build `scripts/build-tiny-firecracker-kernel.sh` and use
+`images/alpine-tiny-firecracker.json`; that no-initrd profile passed VFS,
+`/bin/bash`, and mediated HTTP smoke tests at `29M` on June 26, 2026.
 
 ## Storage
 

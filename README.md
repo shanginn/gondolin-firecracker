@@ -105,9 +105,27 @@ Firecracker kernel asset is `38M` before the initramfs and guest userspace are
 loaded. A June 25, 2026 sweep with VFS disabled (`vfs: null`) still failed at
 `48M`, `50M`, `52M`, `56M`, `60M`, `64M`, and `72M`, then passed at `80M`.
 Booting the compressed Alpine `vmlinuz-virt` directly failed, and stripping BTF
-metadata from the ELF produced a smaller kernel that hung at `80M`, so those
-paths are not shipped. Getting below `50M` requires a separate tiny-kernel image
-track rather than further package trimming.
+metadata from the ELF produced a smaller kernel that hung at `80M`.
+
+For the agent-sandbox floor, build the tiny Firecracker kernel and disable the
+Firecracker initrd in the image manifest:
+
+```bash
+scripts/build-tiny-firecracker-kernel.sh
+gondolin build --config images/alpine-tiny-firecracker.json --output ./guest/image/tiny
+```
+
+The tiny profile uses a Linux `6.1.142` `tinyconfig`-derived PVH/KVM guest
+kernel (`15M` uncompressed ELF) with virtio block, virtio net, vsock, ext4,
+FUSE, ptys, IPv4, and bash-capable process support built in. It keeps
+`bash` and `ca-certificates` in the rootfs and sets
+`manifest.assets.firecrackerInitrd` to `null`.
+
+A June 26, 2026 smoke sweep on the same KVM host used `netEnabled: true`, a
+VFS-backed file write/read, `/bin/bash`, and an outbound HTTP fetch. `29M`
+passed `20/20` boots with `MemTotal` around `18.3 MiB`; `28M` timed out, and
+`26M` and lower failed kernel loading. Use `30M` when you want a small guard
+band; use `84M` for the default published image.
 
 This benchmark isolates VM lifecycle and tiny command latency. Network, VFS, and
 agent workload benchmarks should be measured separately.

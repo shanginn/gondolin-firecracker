@@ -168,6 +168,12 @@ export interface BuildConfig {
   /** runtime defaults baked into the asset manifest */
   runtimeDefaults?: RuntimeDefaultsConfig;
 
+  /** custom Firecracker kernel path (built-in Alpine kernel when undefined) */
+  firecrackerKernelPath?: string;
+
+  /** custom Firecracker initrd path; `null` disables Firecracker initrd */
+  firecrackerInitrdPath?: string | null;
+
   /** custom sandboxd binary path (built-in when undefined) */
   sandboxdPath?: string;
 
@@ -225,6 +231,9 @@ const isStringArray = (value: unknown): value is string[] =>
 
 const isOptionalString = (value: unknown): boolean =>
   value === undefined || typeof value === "string";
+
+const isOptionalStringOrNull = (value: unknown): boolean =>
+  value === undefined || value === null || typeof value === "string";
 
 const isOptionalBoolean = (value: unknown): boolean =>
   value === undefined || typeof value === "boolean";
@@ -380,6 +389,14 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
   }
 
   if (!isOptionalString(cfg.sandboxdPath)) {
+    return false;
+  }
+
+  if (!isOptionalString(cfg.firecrackerKernelPath)) {
+    return false;
+  }
+
+  if (!isOptionalStringOrNull(cfg.firecrackerInitrdPath)) {
     return false;
   }
 

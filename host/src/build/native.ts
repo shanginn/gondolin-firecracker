@@ -9,6 +9,7 @@ import { decompressTarGz, parseTar } from "../alpine/tar.ts";
 import { downloadFile } from "../alpine/utils.ts";
 import {
   DEFAULT_ROOTFS_PACKAGES,
+  FIRECRACKER_INITRD_FILENAME,
   FIRECRACKER_KERNEL_FILENAME,
   INITRAMFS_FILENAME,
   KERNEL_FILENAME,
@@ -80,7 +81,7 @@ export async function buildNative(
   }
 
   const { kernelPackage } = resolveKernelConfig(alpineConfig);
-  if (!hasOciRootfs(config)) {
+  if (!hasOciRootfs(config) && !usesCustomFirecrackerNoInitrd(config)) {
     warnOnKernelPackageMismatch(alpineConfig.rootfsPackages, kernelPackage);
   }
 
@@ -151,13 +152,29 @@ export async function buildNative(
   log("Fetching kernel...");
   await fetchKernel(workDir, config.arch, alpineConfig, cacheDir, log);
 
-  log("Preparing Firecracker-compatible kernel...");
-  materializeFirecrackerKernel({
-    sourceKernelPath: path.join(workDir, KERNEL_FILENAME),
-    outputKernelPath: path.join(workDir, FIRECRACKER_KERNEL_FILENAME),
-    arch: config.arch,
-    log,
-  });
+  const firecrackerKernelOut = path.join(workDir, FIRECRACKER_KERNEL_FILENAME);
+  if (config.firecrackerKernelPath) {
+    log("Using custom Firecracker kernel...");
+    fs.copyFileSync(
+      resolveConfigPath(config.firecrackerKernelPath, configDir),
+      firecrackerKernelOut,
+    );
+  } else {
+    log("Preparing Firecracker-compatible kernel...");
+    materializeFirecrackerKernel({
+      sourceKernelPath: path.join(workDir, KERNEL_FILENAME),
+      outputKernelPath: firecrackerKernelOut,
+      arch: config.arch,
+      log,
+    });
+  }
+
+  if (typeof config.firecrackerInitrdPath === "string") {
+    fs.copyFileSync(
+      resolveConfigPath(config.firecrackerInitrdPath, configDir),
+      path.join(workDir, FIRECRACKER_INITRD_FILENAME),
+    );
+  }
 
   log("Copying assets to output directory...");
 
@@ -195,6 +212,13 @@ export async function buildNative(
     manifestPath,
     manifest,
   };
+}
+
+function usesCustomFirecrackerNoInitrd(config: BuildConfig): boolean {
+  return (
+    Boolean(config.firecrackerKernelPath) &&
+    config.firecrackerInitrdPath === null
+  );
 }
 
 type AlpineKernelConfig = {

@@ -102,7 +102,7 @@ function patchManifestAssets(
     initramfs?: string;
     rootfs?: string;
     firecrackerKernel?: string;
-    firecrackerInitrd?: string;
+    firecrackerInitrd?: string | null;
   },
 ): void {
   patchManifest(dir, (manifest) => {
@@ -173,6 +173,34 @@ test("images: import preserves optional Firecracker initrd from manifest", () =>
     assert.equal(
       fs.existsSync(path.join(imported.assetDir, "firecracker-initrd")),
       true,
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import preserves disabled Firecracker initrd from manifest", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+  patchManifestAssets(assets.dir, {
+    firecrackerInitrd: null,
+  });
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(imported.assetDir, "manifest.json"), "utf8"),
+    );
+
+    assert.equal(manifest.assets.firecrackerInitrd, null);
+    assert.equal(
+      fs.existsSync(path.join(imported.assetDir, "firecracker-initrd")),
+      false,
     );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });

@@ -1,0 +1,17 @@
+{
+  "imageName": "alpine-tiny-firecracker",
+  "arch": "x86_64",
+  "distro": "alpine",
+  "alpine": {
+    "version": "3.23.0",
+    "kernelPackage": "linux-virt",
+    "kernelImage": "vmlinuz-virt",
+    "rootfsPackages": ["bash", "ca-certificates"],
+    "initramfsPackages": []
+  },
+  "firecrackerKernelPath": "../tmp/firecracker-tiny-kernel/firecracker-kernel",
+  "firecrackerInitrdPath": null,
+  "rootfs": {
+    "label": "gondolin-root"
+  }
+}

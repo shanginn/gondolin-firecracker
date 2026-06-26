@@ -403,7 +403,7 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
               "manifest.assets.firecrackerKernel",
             );
       const sourceFirecrackerInitrdPath =
-        manifest.assets?.firecrackerInitrd === undefined
+        manifest.assets?.firecrackerInitrd == null
           ? undefined
           : resolveContainedAssetPath(
               resolvedDir,
@@ -488,7 +488,7 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
           ? undefined
           : resolveContainedAssetPath(
               tmpDir,
-              manifest.assets!.firecrackerInitrd,
+              manifest.assets!.firecrackerInitrd!,
               "manifest.assets.firecrackerInitrd",
             );
 

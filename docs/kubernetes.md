@@ -147,8 +147,11 @@ and memory footprint:
 - `rootfs.mode="readonly"` by default
 
 Do not size the default image for sub-`50M` guests. The x86_64 Firecracker
-kernel asset is an uncompressed ELF and currently weighs `38M`; a separate
-tiny-kernel image profile is required for that class of pod density.
+kernel asset is an uncompressed ELF and currently weighs `38M`. The
+`images/alpine-tiny-firecracker.json` no-initrd profile is the pod-density
+option; it passed the bash, VFS, and mediated HTTP smoke test at `29M` on June
+26, 2026. Use `30M` plus host/controller overhead when you want a small guard
+band.
 
 The read-only rootfs avoids a full raw rootfs copy before boot. Guest paths such
 as `/tmp`, `/root`, `/var/tmp`, `/var/cache`, and `/var/log` are tmpfs-backed.
@@ -180,7 +183,9 @@ For Kubernetes:
 - Avoid sandboxed pod runtimes that hide or virtualize `/dev/kvm` unless nested
   virtualization is known to work.
 - Size pod memory as guest memory plus Node.js/controller overhead. An `84M`
-  Firecracker guest should usually request at least `192Mi`.
+  Firecracker guest should usually request at least `192Mi`; a `30M` tiny
+  profile still needs enough pod memory for Node.js and Firecracker outside the
+  guest allocation.
 - Keep `GONDOLIN_RUNTIME_DIR` on memory-backed `emptyDir`; keep root disk copies
   on disk-backed `emptyDir` or persistent scratch storage.
 - Use `rootfs.mode="readonly"` whenever the workload writes only to tmpfs and

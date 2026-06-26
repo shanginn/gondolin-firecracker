@@ -442,7 +442,7 @@ function resolveFirecrackerKernelOverride(
   const assets = imageManifest?.assets as
     | {
         firecrackerKernel?: string;
-        firecrackerInitrd?: string;
+        firecrackerInitrd?: string | null;
       }
     | undefined;
   if (!imageDir || !assets?.firecrackerKernel) {
@@ -463,7 +463,10 @@ function resolveFirecrackerKernelOverride(
 
   const fallbackInitramfs = imageManifest?.assets?.initramfs;
   let initrdPath: string;
-  if (assets.firecrackerInitrd) {
+  if (assets.firecrackerInitrd === null) {
+    // ponytail: sentinel path; FirecrackerController skips missing initrd files.
+    initrdPath = path.join(imageDir, ".gondolin-no-firecracker-initrd");
+  } else if (assets.firecrackerInitrd) {
     initrdPath = resolveManifestAssetPath(
       imageDir,
       assets.firecrackerInitrd,

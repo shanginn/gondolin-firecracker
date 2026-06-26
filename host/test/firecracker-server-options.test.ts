@@ -49,6 +49,13 @@ function makeAssets(includeFirecracker = true): string {
   return dir;
 }
 
+function setFirecrackerInitrd(dir: string, value: string | null) {
+  const manifestPath = path.join(dir, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.assets.firecrackerInitrd = value;
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+}
+
 test("resolveSandboxServerOptions resolves Firecracker manifest assets", () => {
   const dir = makeAssets();
   try {
@@ -62,6 +69,27 @@ test("resolveSandboxServerOptions resolves Firecracker manifest assets", () => {
     assert.equal(resolved.kernelPath, path.join(dir, "firecracker-kernel"));
     assert.equal(resolved.rootDiskFormat, "raw");
     assert.equal(resolved.netEnabled, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSandboxServerOptions supports Firecracker kernel without initrd", () => {
+  const dir = makeAssets();
+  try {
+    setFirecrackerInitrd(dir, null);
+
+    const resolved = resolveSandboxServerOptions(
+      { imagePath: dir },
+      undefined,
+      { platform: "linux" },
+    );
+
+    assert.equal(resolved.kernelPath, path.join(dir, "firecracker-kernel"));
+    assert.equal(
+      resolved.initrdPath,
+      path.join(dir, ".gondolin-no-firecracker-initrd"),
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -346,8 +346,8 @@ export interface AssetManifest {
     rootfs: string;
     /** Firecracker-compatible kernel image filename */
     firecrackerKernel?: string;
-    /** Firecracker initrd image filename */
-    firecrackerInitrd?: string;
+    /** Firecracker initrd image filename, or `null` to boot without one */
+    firecrackerInitrd?: string | null;
   };
 
   /** sha256 checksums (hex) */

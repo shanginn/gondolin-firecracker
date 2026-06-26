@@ -68,3 +68,27 @@ test("builder: writeAssetManifest omits Firecracker checksums when assets are ab
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("builder: writeAssetManifest records disabled Firecracker initrd", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-manifest-"));
+
+  try {
+    fs.writeFileSync(path.join(dir, KERNEL_FILENAME), "kernel");
+    fs.writeFileSync(path.join(dir, INITRAMFS_FILENAME), "initramfs");
+    fs.writeFileSync(path.join(dir, ROOTFS_FILENAME), "rootfs");
+    fs.writeFileSync(
+      path.join(dir, FIRECRACKER_KERNEL_FILENAME),
+      "firecracker-kernel",
+    );
+
+    const { manifest } = writeAssetManifest(dir, {
+      ...makeConfig(),
+      firecrackerInitrdPath: null,
+    });
+
+    assert.equal(manifest.assets.firecrackerInitrd, null);
+    assert.equal(manifest.checksums.firecrackerInitrd, undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
