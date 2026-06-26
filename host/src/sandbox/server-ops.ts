@@ -46,6 +46,7 @@ import {
 } from "./server-boot-config.ts";
 import { stripTrailingNewline } from "../debug.ts";
 import { nowMs, type StartupTimingEntry } from "../startup-timing.ts";
+import type { FsRpcSnapshotState } from "../vfs/rpc-service.ts";
 
 type BridgeWritableWaiter = {
   resolve: () => void;
@@ -138,6 +139,25 @@ export class SandboxServerOps {
     );
   }
 
+  async waitForGuestIdle(timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.hasActiveGuestActivity()) {
+      if (Date.now() >= deadline) {
+        throw new Error("timed out waiting for guest activity to become idle");
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 10);
+        timer.unref?.();
+      });
+    }
+  }
+
+  throwIfSnapshotInProgress(): void {
+    if (this.snapshotInProgress) {
+      throw new Error("snapshot is in progress");
+    }
+  }
+
   execPressure(): number {
     let pressure = this.startedExecs.size;
     for (const id of this.inflight.keys()) {
@@ -171,8 +191,10 @@ export class SandboxServerOps {
     options: GuestFileReadOptions = {},
   ): Promise<Readable> {
     this.assertGuestPath(filePath, "filePath");
+    this.throwIfSnapshotInProgress();
     await this.start();
     await this.waitForExecIdle(options.signal);
+    this.throwIfSnapshotInProgress();
 
     const id = this.allocateFileOpId();
     const highWaterMark =
@@ -289,8 +311,10 @@ export class SandboxServerOps {
     options: GuestFileWriteOptions = {},
   ): Promise<void> {
     this.assertGuestPath(filePath, "filePath");
+    this.throwIfSnapshotInProgress();
     await this.start();
     await this.waitForExecIdle(options.signal);
+    this.throwIfSnapshotInProgress();
 
     const id = this.allocateFileOpId();
 
@@ -365,8 +389,10 @@ export class SandboxServerOps {
     options: GuestFileDeleteOptions = {},
   ): Promise<void> {
     this.assertGuestPath(filePath, "filePath");
+    this.throwIfSnapshotInProgress();
     await this.start();
     await this.waitForExecIdle(options.signal);
+    this.throwIfSnapshotInProgress();
 
     const id = this.allocateFileOpId();
 
@@ -414,6 +440,8 @@ export class SandboxServerOps {
     port: number;
     timeoutMs?: number;
   }): Promise<Duplex> {
+    this.throwIfSnapshotInProgress();
+
     const host = target.host;
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;
@@ -423,6 +451,7 @@ export class SandboxServerOps {
     }
 
     await this.resumeControllerForActivity();
+    this.throwIfSnapshotInProgress();
 
     // Allocate stream id
     let id = this.nextTcpStreamId;
@@ -504,6 +533,8 @@ export class SandboxServerOps {
     port: number;
     timeoutMs?: number;
   }): Promise<Duplex> {
+    this.throwIfSnapshotInProgress();
+
     const host = target.host;
     const port = target.port;
     const timeoutMs = target.timeoutMs ?? 5000;
@@ -517,6 +548,7 @@ export class SandboxServerOps {
     }
 
     await this.resumeControllerForActivity();
+    this.throwIfSnapshotInProgress();
 
     // Allocate stream id
     let id = this.nextIngressTcpStreamId;
@@ -703,14 +735,30 @@ export class SandboxServerOps {
   async createFirecrackerSnapshot(
     snapshotPath: string,
     memPath: string,
-  ): Promise<void> {
+  ): Promise<{ vfsState?: FsRpcSnapshotState }> {
     await this.start();
+    if (this.snapshotInProgress) {
+      throw new Error("snapshot is already in progress");
+    }
     if (!this.controller.createSnapshot) {
       throw new Error(
         "Firecracker snapshots are not supported by this controller",
       );
     }
-    await this.controller.createSnapshot(snapshotPath, memPath);
+
+    this.snapshotInProgress = true;
+    try {
+      await this.waitForGuestIdle();
+      const vfsState = this.fsService?.exportSnapshotState();
+      await this.controller.createSnapshot(snapshotPath, memPath);
+      this.bridge.disconnectPeer();
+      this.fsBridge.disconnectPeer();
+      this.sshBridge.disconnectPeer();
+      this.ingressBridge.disconnectPeer();
+      return { vfsState };
+    } finally {
+      this.snapshotInProgress = false;
+    }
   }
 
   attachClient(client: SandboxClient) {
@@ -1090,6 +1138,16 @@ export class SandboxServerOps {
   }
 
   async handleExec(client: SandboxClient, message: ExecCommandMessage) {
+    if (this.snapshotInProgress) {
+      sendError(client, {
+        type: "error",
+        id: message.id,
+        code: "snapshot_in_progress",
+        message: "snapshot is in progress",
+      });
+      return;
+    }
+
     if (this.hasDebug("exec")) {
       const envKeys = (message.env ?? [])
         .map((entry) => String(entry).split("=", 1)[0])
@@ -1202,6 +1260,23 @@ export class SandboxServerOps {
       if (ownsAdmission) {
         this.pendingExecAdmissions.delete(message.id);
       }
+      this.scheduleControllerIdlePause();
+      return;
+    }
+    if (this.snapshotInProgress) {
+      this.inflight.delete(message.id);
+      this.pendingExecAdmissions.delete(message.id);
+      this.stdinAllowed.delete(message.id);
+      this.stdinCredits.delete(message.id);
+      this.pendingExecWindows.delete(message.id);
+      this.clearQueuedStdin(message.id);
+      this.queuedPtyResize.delete(message.id);
+      sendError(client, {
+        type: "error",
+        id: message.id,
+        code: "snapshot_in_progress",
+        message: "snapshot is in progress",
+      });
       this.scheduleControllerIdlePause();
       return;
     }

@@ -29,6 +29,7 @@ import type { SshOptions } from "../net/ssh.ts";
 import type { TcpOptions } from "../net/tcp.ts";
 import { assertRawDiskImage } from "../disk/image.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
+import type { FsRpcSnapshotState } from "../vfs/rpc-service.ts";
 
 /**
  * Path or selector for guest image assets
@@ -162,6 +163,8 @@ export type FirecrackerSnapshotRestoreOptions = {
   snapshotPath: string;
   /** guest memory snapshot path */
   memPath: string;
+  /** VFS RPC inode map captured when the snapshot was created */
+  vfsState?: FsRpcSnapshotState;
   /** boot config captured when the snapshot was created */
   bootConfig?: {
     /** FUSE mount path inside the guest */
@@ -927,12 +930,45 @@ function normalizeFirecrackerSnapshot(
   return {
     snapshotPath: path.resolve(value.snapshotPath),
     memPath: path.resolve(value.memPath),
+    vfsState: normalizeFsRpcSnapshotState(value.vfsState),
     bootConfig: value.bootConfig
       ? {
           fuseMount: value.bootConfig.fuseMount,
           fuseBinds: [...value.bootConfig.fuseBinds],
         }
       : undefined,
+  };
+}
+
+function normalizeFsRpcSnapshotState(
+  value: FsRpcSnapshotState | undefined,
+): FsRpcSnapshotState | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !value ||
+    typeof value.nextIno !== "number" ||
+    !Number.isSafeInteger(value.nextIno) ||
+    value.nextIno <= 0 ||
+    !Array.isArray(value.pathToIno)
+  ) {
+    throw new Error("sandbox.firecrackerSnapshot.vfsState is invalid");
+  }
+
+  return {
+    nextIno: value.nextIno,
+    pathToIno: value.pathToIno.map((entry) => {
+      if (
+        !Array.isArray(entry) ||
+        entry.length !== 2 ||
+        typeof entry[0] !== "string" ||
+        typeof entry[1] !== "number" ||
+        !Number.isSafeInteger(entry[1]) ||
+        entry[1] <= 0
+      ) {
+        throw new Error("sandbox.firecrackerSnapshot.vfsState is invalid");
+      }
+      return [entry[0], entry[1]];
+    }),
   };
 }
 

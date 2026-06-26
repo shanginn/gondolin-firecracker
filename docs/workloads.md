@@ -15,8 +15,9 @@ The primary workload Gondolin targets is an agent that:
 
 Most agent turns produce artifacts on disk (code, config files, logs) and
 little in-memory state worth keeping.  Gondolin leans into this: disk
-snapshots are supported, but full VM save/restore (RAM + process state) is not
-the production path.  See [Snapshots](./snapshots.md) for details.
+checkpoints are the durable persistence path, while Firecracker VM-state
+snapshots are a fast same-host restore path for idle VMs.  See
+[Snapshots](./snapshots.md) for details.
 
 ## Treat VMs as Disposable
 
@@ -26,8 +27,8 @@ Design your workloads so that throwing away a VM is always safe.  This means:
   default.  Use a [VFS provider](./vfs.md) (e.g. `MemoryProvider`,
   `RealFSProvider`) mounted at a known path like `/workspace` to store files
   you care about.
-- **Don't rely on long-running background processes.**  There is no mechanism
-  to reconnect to a process inside a discarded VM.
+- **Don't rely on long-running background processes.**  Disk checkpoints do not
+  capture RAM, and VM-state snapshots are only a same-host idle boundary.
 - **Expect re-creation, not resumption.**  While disk checkpoints let you
   capture and restore root-disk state, resuming requires the same kernel and
   rootfs assets.  Over time, as you update guest images, old checkpoints may

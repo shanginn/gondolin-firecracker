@@ -293,6 +293,7 @@ export class SandboxServer extends EventEmitter {
   private vfsReady = false;
   private vfsReadyTimer: NodeJS.Timeout | null = null;
   private bootConfig: SandboxFsConfig | null = null;
+  private snapshotInProgress = false;
   private startupTimingOriginMs = 0;
   private startupTimings: StartupTimingEntry[] = [];
 
@@ -454,6 +455,7 @@ export class SandboxServer extends EventEmitter {
     );
     this.fsService = this.vfsProvider
       ? new FsRpcService(this.vfsProvider, {
+          snapshotState: this.options.firecrackerSnapshot?.vfsState,
           logger: this.hasDebug("vfs")
             ? (message) => this.emitDebug("vfs", message)
             : undefined,

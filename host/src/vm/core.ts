@@ -71,6 +71,7 @@ import {
   createGondolinEtcMount,
 } from "../ingress.ts";
 import { MemoryProvider, type VirtualProvider } from "../vfs/node/index.ts";
+import type { FsRpcSnapshotState } from "../vfs/rpc-service.ts";
 import {
   SandboxVfsProvider,
   type VfsHooks,
@@ -615,10 +616,14 @@ export class VM {
     fs.mkdirSync(dir, { recursive: true });
     const snapshotPath = path.join(dir, "vm.fc");
     const memPath = path.join(dir, "vm.mem");
-    await server.createFirecrackerSnapshot(snapshotPath, memPath);
+    const serverSnapshot = await server.createFirecrackerSnapshot(
+      snapshotPath,
+      memPath,
+    );
     return {
       snapshotPath,
       memPath,
+      vfsState: serverSnapshot.vfsState,
       bootConfig: {
         fuseMount: this.fuseMount,
         fuseBinds: [...this.fuseBinds],
@@ -640,6 +645,7 @@ export class VM {
         firecrackerSnapshot: {
           snapshotPath: snapshot.snapshotPath,
           memPath: snapshot.memPath,
+          vfsState: snapshot.vfsState,
           bootConfig: snapshot.bootConfig,
         },
       },
@@ -2091,6 +2097,8 @@ export type FirecrackerVmSnapshot = {
   snapshotPath: string;
   /** guest memory snapshot path */
   memPath: string;
+  /** VFS RPC inode map captured at snapshot time */
+  vfsState?: FsRpcSnapshotState;
   /** boot config captured at snapshot time */
   bootConfig: {
     /** FUSE mount path inside the guest */
@@ -2221,7 +2229,11 @@ function resolveManifestRootfsMode(
 }
 
 function needsWritableRootForVfsBinds(fuseBinds: string[]): boolean {
-  return fuseBinds.some((mountPath) => mountPath !== "/etc/gondolin");
+  return fuseBinds.some(
+    (mountPath) =>
+      mountPath !== "/etc/gondolin" &&
+      !mountPath.startsWith("/etc/gondolin/"),
+  );
 }
 
 type ResolvedVfs = {

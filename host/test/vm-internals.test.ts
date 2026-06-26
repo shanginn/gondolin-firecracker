@@ -436,6 +436,29 @@ test("vm internals: custom vfs binds use writable rootfs copy by default", async
   }
 });
 
+test("vm internals: internal gondolin VFS submounts keep readonly rootfs", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    sandbox: {
+      netEnabled: true,
+    },
+    vfs: {
+      mounts: {
+        "/": new MemoryProvider(),
+      },
+    },
+  });
+
+  try {
+    const rootDisk = (vm as any).rootDisk;
+    assert.equal(rootDisk.readOnly, true);
+    assert.equal(rootDisk.deleteOnClose, false);
+  } finally {
+    await vm.close();
+    cleanup();
+  }
+});
+
 test("vm internals: start timeout rejects stalled guest readiness", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,

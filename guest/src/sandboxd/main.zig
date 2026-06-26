@@ -72,6 +72,26 @@ const VirtioTx = struct {
     fd: posix.fd_t,
     mutex: std.Io.Mutex = .init,
 
+    fn close(self: *VirtioTx) void {
+        self.mutex.lockUncancelable(syncIo());
+        defer self.mutex.unlock(syncIo());
+        posix.close(self.fd);
+    }
+
+    fn replaceFd(self: *VirtioTx, fd: posix.fd_t) void {
+        self.mutex.lockUncancelable(syncIo());
+        defer self.mutex.unlock(syncIo());
+        const old_fd = self.fd;
+        self.fd = fd;
+        posix.close(old_fd);
+    }
+
+    fn currentFd(self: *VirtioTx) posix.fd_t {
+        self.mutex.lockUncancelable(syncIo());
+        defer self.mutex.unlock(syncIo());
+        return self.fd;
+    }
+
     pub fn sendPayload(self: *VirtioTx, payload: []const u8) !void {
         self.mutex.lockUncancelable(syncIo());
         defer self.mutex.unlock(syncIo());
@@ -237,13 +257,13 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("starting", .{});
 
-    const virtio_fd = if (vsock_port) |port|
+    const control_fd = if (vsock_port) |port|
         try openVsockPort(port)
     else
         try openVirtioPort();
-    defer posix.close(virtio_fd);
 
-    var tx = VirtioTx{ .fd = virtio_fd };
+    var tx = VirtioTx{ .fd = control_fd };
+    defer tx.close();
 
     if (vsock_port) |port| {
         log.info("opened vsock port {d}", .{port});
@@ -263,14 +283,30 @@ pub fn main(init: std.process.Init) !void {
     while (true) {
         cleanupFinishedExecSessions(allocator, &exec_sessions);
 
-        const frame = protocol.readFrame(allocator, virtio_fd) catch |err| {
+        const frame = protocol.readFrame(allocator, tx.currentFd()) catch |err| {
             if (err == error.EndOfStream) {
+                if (vsock_port) |port| {
+                    reconnectVsockControl(port, allocator, &tx) catch |reconnect_err| {
+                        log.err("failed to reconnect vsock control: {s}", .{@errorName(reconnect_err)});
+                    };
+                    waiting_for_reconnect = false;
+                    continue;
+                }
                 if (!waiting_for_reconnect) {
                     log.info("virtio port closed, waiting for reconnect", .{});
                     waiting_for_reconnect = true;
                 }
-                waitForVirtioData(virtio_fd);
+                waitForVirtioData(tx.currentFd());
                 continue;
+            }
+            if (vsock_port) |port| {
+                if (shouldReconnectControlError(err)) {
+                    reconnectVsockControl(port, allocator, &tx) catch |reconnect_err| {
+                        log.err("failed to reconnect vsock control: {s}", .{@errorName(reconnect_err)});
+                    };
+                    waiting_for_reconnect = false;
+                    continue;
+                }
             }
             log.err("failed to read frame: {s}", .{@errorName(err)});
             continue;
@@ -359,7 +395,7 @@ pub fn main(init: std.process.Init) !void {
         };
 
         if (file_write_req) |req| {
-            file_requests.handleFileWrite(allocator, virtio_fd, &tx, "/", req) catch |err| {
+            file_requests.handleFileWrite(allocator, tx.currentFd(), &tx, "/", req) catch |err| {
                 log.err("file write failed: {s}", .{@errorName(err)});
                 _ = tx.sendError(allocator, req.id, "file_write_failed", @errorName(err)) catch {};
             };
@@ -660,6 +696,22 @@ fn openVsockPort(port: u32) !posix.fd_t {
             posix.nanosleep(0, 100 * std.time.ns_per_ms);
         }
     }
+}
+
+fn reconnectVsockControl(port: u32, allocator: std.mem.Allocator, tx: *VirtioTx) !void {
+    log.info("control vsock closed, reconnecting", .{});
+    const fd = try openVsockPort(port);
+    tx.replaceFd(fd);
+    sendVfsStatus(allocator, tx) catch |err| {
+        log.err("failed to resend vfs status after reconnect: {s}", .{@errorName(err)});
+    };
+}
+
+fn shouldReconnectControlError(err: anyerror) bool {
+    return switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer, error.EndOfStream, error.SocketNotConnected, error.Unexpected => true,
+        else => false,
+    };
 }
 
 fn waitForVirtioData(virtio_fd: posix.fd_t) void {

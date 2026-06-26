@@ -70,9 +70,9 @@ console.table(vm.getStartupTimings());
 The timings are relative `ms` offsets from server startup. They are intended for
 boot profiling and regression checks.
 
-## Firecracker Snapshots
+## Firecracker VM-State Snapshots
 
-Firecracker VM-state snapshots are available for same-host restore experiments:
+Firecracker VM-state snapshots are available for idle same-host restore:
 
 ```ts
 const snapshot = await vm.createFirecrackerSnapshot("./snapshot");
@@ -84,11 +84,11 @@ const restored = await VM.restoreFirecrackerSnapshot(snapshot, {
 await restored.start();
 ```
 
-Restore expects the same host class and compatible image/kernel/root disk paths.
-Use VFS mounts for workspace state you want to survive across restored VMs.
-The API is experimental: same-host snapshot load works, but restored guests do
-not yet reliably answer exec requests because the control vsock connection state
-is not snapshot-aware.
+Snapshot creation waits for active exec, file, VFS, and network activity to
+finish and rejects new guest work during capture. Restore expects the same host
+class and compatible image/kernel/root disk paths. Use VFS mounts or external
+storage for durable workspace state; the VM-state snapshot carries the VFS inode
+map needed by the restored guest, not an independent copy of host provider data.
 
 ## `vm.exec()`
 

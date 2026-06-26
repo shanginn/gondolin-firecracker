@@ -35,9 +35,12 @@ passed the same smoke test at `50M` and failed at `49M`.
 For startup work, call `vm.getStartupTimings()` after `vm.start()` to inspect
 host, Firecracker API, guest boot, VFS, and session IPC phases. Same-host
 Firecracker snapshots are exposed through `vm.createFirecrackerSnapshot(dir)`
-and `VM.restoreFirecrackerSnapshot(snapshot, options)`. Treat VM-state restore
-as experimental: same-host load works, but restored guests do not yet reliably
-answer exec requests because the control vsock state is not snapshot-aware.
+and `VM.restoreFirecrackerSnapshot(snapshot, options)`. Snapshot creation waits
+for active guest work to drain and rejects new exec, file, TCP, SSH, ingress, and
+VFS activity during capture. Restored VMs are expected to run on the same host
+class with compatible image, kernel, and root disk paths. VFS providers remain
+host-owned state, while the snapshot metadata preserves the guest-facing VFS
+inode map so restored FUSE mounts keep answering path operations.
 
 ## Storage
 

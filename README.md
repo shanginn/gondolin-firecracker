@@ -49,8 +49,8 @@ For lower cold-start and memory floors, the repo also includes:
 - `images/alpine-initramfs-firecracker.json`: tiny kernel plus static init
   running directly from initramfs
 - `VM#getStartupTimings()`, `VM#createFirecrackerSnapshot()`, and
-  `VM.restoreFirecrackerSnapshot()` for phase timing and same-host snapshot
-  restore experiments
+  `VM.restoreFirecrackerSnapshot()` for phase timing and same-host idle
+  VM-state restore
 
 ## SDK Example
 
@@ -146,11 +146,15 @@ fast static-init both passed `29M` for `20/20` boots with `MemTotal` around
 Use `30M` for tiny/fast, `50M` for the current initramfs-root floor, and `84M`
 for the default published image.
 
-Firecracker VM-state snapshot create/load APIs are present for same-host
-experiments, but restored VMs do not yet reliably answer exec requests because
-the guest control vsock state is not snapshot-aware. Treat full VM-state restore
-as experimental; disk checkpoints and VFS-backed workspace state remain the
-production path.
+Firecracker VM-state snapshots are supported for idle same-host restore through
+`VM#createFirecrackerSnapshot()` and `VM.restoreFirecrackerSnapshot()`. Snapshot
+creation waits for active exec, file, VFS, and network work to drain, rejects new
+guest work during capture, and records the VFS RPC inode map needed by restored
+FUSE mounts. A June 26, 2026 KVM smoke restored control exec, host/guest VFS
+read/write, and bash `/dev/tcp` HTTP egress from the restored VM. Treat this as
+a fast same-host resume path, not cross-host live migration; keep disk
+checkpoints, VFS providers, or external storage as the durable persistence
+boundary.
 
 This benchmark isolates VM lifecycle and tiny command latency. Network, VFS, and
 agent workload benchmarks should be measured separately.

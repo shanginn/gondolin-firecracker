@@ -61,9 +61,18 @@ export type FsRpcMetrics = {
   ops: Record<string, number>;
 };
 
+export type FsRpcSnapshotState = {
+  /** next inode id to allocate */
+  nextIno: number;
+  /** normalized path to inode mappings */
+  pathToIno: Array<[string, number]>;
+};
+
 export type FsRpcServiceOptions = {
   /** optional log sink */
   logger?: (message: string) => void;
+  /** inode map captured with a VM-state snapshot */
+  snapshotState?: FsRpcSnapshotState;
 };
 
 type HandleEntry = {
@@ -105,6 +114,16 @@ export class FsRpcService {
     this.logger = options.logger;
     this.pathToIno.set("/", 1);
     this.inoToPaths.set(1, new Set(["/"]));
+    if (options.snapshotState) {
+      this.restoreSnapshotState(options.snapshotState);
+    }
+  }
+
+  exportSnapshotState(): FsRpcSnapshotState {
+    return {
+      nextIno: this.nextIno,
+      pathToIno: [...this.pathToIno.entries()],
+    };
   }
 
   async handleRequest(message: FsRequest): Promise<FsResponse> {
@@ -851,6 +870,35 @@ export class FsRpcService {
     }
     paths.add(normalized);
     return ino;
+  }
+
+  private restoreSnapshotState(state: FsRpcSnapshotState) {
+    this.pathToIno.clear();
+    this.inoToPaths.clear();
+
+    let maxIno = 1;
+    for (const [rawPath, rawIno] of state.pathToIno) {
+      if (!Number.isSafeInteger(rawIno) || rawIno <= 0) continue;
+      const entryPath = normalizePath(rawPath);
+      this.pathToIno.set(entryPath, rawIno);
+      let paths = this.inoToPaths.get(rawIno);
+      if (!paths) {
+        paths = new Set();
+        this.inoToPaths.set(rawIno, paths);
+      }
+      paths.add(entryPath);
+      maxIno = Math.max(maxIno, rawIno);
+    }
+
+    if (!this.pathToIno.has("/")) {
+      this.pathToIno.set("/", 1);
+      this.inoToPaths.set(1, new Set(["/"]));
+    }
+
+    this.nextIno =
+      Number.isSafeInteger(state.nextIno) && state.nextIno > maxIno
+        ? state.nextIno
+        : maxIno + 1;
   }
 
   private requirePath(ino: number, op: string) {

@@ -98,6 +98,14 @@ export class VirtioBridge {
     this.pendingBytes = 0;
   }
 
+  disconnectPeer(): void {
+    if (this.socket) {
+      this.socket.destroy();
+      this.socket = null;
+    }
+    this.waitingDrain = false;
+  }
+
   send(message: object): boolean {
     if (this.closed) {
       return false;

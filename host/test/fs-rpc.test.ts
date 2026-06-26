@@ -121,6 +121,28 @@ test("fs rpc create/write/read", async () => {
   await service.close();
 });
 
+test("fs rpc snapshot state restores guest inode mappings", async () => {
+  const provider = new MemoryProvider();
+  const service = new FsRpcService(provider);
+
+  const create = await send(service, "create", {
+    parent_ino: 1,
+    name: "snapshot.txt",
+    mode: 0o644,
+    flags: 0,
+  });
+  assert.equal(create.p.err, 0);
+  const ino = (create.p.res?.entry as { ino: number }).ino;
+  const snapshotState = service.exportSnapshotState();
+  await service.close();
+
+  const restored = new FsRpcService(provider, { snapshotState });
+  const getattr = await send(restored, "getattr", { ino });
+  assert.equal(getattr.p.err, 0);
+  assert.equal((getattr.p.res?.attr as { ino: number }).ino, ino);
+  await restored.close();
+});
+
 test("fs rpc readdir offsets", async () => {
   const service = createService();
 

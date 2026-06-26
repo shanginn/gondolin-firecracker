@@ -44,7 +44,7 @@ in the host process. Host-to-guest ingress and SSH are supported separately.
 ## Images & Filesystem
 
 - [VFS Providers](./vfs.md): host-provided mounts and filesystem policies
-- [Snapshots](./snapshots.md): disk-only raw checkpoints
+- [Snapshots](./snapshots.md): disk checkpoints and same-host VM-state restore
 - [Custom Images](./custom-images.md): build guest images
 - [Kubernetes](./kubernetes.md): run inside Kubernetes pods
 

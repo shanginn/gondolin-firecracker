@@ -272,19 +272,26 @@ const SandboxFs = struct {
     allocator: std.mem.Allocator,
     fuse_fd: posix.fd_t,
     rpc: ?fs_rpc.FsRpcClient,
+    rpc_vsock_port: ?u32,
     unsupported_opcode_logged: [256]bool,
 
-    pub fn init(allocator: std.mem.Allocator, fuse_fd: posix.fd_t, rpc: ?fs_rpc.FsRpcClient) SandboxFs {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        fuse_fd: posix.fd_t,
+        rpc: ?fs_rpc.FsRpcClient,
+        rpc_vsock_port: ?u32,
+    ) SandboxFs {
         return .{
             .allocator = allocator,
             .fuse_fd = fuse_fd,
             .rpc = rpc,
+            .rpc_vsock_port = rpc_vsock_port,
             .unsupported_opcode_logged = [_]bool{false} ** 256,
         };
     }
 
     pub fn deinit(self: *SandboxFs) void {
-        _ = self;
+        self.closeRpc();
     }
 
     pub fn run(self: *SandboxFs) !void {
@@ -357,6 +364,31 @@ const SandboxFs = struct {
         try sendError(self.fuse_fd, header.unique, err);
     }
 
+    fn rpcRequest(self: *SandboxFs, op: []const u8, fields: []fs_rpc.Field) !fs_rpc.FsResponse {
+        if (self.rpc == null) return error.RpcUnavailable;
+
+        return self.rpc.?.request(op, fields) catch |err| {
+            if (!shouldReconnectRpcError(err) or self.rpc_vsock_port == null) return err;
+            try self.reconnectRpc();
+            return try self.rpc.?.request(op, fields);
+        };
+    }
+
+    fn reconnectRpc(self: *SandboxFs) !void {
+        const port = self.rpc_vsock_port orelse return error.RpcReconnectUnsupported;
+        log.info("rpc vsock closed, reconnecting", .{});
+        const fd = openVsockPort(port) orelse return error.RpcReconnectFailed;
+        self.closeRpc();
+        self.rpc = fs_rpc.FsRpcClient.init(self.allocator, fd);
+    }
+
+    fn closeRpc(self: *SandboxFs) void {
+        if (self.rpc) |rpc| {
+            posix.close(rpc.fd);
+            self.rpc = null;
+        }
+    }
+
     fn handleInit(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
         const init_in = try parseFuseInit(payload);
         const supported_flags: u32 = (1 << 5);
@@ -382,12 +414,12 @@ const SandboxFs = struct {
 
     fn handleLookup(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
         const name = parseName(payload);
-        if (self.rpc) |*rpc| {
+        if (self.rpc != null) {
             var fields = [_]fs_rpc.Field{
                 .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
                 .{ .name = "name", .value = .{ .Text = name } },
             };
-            var response = try rpc.request("lookup", &fields);
+            var response = try self.rpcRequest("lookup", &fields);
             defer response.deinit();
 
             if (response.err != 0) {
@@ -415,9 +447,9 @@ const SandboxFs = struct {
     }
 
     fn handleGetattr(self: *SandboxFs, header: FuseInHeader) !void {
-        if (self.rpc) |*rpc| {
+        if (self.rpc != null) {
             var fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
-            var response = try rpc.request("getattr", &fields);
+            var response = try self.rpcRequest("getattr", &fields);
             defer response.deinit();
 
             if (response.err != 0) {
@@ -448,7 +480,7 @@ const SandboxFs = struct {
         }
 
         var fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
-        var response = try self.rpc.?.request("readlink", &fields);
+        var response = try self.rpcRequest("readlink", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -474,7 +506,7 @@ const SandboxFs = struct {
                 .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
                 .{ .name = "size", .value = .{ .UInt = setattr.size } },
             };
-            var response = try self.rpc.?.request("truncate", &fields);
+            var response = try self.rpcRequest("truncate", &fields);
             defer response.deinit();
 
             if (response.err != 0) {
@@ -484,7 +516,7 @@ const SandboxFs = struct {
         }
 
         var attr_fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
-        var attr_response = try self.rpc.?.request("getattr", &attr_fields);
+        var attr_response = try self.rpcRequest("getattr", &attr_fields);
         defer attr_response.deinit();
 
         if (attr_response.err != 0) {
@@ -517,7 +549,7 @@ const SandboxFs = struct {
             .{ .name = "name", .value = .{ .Text = name } },
             .{ .name = "target", .value = .{ .Text = target } },
         };
-        var response = try self.rpc.?.request("symlink", &fields);
+        var response = try self.rpcRequest("symlink", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -547,7 +579,7 @@ const SandboxFs = struct {
             .{ .name = "name", .value = .{ .Text = name } },
             .{ .name = "mode", .value = .{ .UInt = mkdir.mode } },
         };
-        var response = try self.rpc.?.request("mkdir", &fields);
+        var response = try self.rpcRequest("mkdir", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -574,7 +606,7 @@ const SandboxFs = struct {
             .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
             .{ .name = "name", .value = .{ .Text = name } },
         };
-        var response = try self.rpc.?.request("unlink", &fields);
+        var response = try self.rpcRequest("unlink", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -596,7 +628,7 @@ const SandboxFs = struct {
             .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
             .{ .name = "name", .value = .{ .Text = name } },
         };
-        var response = try self.rpc.?.request("rmdir", &fields);
+        var response = try self.rpcRequest("rmdir", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -643,7 +675,7 @@ const SandboxFs = struct {
             .{ .name = "new_name", .value = .{ .Text = new_name } },
             .{ .name = "flags", .value = .{ .UInt = flags } },
         };
-        var response = try self.rpc.?.request("rename", &fields);
+        var response = try self.rpcRequest("rename", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -668,7 +700,7 @@ const SandboxFs = struct {
             .{ .name = "new_parent_ino", .value = .{ .UInt = header.nodeid } },
             .{ .name = "new_name", .value = .{ .Text = name } },
         };
-        var response = try self.rpc.?.request("link", &fields);
+        var response = try self.rpcRequest("link", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -695,7 +727,7 @@ const SandboxFs = struct {
             .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
             .{ .name = "flags", .value = .{ .UInt = open.flags } },
         };
-        var response = try self.rpc.?.request("open", &fields);
+        var response = try self.rpcRequest("open", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -729,7 +761,7 @@ const SandboxFs = struct {
             .{ .name = "offset", .value = .{ .UInt = read_in.offset } },
             .{ .name = "max_entries", .value = .{ .UInt = max_entries } },
         };
-        var response = try self.rpc.?.request("readdir", &fields);
+        var response = try self.rpcRequest("readdir", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -809,7 +841,7 @@ const SandboxFs = struct {
                 .{ .name = "offset", .value = .{ .UInt = offset } },
                 .{ .name = "size", .value = .{ .UInt = chunk_size } },
             };
-            var response = try self.rpc.?.request("read", &fields);
+            var response = try self.rpcRequest("read", &fields);
             defer response.deinit();
 
             if (response.err != 0) {
@@ -853,7 +885,7 @@ const SandboxFs = struct {
             .{ .name = "offset", .value = .{ .UInt = write_in.offset } },
             .{ .name = "data", .value = .{ .Bytes = clipped } },
         };
-        var response = try self.rpc.?.request("write", &fields);
+        var response = try self.rpcRequest("write", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -882,7 +914,7 @@ const SandboxFs = struct {
             .{ .name = "mode", .value = .{ .UInt = create.mode } },
             .{ .name = "flags", .value = .{ .UInt = create.flags } },
         };
-        var response = try self.rpc.?.request("create", &fields);
+        var response = try self.rpcRequest("create", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -914,7 +946,7 @@ const SandboxFs = struct {
 
         const release = try parseRelease(payload);
         var fields = [_]fs_rpc.Field{.{ .name = "fh", .value = .{ .UInt = release.fh } }};
-        var response = try self.rpc.?.request("release", &fields);
+        var response = try self.rpcRequest("release", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -950,7 +982,7 @@ const SandboxFs = struct {
             .{ .name = "uid", .value = .{ .UInt = header.uid } },
             .{ .name = "gid", .value = .{ .UInt = header.gid } },
         };
-        var response = try self.rpc.?.request("access", &fields);
+        var response = try self.rpcRequest("access", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -974,7 +1006,7 @@ const SandboxFs = struct {
             .{ .name = "length", .value = .{ .UInt = fallocate.length } },
             .{ .name = "mode", .value = .{ .UInt = fallocate.mode } },
         };
-        var response = try self.rpc.?.request("fallocate", &fields);
+        var response = try self.rpcRequest("fallocate", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -1000,7 +1032,7 @@ const SandboxFs = struct {
             .{ .name = "len", .value = .{ .UInt = copy.len } },
             .{ .name = "flags", .value = .{ .UInt = copy.flags } },
         };
-        var response = try self.rpc.?.request("copy_file_range", &fields);
+        var response = try self.rpcRequest("copy_file_range", &fields);
         defer response.deinit();
 
         if (response.err != 0) {
@@ -1015,9 +1047,9 @@ const SandboxFs = struct {
     }
 
     fn handleStatfs(self: *SandboxFs, header: FuseInHeader) !void {
-        if (self.rpc) |*rpc| {
+        if (self.rpc != null) {
             var fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
-            var response = try rpc.request("statfs", &fields);
+            var response = try self.rpcRequest("statfs", &fields);
             defer response.deinit();
 
             if (response.err != 0) {
@@ -1091,7 +1123,12 @@ pub fn main(init: std.process.Init) !void {
     try mountFuse(allocator, fuse_fd, mount_point);
     log.info("mounted sandboxfs at {s}", .{mount_point});
 
-    var sandboxfs = SandboxFs.init(allocator, fuse_fd, rpc_client);
+    var sandboxfs = SandboxFs.init(
+        allocator,
+        fuse_fd,
+        rpc_client,
+        rpc_vsock_port,
+    );
     defer sandboxfs.deinit();
 
     sandboxfs.run() catch |err| {
@@ -1153,6 +1190,13 @@ fn openVsockPort(port: u32) ?posix.fd_t {
         }
     }
     return null;
+}
+
+fn shouldReconnectRpcError(err: anyerror) bool {
+    return switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer, error.EndOfStream, error.SocketNotConnected, error.Unexpected => true,
+        else => false,
+    };
 }
 
 fn openVirtioPortByName(expected: []const u8) ?posix.fd_t {

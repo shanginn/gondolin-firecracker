@@ -212,6 +212,58 @@ test("sendControlMessage aborts after waiting for resume", async () => {
   assert.equal(sendCalls, 0);
 });
 
+test("Firecracker snapshot waits for idle and rejects new execs", async () => {
+  const server = new SandboxServer(makeResolvedOptions());
+  const created: string[][] = [];
+  let droppedPeers = 0;
+
+  (server as any).start = async () => {};
+  (server as any).controller.createSnapshot = async (
+    snapshotPath: string,
+    memPath: string,
+  ) => {
+    created.push([snapshotPath, memPath]);
+  };
+  (server as any).bridge.send = () => {
+    throw new Error("exec should not start while snapshotting");
+  };
+  for (const name of ["bridge", "fsBridge", "sshBridge", "ingressBridge"]) {
+    (server as any)[name].disconnectPeer = () => {
+      droppedPeers += 1;
+    };
+  }
+
+  (server as any).activeFileOpId = 99;
+  const snapshot = (server as any).createFirecrackerSnapshot(
+    "/tmp/vm.fc",
+    "/tmp/vm.mem",
+  );
+  await Promise.resolve();
+
+  const client = makeClient();
+  await (server as any).handleExec(client.client, execMessage(50));
+
+  assert.ok(
+    client.captured.json.some(
+      (m) =>
+        m?.type === "error" &&
+        m?.id === 50 &&
+        m?.code === "snapshot_in_progress",
+    ),
+  );
+  await assert.rejects(
+    () => (server as any).writeGuestFile("/tmp/new-file", "nope"),
+    /snapshot is in progress/,
+  );
+  assert.deepEqual(created, []);
+
+  (server as any).activeFileOpId = null;
+  await snapshot;
+
+  assert.deepEqual(created, [["/tmp/vm.fc", "/tmp/vm.mem"]]);
+  assert.equal(droppedPeers, 4);
+});
+
 test("idle pause is armed when sandbox reaches running with no active work", () => {
   const server = new SandboxServer(makeResolvedOptions());
   let scheduleCalls = 0;

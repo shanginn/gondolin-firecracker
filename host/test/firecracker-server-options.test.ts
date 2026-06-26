@@ -166,6 +166,10 @@ test("resolveSandboxServerOptions normalizes Firecracker snapshot paths", () => 
         firecrackerSnapshot: {
           snapshotPath: "./vm.fc",
           memPath: "./vm.mem",
+          vfsState: {
+            nextIno: 4,
+            pathToIno: [["/", 1], ["/workspace/file.txt", 3]],
+          },
           bootConfig: {
             fuseMount: "/data",
             fuseBinds: ["/workspace"],
@@ -181,6 +185,10 @@ test("resolveSandboxServerOptions normalizes Firecracker snapshot paths", () => 
       path.resolve("vm.fc"),
     );
     assert.equal(resolved.firecrackerSnapshot?.memPath, path.resolve("vm.mem"));
+    assert.deepEqual(resolved.firecrackerSnapshot?.vfsState, {
+      nextIno: 4,
+      pathToIno: [["/", 1], ["/workspace/file.txt", 3]],
+    });
     assert.deepEqual(resolved.firecrackerSnapshot?.bootConfig, {
       fuseMount: "/data",
       fuseBinds: ["/workspace"],
