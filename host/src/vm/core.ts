@@ -1647,11 +1647,7 @@ fi
   }
 
   private async ensureRunning() {
-    const state = await this.waitForStatus();
-    if (state === "stopped" && !this.autoStart) {
-      throw new Error("sandbox is stopped");
-    }
-
+    await this.waitForStatus();
     this.ensureBoot();
 
     const nextState = await this.waitForStatus();

@@ -151,7 +151,8 @@ kernel asset is an uncompressed ELF and currently weighs `38M`. The
 `images/alpine-tiny-firecracker.json` no-initrd profile is the pod-density
 option; it passed the bash, VFS, and mediated HTTP smoke test at `29M` on June
 26, 2026. Use `30M` plus host/controller overhead when you want a small guard
-band.
+band. The initramfs-root profile is the startup-latency option; it passed the
+same smoke test at `50M` and failed at `49M`.
 
 The read-only rootfs avoids a full raw rootfs copy before boot. Guest paths such
 as `/tmp`, `/root`, `/var/tmp`, `/var/cache`, and `/var/log` are tmpfs-backed.

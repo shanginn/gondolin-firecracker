@@ -86,6 +86,9 @@ await restored.start();
 
 Restore expects the same host class and compatible image/kernel/root disk paths.
 Use VFS mounts for workspace state you want to survive across restored VMs.
+The API is experimental: same-host snapshot load works, but restored guests do
+not yet reliably answer exec requests because the control vsock connection state
+is not snapshot-aware.
 
 ## `vm.exec()`
 

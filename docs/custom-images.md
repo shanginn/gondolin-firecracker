@@ -54,8 +54,8 @@ gondolin build --config images/alpine-initramfs-firecracker.json --output ./gues
 The kernel build needs `build-essential`, `bc`, `bison`, `flex`, `libelf-dev`,
 `libssl-dev`, and `xz-utils` on Debian/Ubuntu hosts. The config keeps virtio
 block, virtio net, vsock, ext4, FUSE, ptys, IPv4, and shell process support,
-then drops the Firecracker initrd. On June 26, 2026, this profile passed `20/20`
-smoke boots at `29M`; use `30M` for a small guard band.
+then drops the Firecracker initrd. On June 26, 2026, the tiny and fast profiles
+passed `20/20` smoke boots at `29M`; use `30M` for a small guard band.
 
 `images/alpine-fast-firecracker.json` additionally uses a stripped static
 `/init` built by `scripts/build-fast-agent-init.sh`. It starts only the agent
@@ -64,7 +64,9 @@ path: mounts, optional DHCP, `sandboxfs`, and `sandboxd`.
 `images/alpine-initramfs-firecracker.json` boots the same static init directly
 from `initramfs.cpio.lz4`. It copies `sandboxd`, `sandboxfs`, bash, and
 certificates into initramfs, so it can skip the rootfs mount path. Gondolin still
-emits `rootfs.ext4` because the asset manifest format expects one.
+emits `rootfs.ext4` because the asset manifest format expects one. The
+initramfs-root profile passed `20/20` smoke boots at `50M`; `49M` failed on the
+same host.
 
 Build config knobs:
 

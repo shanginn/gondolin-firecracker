@@ -15,8 +15,8 @@ The primary workload Gondolin targets is an agent that:
 
 Most agent turns produce artifacts on disk (code, config files, logs) and
 little in-memory state worth keeping.  Gondolin leans into this: disk
-snapshots are supported, but full VM save/restore (RAM + process state) is
-not.  See [Snapshots](./snapshots.md) for details.
+snapshots are supported, but full VM save/restore (RAM + process state) is not
+the production path.  See [Snapshots](./snapshots.md) for details.
 
 ## Treat VMs as Disposable
 

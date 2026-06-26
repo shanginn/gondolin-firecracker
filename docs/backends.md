@@ -29,12 +29,15 @@ kernel asset is `38M` before initramfs and userspace memory. For the smallest
 agent sandbox profile, build `scripts/build-tiny-firecracker-kernel.sh` and use
 `images/alpine-tiny-firecracker.json`; that no-initrd profile passed VFS,
 `/bin/bash`, and mediated HTTP smoke tests at `29M` on June 26, 2026.
+`images/alpine-initramfs-firecracker.json` trades memory for startup latency; it
+passed the same smoke test at `50M` and failed at `49M`.
 
 For startup work, call `vm.getStartupTimings()` after `vm.start()` to inspect
 host, Firecracker API, guest boot, VFS, and session IPC phases. Same-host
 Firecracker snapshots are exposed through `vm.createFirecrackerSnapshot(dir)`
-and `VM.restoreFirecrackerSnapshot(snapshot, options)`. Keep the same kernel,
-root disk, helper paths, memory shape, and host class when restoring.
+and `VM.restoreFirecrackerSnapshot(snapshot, options)`. Treat VM-state restore
+as experimental: same-host load works, but restored guests do not yet reliably
+answer exec requests because the control vsock state is not snapshot-aware.
 
 ## Storage
 

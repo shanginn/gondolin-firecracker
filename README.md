@@ -84,31 +84,32 @@ Debian Linux `6.12.85+deb13-amd64`, `1` vCPU (`AMD EPYC 7543` under KVM),
 `1.9 GiB` RAM, Firecracker `v1.16.0`, QEMU `10.0.8`, Node.js `v26.4.0`,
 Zig `0.16.0`.
 
-Each value is the median of `5` runs with `1` vCPU, no serial console, guest
-networking disabled, and `50` warm `/bin/true` execs per run. The default
-Firecracker and QEMU columns use the checked-in `images/alpine-base.json`
-x86_64 image. The tiny Firecracker column uses
-`images/alpine-tiny-firecracker.json`. The QEMU column is the original
-Gondolin/QEMU runtime from `@earendil-works/gondolin@0.12.0`, using the same
-default x86_64 image.
+Firecracker values are medians of `5` runs with `1` vCPU, no serial console,
+guest networking disabled, and `50` warm `/bin/true` execs per run. The QEMU
+column is a fresh `3`-run comparison against the original Gondolin/QEMU runtime
+from `@earendil-works/gondolin@0.12.0`, using `256M` and the rebuilt
+`images/alpine-base.json` x86_64 image. The QEMU package does not expose the
+same explicit start split, so its cold path is `VM.create()` plus the first
+successful exec.
 
-| Metric                    | Firecracker default (`84M`) | Firecracker tiny (`29M`) | QEMU original (`256M`) |
-| ------------------------- | --------------------------: | -----------------------: | ---------------------: |
-| VM object creation        |                    `1.7 ms` |                 `1.7 ms` |               `366 ms` |
-| VM start to ready         |                    `1.72 s` |                 `1.01 s` |               `4.38 s` |
-| First `/bin/true` exec    |                    `6.1 ms` |                `13.9 ms` |               `9.0 ms` |
-| Warm `/bin/true` exec p50 |                   `12.5 ms` |                `15.9 ms` |              `23.6 ms` |
-| Warm `/bin/true` exec p95 |                   `18.3 ms` |                `16.9 ms` |              `31.7 ms` |
-| VMM RSS after warm execs  |                  `84.7 MiB` |               `28.3 MiB` |            `171.5 MiB` |
-| VMM VSZ after warm execs  |                  `92.1 MiB` |               `37.1 MiB` |            `649.9 MiB` |
-| VM close                  |                   `41.2 ms` |                `37.4 ms` |              `23.7 ms` |
+| Metric                         | Tiny (`29M`) | Fast static init (`29M`) | Initramfs root (`50M`) | QEMU original (`256M`) |
+| ------------------------------ | -----------: | -----------------------: | ---------------------: | ---------------------: |
+| VM object creation             |     `2.0 ms` |                 `1.3 ms` |               `1.7 ms` |                    n/a |
+| Host-side `VM.start()`         |    `43.2 ms` |                `40.2 ms` |              `41.5 ms` |                    n/a |
+| First `/bin/true` exec         |     `976 ms` |                 `943 ms` |               `180 ms` |              `11.14 s` |
+| Cold create/start/first exec   |    `1.01 s` |                `985 ms` |               `223 ms` |              `11.14 s` |
+| Warm `/bin/true` exec p50      |    `16.0 ms` |                `15.9 ms` |              `16.0 ms` |              `15.3 ms` |
+| Warm `/bin/true` exec p95      |    `17.0 ms` |                `17.7 ms` |              `17.5 ms` |              `24.8 ms` |
+| VMM RSS after warm execs       |  `30.3 MiB` |              `30.3 MiB` |            `54.7 MiB` |            `176.9 MiB` |
+| VMM VSZ after warm execs       |  `37.1 MiB` |              `37.1 MiB` |            `58.1 MiB` |            `723.0 MiB` |
+| VM close                       |    `37.4 ms` |                `38.5 ms` |              `33.2 ms` |              `30.1 ms` |
 
-Memory floor smoke tests used `console: "none"`, `netEnabled: true`, bash, and
-an outbound HTTP fetch from the guest. The optimized image passed `84M` for
-`20/20` boots. `80M` was intentionally not chosen as the default because it
-passed only `9/10` boots; `76M` failed `5/5`. The initramfs prune reduced the
-default compressed initramfs from `5.9M` to `2.3M` (`11M` to `3.6M`
-uncompressed).
+The default Alpine-derived Firecracker image is still the conservative
+published baseline at `84M`; it keeps the larger distro kernel and package set.
+The optimized profiles above use the tiny custom kernel. The initramfs-root
+profile is the cold-start winner, but `50M` is the measured floor for the full
+agent smoke path and its median cold create/start/first exec is still just above
+`200 ms` on this host.
 
 Sub-`50M` is not a supported target for the default Alpine image. On x86_64,
 Firecracker boots an uncompressed ELF kernel; the current Alpine-derived
@@ -138,10 +139,18 @@ init script for the static init. The initramfs profile copies `sandboxd`,
 `sandboxfs`, bash, and certificates into initramfs and skips `switch_root`.
 
 A June 26, 2026 smoke sweep on the same KVM host used `netEnabled: true`, a
-VFS-backed file write/read, `/bin/bash`, and an outbound HTTP fetch. `29M`
-passed `20/20` boots with `MemTotal` around `18.3 MiB`; `28M` timed out, and
-`26M` and lower failed kernel loading. Use `30M` when you want a small guard
-band; use `84M` for the default published image.
+VFS-backed file write/read, `/bin/bash`, and an outbound HTTP fetch. Tiny and
+fast static-init both passed `29M` for `20/20` boots with `MemTotal` around
+`18.3 MiB`; `28M` timed out. Initramfs-root passed `50M` for `20/20` boots with
+`MemTotal` around `38.8 MiB`; `49M` and `48M` exited before guest readiness.
+Use `30M` for tiny/fast, `50M` for the current initramfs-root floor, and `84M`
+for the default published image.
+
+Firecracker VM-state snapshot create/load APIs are present for same-host
+experiments, but restored VMs do not yet reliably answer exec requests because
+the guest control vsock state is not snapshot-aware. Treat full VM-state restore
+as experimental; disk checkpoints and VFS-backed workspace state remain the
+production path.
 
 This benchmark isolates VM lifecycle and tiny command latency. Network, VFS, and
 agent workload benchmarks should be measured separately.

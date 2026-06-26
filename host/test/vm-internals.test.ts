@@ -884,7 +884,7 @@ test("vm internals: ensureRunning sends boot and resolves once running", async (
   }
 });
 
-test("vm internals: ensureRunning throws when stopped and autoStart disabled", async () => {
+test("vm internals: ensureRunning boots when autoStart is disabled", async () => {
   const { vm, cleanup } = makeVm({ autoStart: false, vfs: null });
   try {
     const sent: any[] = [];
@@ -909,8 +909,11 @@ test("vm internals: ensureRunning throws when stopped and autoStart disabled", a
     const p = (vm as any).ensureRunning();
     onMessage!(JSON.stringify({ type: "status", state: "stopped" }), false);
 
-    await assert.rejects(p, /sandbox is stopped/);
-    assert.equal(sent.filter((m) => m.type === "boot").length, 0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(sent.filter((m) => m.type === "boot").length, 1);
+
+    onMessage!(JSON.stringify({ type: "status", state: "running" }), false);
+    await p;
   } finally {
     cleanup();
   }
