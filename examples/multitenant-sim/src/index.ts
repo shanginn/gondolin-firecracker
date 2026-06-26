@@ -1,10 +1,12 @@
 import { once } from "node:events";
+import fs from "node:fs";
 import type { AddressInfo } from "node:net";
 
 import { readSimulatorConfig } from "./config.ts";
 import { createSimulatorServer } from "./server.ts";
 
 const config = readSimulatorConfig();
+prepareWritableDirs();
 const { server, simulator } = await createSimulatorServer(config);
 
 server.listen(config.port, config.host);
@@ -39,3 +41,13 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   void shutdown("SIGTERM").finally(() => process.exit(0));
 });
+
+function prepareWritableDirs(): void {
+  for (const dir of [
+    process.env.GONDOLIN_RUNTIME_DIR,
+    process.env.XDG_CACHE_HOME,
+    process.env.TMPDIR,
+  ]) {
+    if (dir) fs.mkdirSync(dir, { recursive: true });
+  }
+}
