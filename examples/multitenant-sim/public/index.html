@@ -3,129 +3,219 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Gondolin Multitenant Simulator</title>
+    <title>Gondolin VM Arena</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div>
-        <h1>Gondolin Multitenant Simulator</h1>
-        <p>PI-style user sessions backed by tiny Firecracker VMs</p>
+    <header class="arena-header">
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <h1>VM Arena</h1>
+          <p>Tiny Firecracker sessions for simulated users</p>
+        </div>
       </div>
-      <div class="top-actions">
-        <button id="startBtn">Start</button>
+      <div class="status-strip">
+        <span id="streamStatus" class="stream off">connecting</span>
+        <span id="runState" class="run-state">paused</span>
+      </div>
+      <div class="header-actions">
+        <button id="startBtn" class="primary">Start</button>
         <button id="pauseBtn">Pause</button>
-        <button id="resetBtn" class="secondary">Reset</button>
+        <button id="resetBtn" class="danger">Reset</button>
       </div>
     </header>
 
-    <main class="layout">
-      <section class="panel controls">
-        <h2>Controls</h2>
-        <form id="configForm">
-          <label>
-            Strategy
-            <select name="strategy">
-              <option value="cold">cold</option>
-              <option value="hot">hot</option>
-              <option value="warm-snapshot">warm-snapshot</option>
-              <option value="hybrid">hybrid</option>
-            </select>
-          </label>
-          <label>
-            Users
-            <input name="targetUsers" type="number" min="1" step="1" />
-          </label>
-          <label>
-            Arrivals / sec
-            <input name="arrivalRatePerSec" type="number" min="0" step="0.1" />
-          </label>
-          <label>
-            Max running VMs
-            <input name="maxActiveVms" type="number" min="1" step="1" />
-          </label>
-          <label>
-            Boot concurrency
-            <input name="bootConcurrency" type="number" min="1" step="1" />
-          </label>
-          <label>
-            Hot TTL ms
-            <input name="hotIdleTtlMs" type="number" min="0" step="1000" />
-          </label>
-          <label>
-            Warm snapshot TTL ms
-            <input name="warmSnapshotTtlMs" type="number" min="0" step="1000" />
-          </label>
-          <label>
-            VM memory
-            <input name="vmMemory" type="text" />
-          </label>
-          <label>
-            Start timeout ms
-            <input name="vmStartTimeoutMs" type="number" min="1" step="1000" />
-          </label>
-          <label>
-            Task iterations
-            <input name="taskCpuIterations" type="number" min="0" step="1000" />
-          </label>
-          <label class="check">
-            <input name="networkEnabled" type="checkbox" />
-            Network
-          </label>
-          <label class="wide">
-            Tiny image path
-            <input name="imagePath" type="text" />
-          </label>
-          <label class="wide">
-            Work directory
-            <input name="workDir" type="text" />
-          </label>
-          <button type="submit">Apply</button>
-        </form>
-
-        <div class="burst">
-          <input id="burstCount" type="number" min="1" value="10" />
-          <button id="burstBtn">Queue Burst</button>
-        </div>
-        <div class="burst">
-          <input id="userTaskId" type="text" placeholder="user-00001" />
-          <button id="userTaskBtn">Queue User</button>
-        </div>
+    <main class="shell">
+      <section class="scoreboard" aria-label="Live score">
+        <article class="score hero-score">
+          <span class="score-label">Tasks Cleared</span>
+          <strong id="scoreCompleted">0</strong>
+          <small id="scoreRun">0 ms avg run</small>
+        </article>
+        <article class="score">
+          <span class="score-label">Waiting</span>
+          <strong id="scoreQueued">0</strong>
+          <small>queued tasks</small>
+        </article>
+        <article class="score">
+          <span class="score-label">VMs Awake</span>
+          <strong id="scoreActive">0</strong>
+          <small id="scoreSlots">0 / 0 slots</small>
+        </article>
+        <article class="score">
+          <span class="score-label">Hot Ready</span>
+          <strong id="scoreHot">0</strong>
+          <small>warm hands</small>
+        </article>
+        <article class="score">
+          <span class="score-label">Saved State</span>
+          <strong id="scoreWarm">0</strong>
+          <small id="scoreSnapshotBytes">0 B</small>
+        </article>
+        <article class="score alert-score">
+          <span class="score-label">Fails</span>
+          <strong id="scoreFailed">0</strong>
+          <small id="scoreSnapshotFails">0 snapshot fails</small>
+        </article>
       </section>
 
-      <section class="main">
-        <section id="cards" class="cards"></section>
-        <section class="panel chart-panel">
-          <div class="section-head">
-            <h2>Resource History</h2>
-            <span id="statusPill" class="pill">paused</span>
+      <section class="game-grid">
+        <section class="arena-panel board-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Session Board</h2>
+              <p id="boardSubtitle">Live lanes update twice per second</p>
+            </div>
+            <button id="burstBtn" class="primary">Queue Burst</button>
           </div>
-          <canvas id="historyChart" width="960" height="260"></canvas>
+          <div class="lane-grid" id="laneGrid"></div>
         </section>
 
-        <section class="grid2">
-          <div class="panel">
-            <h2>Sessions</h2>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>User</th>
-                    <th>Status</th>
-                    <th>PID</th>
-                    <th>Tasks</th>
-                    <th>Snapshot</th>
-                    <th>Last result</th>
-                  </tr>
-                </thead>
-                <tbody id="sessionsBody"></tbody>
-              </table>
+        <aside class="arena-panel control-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Mission Control</h2>
+              <p id="strategyReadout">hybrid strategy</p>
+            </div>
+            <button id="topApplyConfigBtn" class="primary">Apply</button>
+          </div>
+          <form id="configForm" class="settings">
+            <label class="full">
+              Strategy
+              <select name="strategy">
+                <option value="cold">Cold: boot every task</option>
+                <option value="hot">Hot: keep idle VMs</option>
+                <option value="warm-snapshot">Warm: save VM state</option>
+                <option value="hybrid">Hybrid: hot then saved</option>
+              </select>
+            </label>
+            <label>
+              Users
+              <input name="targetUsers" type="number" min="1" step="1" />
+            </label>
+            <label>
+              Tasks / sec
+              <input name="arrivalRatePerSec" type="number" min="0" step="0.1" />
+            </label>
+            <label>
+              VM slots
+              <input name="maxActiveVms" type="number" min="1" step="1" />
+            </label>
+            <label>
+              Boot gates
+              <input name="bootConcurrency" type="number" min="1" step="1" />
+            </label>
+            <label>
+              Hot TTL ms
+              <input name="hotIdleTtlMs" type="number" min="0" step="1000" />
+            </label>
+            <label>
+              Save TTL ms
+              <input name="warmSnapshotTtlMs" type="number" min="0" step="1000" />
+            </label>
+            <label>
+              VM memory
+              <input name="vmMemory" type="text" />
+            </label>
+            <label>
+              Timeout ms
+              <input name="vmStartTimeoutMs" type="number" min="1" step="1" />
+            </label>
+            <label>
+              CPU work
+              <input name="taskCpuIterations" type="number" min="0" step="1000" />
+            </label>
+            <label class="switch-row">
+              Network
+              <input name="networkEnabled" type="checkbox" />
+            </label>
+            <label class="full">
+              Image path
+              <input name="imagePath" type="text" />
+            </label>
+            <label class="full">
+              Work path
+              <input name="workDir" type="text" />
+            </label>
+            <button id="applyConfigBtn" type="submit" class="primary full">
+              Apply Settings
+            </button>
+          </form>
+
+          <div class="quick-queue">
+            <label>
+              Burst size
+              <input id="burstCount" type="number" min="1" value="10" />
+            </label>
+            <label>
+              User task
+              <input id="userTaskId" type="text" placeholder="user-00001" />
+            </label>
+            <button id="userTaskBtn">Queue User</button>
+          </div>
+        </aside>
+      </section>
+
+      <section class="lower-grid">
+        <section class="arena-panel meter-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Power Meters</h2>
+              <p id="resourceReadout">waiting for data</p>
             </div>
           </div>
-          <div class="panel">
-            <h2>Events</h2>
-            <ol id="eventsList" class="events"></ol>
+          <div class="meters">
+            <div class="meter">
+              <div class="meter-row">
+                <span>Slot pressure</span>
+                <strong id="slotText">0%</strong>
+              </div>
+              <div class="bar"><span id="slotBar"></span></div>
+            </div>
+            <div class="meter">
+              <div class="meter-row">
+                <span>VMM memory</span>
+                <strong id="rssText">0 B</strong>
+              </div>
+              <div class="bar"><span id="rssBar"></span></div>
+            </div>
+            <div class="meter">
+              <div class="meter-row">
+                <span>Host free</span>
+                <strong id="hostText">0 B</strong>
+              </div>
+              <div class="bar"><span id="hostBar"></span></div>
+            </div>
+            <div class="meter">
+              <div class="meter-row">
+                <span>Queue heat</span>
+                <strong id="queueText">0%</strong>
+              </div>
+              <div class="bar"><span id="queueBar"></span></div>
+            </div>
           </div>
+          <canvas id="historyChart" width="980" height="280"></canvas>
+        </section>
+
+        <section class="arena-panel feed-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Activity Feed</h2>
+              <p id="feedSummary">no events yet</p>
+            </div>
+          </div>
+          <ol id="eventsList" class="events"></ol>
+        </section>
+
+        <section class="arena-panel roster-panel">
+          <div class="panel-head">
+            <div>
+              <h2>User Roster</h2>
+              <p id="rosterSummary">no sessions yet</p>
+            </div>
+          </div>
+          <div id="sessionsList" class="sessions"></div>
         </section>
       </section>
     </main>

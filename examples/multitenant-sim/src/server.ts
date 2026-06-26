@@ -35,6 +35,11 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/stream") {
+    streamState(req, res);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/config") {
     simulator.updateConfig(await readJson(req));
     sendJson(res, 200, await simulator.snapshotState());
@@ -132,6 +137,34 @@ function contentType(filePath: string) {
   if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
   if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
   return "application/octet-stream";
+}
+
+function streamState(req: http.IncomingMessage, res: http.ServerResponse) {
+  let closed = false;
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-store",
+    connection: "keep-alive",
+  });
+
+  const send = async () => {
+    if (closed) return;
+    try {
+      const state = await simulator.snapshotState();
+      res.write(`data: ${JSON.stringify(state)}\n\n`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.write(`event: error\ndata: ${JSON.stringify({ error: message })}\n\n`);
+    }
+  };
+
+  void send();
+  const timer = setInterval(() => void send(), 500);
+  timer.unref?.();
+  req.on("close", () => {
+    closed = true;
+    clearInterval(timer);
+  });
 }
 
 server.listen(simulator.getConfig().port, () => {

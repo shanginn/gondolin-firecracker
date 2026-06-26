@@ -1,68 +1,126 @@
 let latest = null;
 let formReady = false;
+let lastLiveAt = 0;
 
-const cards = document.querySelector("#cards");
-const form = document.querySelector("#configForm");
-const sessionsBody = document.querySelector("#sessionsBody");
-const eventsList = document.querySelector("#eventsList");
-const statusPill = document.querySelector("#statusPill");
-const chart = document.querySelector("#historyChart");
+const $ = (selector) => document.querySelector(selector);
 
-document.querySelector("#startBtn").addEventListener("click", () => post("/api/start"));
-document.querySelector("#pauseBtn").addEventListener("click", () => post("/api/pause"));
-document.querySelector("#resetBtn").addEventListener("click", () => post("/api/reset"));
-document.querySelector("#burstBtn").addEventListener("click", () =>
-  post("/api/burst", { count: Number(document.querySelector("#burstCount").value || 1) }),
+const form = $("#configForm");
+const chart = $("#historyChart");
+const streamStatus = $("#streamStatus");
+
+const score = {
+  completed: $("#scoreCompleted"),
+  run: $("#scoreRun"),
+  queued: $("#scoreQueued"),
+  active: $("#scoreActive"),
+  slots: $("#scoreSlots"),
+  hot: $("#scoreHot"),
+  warm: $("#scoreWarm"),
+  snapshotBytes: $("#scoreSnapshotBytes"),
+  failed: $("#scoreFailed"),
+  snapshotFails: $("#scoreSnapshotFails"),
+};
+
+$("#startBtn").addEventListener("click", () => post("/api/start"));
+$("#pauseBtn").addEventListener("click", () => post("/api/pause"));
+$("#resetBtn").addEventListener("click", () => post("/api/reset"));
+$("#burstBtn").addEventListener("click", () =>
+  post("/api/burst", { count: Number($("#burstCount").value || 1) }),
 );
-document.querySelector("#userTaskBtn").addEventListener("click", () =>
-  post("/api/user-task", { userId: document.querySelector("#userTaskId").value }),
+$("#userTaskBtn").addEventListener("click", () =>
+  post("/api/user-task", { userId: $("#userTaskId").value }),
 );
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  const data = new FormData(form);
-  post("/api/config", {
-    strategy: data.get("strategy"),
-    targetUsers: Number(data.get("targetUsers")),
-    arrivalRatePerSec: Number(data.get("arrivalRatePerSec")),
-    maxActiveVms: Number(data.get("maxActiveVms")),
-    bootConcurrency: Number(data.get("bootConcurrency")),
-    hotIdleTtlMs: Number(data.get("hotIdleTtlMs")),
-    warmSnapshotTtlMs: Number(data.get("warmSnapshotTtlMs")),
-    vmMemory: String(data.get("vmMemory") || ""),
-    vmStartTimeoutMs: Number(data.get("vmStartTimeoutMs")),
-    taskCpuIterations: Number(data.get("taskCpuIterations")),
-    networkEnabled: Boolean(data.get("networkEnabled")),
-    imagePath: String(data.get("imagePath") || ""),
-    workDir: String(data.get("workDir") || ""),
-  });
+  submitConfig();
+});
+$("#applyConfigBtn").addEventListener("click", (event) => {
+  event.preventDefault();
+  submitConfig();
+});
+$("#topApplyConfigBtn").addEventListener("click", (event) => {
+  event.preventDefault();
+  submitConfig();
 });
 
-async function post(url, body = {}) {
+function submitConfig() {
+  const data = new FormData(form);
+  post(
+    "/api/config",
+    {
+      strategy: data.get("strategy"),
+      targetUsers: Number(data.get("targetUsers")),
+      arrivalRatePerSec: Number(data.get("arrivalRatePerSec")),
+      maxActiveVms: Number(data.get("maxActiveVms")),
+      bootConcurrency: Number(data.get("bootConcurrency")),
+      hotIdleTtlMs: Number(data.get("hotIdleTtlMs")),
+      warmSnapshotTtlMs: Number(data.get("warmSnapshotTtlMs")),
+      vmMemory: String(data.get("vmMemory") || ""),
+      vmStartTimeoutMs: Number(data.get("vmStartTimeoutMs")),
+      taskCpuIterations: Number(data.get("taskCpuIterations")),
+      networkEnabled: Boolean(data.get("networkEnabled")),
+      imagePath: String(data.get("imagePath") || ""),
+      workDir: String(data.get("workDir") || ""),
+    },
+    true,
+  );
+}
+
+async function post(url, body = {}, refill = false) {
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  latest = await response.json();
-  render();
+  renderState(await response.json());
+  if (refill && latest) fillForm(latest.config);
 }
 
-async function poll() {
+function connectStream() {
+  if (!window.EventSource) {
+    streamStatus.textContent = "polling";
+    setInterval(pollOnce, 1000);
+    void pollOnce();
+    return;
+  }
+
+  const source = new EventSource("/api/stream");
+  source.onopen = () => setStreamStatus("live", true);
+  source.onmessage = (event) => {
+    lastLiveAt = Date.now();
+    setStreamStatus("live", true);
+    renderState(JSON.parse(event.data));
+  };
+  source.onerror = () => setStreamStatus("reconnecting", false);
+
+  setInterval(() => {
+    if (Date.now() - lastLiveAt > 2500) void pollOnce();
+  }, 1500);
+}
+
+async function pollOnce() {
   try {
     const response = await fetch("/api/state");
-    latest = await response.json();
-    render();
-  } catch (error) {
-    console.error(error);
+    renderState(await response.json());
+  } catch {
+    setStreamStatus("offline", false);
   }
 }
 
-function render() {
-  if (!latest) return;
-  if (!formReady) fillForm(latest.config);
-  renderCards();
-  renderStatus();
+function setStreamStatus(text, online) {
+  streamStatus.textContent = text;
+  streamStatus.classList.toggle("on", online);
+  streamStatus.classList.toggle("off", !online);
+}
+
+function renderState(state) {
+  latest = state;
+  if (!formReady) fillForm(state.config);
+  renderHeader();
+  renderScore();
+  renderLanes();
+  renderMeters();
   renderSessions();
   renderEvents();
   drawChart();
@@ -72,80 +130,173 @@ function fillForm(config) {
   for (const [key, value] of Object.entries(config)) {
     const input = form.elements.namedItem(key);
     if (!input) continue;
-    if (input.type === "checkbox") {
-      input.checked = Boolean(value);
-    } else {
-      input.value = value;
-    }
+    if (input.type === "checkbox") input.checked = Boolean(value);
+    else input.value = value;
   }
   formReady = true;
 }
 
-function renderStatus() {
-  statusPill.textContent = latest.running ? "running" : "paused";
-  statusPill.classList.toggle("paused", !latest.running);
+function renderHeader() {
+  $("#runState").textContent = latest.running ? "running" : "paused";
+  $("#runState").classList.toggle("running", latest.running);
+  $("#strategyReadout").textContent = `${latest.config.strategy} strategy`;
+  document.body.dataset.running = latest.running ? "true" : "false";
 }
 
-function renderCards() {
-  const c = latest.counts;
-  const m = latest.metrics;
-  const r = latest.resource;
-  const active = (c.running || 0) + (c.starting || 0) + (c.snapshotting || 0);
-  const items = [
-    ["Queued", c.queued || 0],
-    ["Active VMs", active],
-    ["Hot VMs", c.hot || 0],
-    ["Warm states", c.warm || 0],
-    ["Tasks done", m.tasksCompleted],
-    ["Failed", m.tasksFailed],
-    ["VMM RSS", bytes(r.vmmRssBytes)],
-    ["Host RSS", bytes(r.processRssBytes)],
-    ["Host free", bytes(r.freeMemBytes)],
-    ["Snapshots", bytes(m.snapshotBytes)],
-    ["Cold boots", m.coldBoots],
-    ["Restores", m.restores],
-    ["Snapshot fails", m.snapshotFailures],
-    ["Evictions", m.pressureEvictions],
-    ["Avg wait", ms(m.avgWaitMs)],
-    ["Avg run", ms(m.avgRunMs)],
+function renderScore() {
+  const counts = latest.counts;
+  const metrics = latest.metrics;
+  const active = activeCount(counts);
+  score.completed.textContent = metrics.tasksCompleted;
+  score.run.textContent = `${ms(metrics.avgRunMs)} avg run`;
+  score.queued.textContent = counts.queued || 0;
+  score.active.textContent = active;
+  score.slots.textContent = `${counts.slots || 0} / ${latest.config.maxActiveVms} slots`;
+  score.hot.textContent = counts.hot || 0;
+  score.warm.textContent = counts.warm || 0;
+  score.snapshotBytes.textContent = bytes(metrics.snapshotBytes);
+  score.failed.textContent = metrics.tasksFailed;
+  score.snapshotFails.textContent = `${metrics.snapshotFailures} snapshot fails`;
+}
+
+function renderLanes() {
+  const counts = latest.counts;
+  const lanes = [
+    {
+      key: "queued",
+      title: "Queue",
+      value: counts.queued || 0,
+      statuses: ["queued"],
+    },
+    {
+      key: "active",
+      title: "Booting + Running",
+      value: activeCount(counts),
+      statuses: ["starting", "running", "snapshotting", "closing"],
+    },
+    {
+      key: "hot",
+      title: "Hot VMs",
+      value: counts.hot || 0,
+      statuses: ["hot"],
+    },
+    {
+      key: "warm",
+      title: "Saved VMs",
+      value: counts.warm || 0,
+      statuses: ["warm"],
+    },
+    {
+      key: "error",
+      title: "Needs Attention",
+      value: counts.error || latest.metrics.tasksFailed || 0,
+      statuses: ["error"],
+    },
   ];
-  cards.replaceChildren(
-    ...items.map(([label, value]) => {
-      const node = document.createElement("div");
-      node.className = "card";
-      node.innerHTML = `<div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(String(value))}</div>`;
+
+  $("#laneGrid").replaceChildren(
+    ...lanes.map((lane) => {
+      const sessions = latest.sessions
+        .filter((session) => lane.statuses.includes(session.status))
+        .slice(0, 24);
+      const node = el("article", `lane lane-${lane.key}`);
+      const head = el("div", "lane-head");
+      head.append(el("span", "", lane.title), el("strong", "", String(lane.value)));
+      const tokens = el("div", "tokens");
+      if (sessions.length === 0) {
+        tokens.append(el("span", "empty-token", "clear"));
+      } else {
+        for (const session of sessions) tokens.append(sessionToken(session));
+      }
+      node.append(head, tokens);
       return node;
     }),
   );
 }
 
+function sessionToken(session) {
+  const token = el("div", `token token-${session.status}`);
+  token.title = `${session.id} ${session.status}`;
+  token.append(
+    el("span", "token-dot"),
+    el("span", "token-id", compactUser(session.id)),
+    el("span", "token-tasks", String(session.tasksCompleted)),
+  );
+  return token;
+}
+
+function renderMeters() {
+  const counts = latest.counts;
+  const config = latest.config;
+  const resource = latest.resource;
+  const metrics = latest.metrics;
+  const activeSlots = counts.slots || 0;
+  const slotRatio = ratio(activeSlots, config.maxActiveVms);
+  const queueRatio = ratio(counts.queued || 0, Math.max(1, config.maxActiveVms * 2));
+  const vmMemBytes = parseBytes(config.vmMemory);
+  const rssLimit = vmMemBytes ? vmMemBytes * Math.max(1, config.maxActiveVms) * 1.5 : 1;
+  const rssRatio = ratio(resource.vmmRssBytes, rssLimit);
+  const hostFreeRatio = ratio(resource.freeMemBytes, resource.totalMemBytes);
+
+  setBar("#slotBar", slotRatio);
+  setBar("#rssBar", rssRatio);
+  setBar("#hostBar", hostFreeRatio);
+  setBar("#queueBar", queueRatio);
+  $("#slotText").textContent = percent(slotRatio);
+  $("#rssText").textContent = bytes(resource.vmmRssBytes);
+  $("#hostText").textContent = bytes(resource.freeMemBytes);
+  $("#queueText").textContent = percent(queueRatio);
+  $("#resourceReadout").textContent =
+    `cold ${metrics.coldBoots} | restores ${metrics.restores} | host ${bytes(resource.processRssBytes)}`;
+}
+
+function setBar(selector, value) {
+  $(selector).style.width = `${Math.round(Math.max(0.02, Math.min(1, value)) * 100)}%`;
+}
+
 function renderSessions() {
-  sessionsBody.replaceChildren(
-    ...latest.sessions.map((session) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = [
-        session.id,
-        session.status,
-        session.pid || "",
-        session.tasksCompleted,
-        session.snapshotBytes ? bytes(session.snapshotBytes) : "",
-        session.lastError || session.lastResult || "",
-      ]
-        .map((value) => `<td>${escapeHtml(String(value))}</td>`)
-        .join("");
-      return tr;
-    }),
+  $("#rosterSummary").textContent = `${latest.sessions.length} visible sessions`;
+  const sessions = latest.sessions.slice(0, 18);
+  $("#sessionsList").replaceChildren(
+    ...(sessions.length
+      ? sessions.map((session) => {
+          const card = el("article", `session-card status-${session.status}`);
+          card.append(
+            el("strong", "", session.id),
+            el("span", "session-status", session.status),
+            el(
+              "small",
+              "",
+              `tasks ${session.tasksCompleted} | pid ${session.pid || "none"}`,
+            ),
+            el(
+              "p",
+              session.lastError ? "bad" : "",
+              session.lastError || session.lastResult || "waiting",
+            ),
+          );
+          return card;
+        })
+      : [el("div", "empty-panel", "No user sessions yet")]),
   );
 }
 
 function renderEvents() {
-  eventsList.replaceChildren(
-    ...latest.events.map((event) => {
-      const li = document.createElement("li");
-      li.className = event.level;
-      li.textContent = `${new Date(event.at).toLocaleTimeString()} ${event.message}`;
-      return li;
-    }),
+  const events = latest.events.slice(0, 40);
+  $("#feedSummary").textContent = events.length
+    ? `${events.length} recent events`
+    : "no events yet";
+  $("#eventsList").replaceChildren(
+    ...(events.length
+      ? events.map((event) => {
+          const item = el("li", event.level);
+          item.append(
+            el("span", "event-time", new Date(event.at).toLocaleTimeString()),
+            el("span", "event-text", event.message),
+          );
+          return item;
+        })
+      : [el("li", "info", "Waiting for arena events")]),
   );
 }
 
@@ -156,35 +307,41 @@ function drawChart() {
   const height = chart.clientHeight;
   chart.width = Math.floor(width * dpr);
   chart.height = Math.floor(height * dpr);
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
   const history = latest.history || [];
-  if (history.length < 2) return;
-  const pad = 28;
+  if (history.length < 2) {
+    ctx.fillStyle = "#657182";
+    ctx.font = "13px system-ui";
+    ctx.fillText("Waiting for live samples", 24, 42);
+    return;
+  }
+
+  const pad = 30;
   const maxCount = Math.max(
     1,
     ...history.map((p) => Math.max(p.queued, p.active, p.hot, p.warm)),
   );
   const maxRss = Math.max(1, ...history.map((p) => p.vmmRssBytes));
 
-  grid(ctx, width, height, pad);
-  line(ctx, history, width, height, pad, maxCount, "queued", "#b45309");
-  line(ctx, history, width, height, pad, maxCount, "active", "#0f766e");
-  line(ctx, history, width, height, pad, maxCount, "hot", "#1d4ed8");
-  line(ctx, history, width, height, pad, maxCount, "warm", "#7c3aed");
-  line(ctx, history, width, height, pad, maxRss, "vmmRssBytes", "#111827");
-  legend(ctx, [
-    ["queued", "#b45309"],
-    ["active", "#0f766e"],
-    ["hot", "#1d4ed8"],
-    ["warm", "#7c3aed"],
-    ["rss", "#111827"],
+  drawGrid(ctx, width, height, pad);
+  drawLine(ctx, history, width, height, pad, maxCount, "queued", "#c47a11");
+  drawLine(ctx, history, width, height, pad, maxCount, "active", "#009b72");
+  drawLine(ctx, history, width, height, pad, maxCount, "hot", "#2563eb");
+  drawLine(ctx, history, width, height, pad, maxCount, "warm", "#8b5cf6");
+  drawLine(ctx, history, width, height, pad, maxRss, "vmmRssBytes", "#e11d48");
+  drawLegend(ctx, [
+    ["queue", "#c47a11"],
+    ["active", "#009b72"],
+    ["hot", "#2563eb"],
+    ["saved", "#8b5cf6"],
+    ["rss", "#e11d48"],
   ]);
 }
 
-function grid(ctx, width, height, pad) {
-  ctx.strokeStyle = "#e5e7eb";
+function drawGrid(ctx, width, height, pad) {
+  ctx.strokeStyle = "#d8dee9";
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i += 1) {
     const y = pad + ((height - pad * 2) * i) / 4;
@@ -195,9 +352,10 @@ function grid(ctx, width, height, pad) {
   }
 }
 
-function line(ctx, history, width, height, pad, max, key, color) {
+function drawLine(ctx, history, width, height, pad, max, key, color) {
   ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 3;
+  ctx.lineJoin = "round";
   ctx.beginPath();
   history.forEach((point, index) => {
     const x = pad + ((width - pad * 2) * index) / (history.length - 1);
@@ -208,16 +366,47 @@ function line(ctx, history, width, height, pad, max, key, color) {
   ctx.stroke();
 }
 
-function legend(ctx, items) {
+function drawLegend(ctx, items) {
   ctx.font = "12px system-ui";
   let x = 34;
   for (const [label, color] of items) {
     ctx.fillStyle = color;
     ctx.fillRect(x, 10, 10, 10);
-    ctx.fillStyle = "#374151";
+    ctx.fillStyle = "#354052";
     ctx.fillText(label, x + 14, 20);
     x += 78;
   }
+}
+
+function activeCount(counts) {
+  return (
+    (counts.running || 0) +
+    (counts.starting || 0) +
+    (counts.snapshotting || 0) +
+    (counts.closing || 0)
+  );
+}
+
+function compactUser(id) {
+  return id.replace(/^user-0*/, "u");
+}
+
+function ratio(value, max) {
+  if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return 0;
+  return Math.max(0, Math.min(1, value / max));
+}
+
+function percent(value) {
+  return `${Math.round(value * 100)}%`;
+}
+
+function parseBytes(value) {
+  const match = String(value).trim().match(/^(\d+(?:\.\d+)?)([kmgt])?b?$/i);
+  if (!match) return 0;
+  const n = Number(match[1]);
+  const unit = (match[2] || "").toUpperCase();
+  const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4 };
+  return n * scale[unit];
 }
 
 function bytes(value) {
@@ -237,22 +426,11 @@ function ms(value) {
   return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(0)} ms`;
 }
 
-function escapeHtml(value) {
-  return value.replace(/[&<>"']/g, (char) => {
-    switch (char) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case '"':
-        return "&quot;";
-      default:
-        return "&#39;";
-    }
-  });
+function el(tag, className = "", text = "") {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text) node.textContent = text;
+  return node;
 }
 
-poll();
-setInterval(poll, 1000);
+connectStream();
