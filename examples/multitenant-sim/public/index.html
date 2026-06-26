@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gondolin Multitenant Simulator</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Gondolin Multitenant Simulator</h1>
+        <p>PI-style user sessions backed by tiny Firecracker VMs</p>
+      </div>
+      <div class="top-actions">
+        <button id="startBtn">Start</button>
+        <button id="pauseBtn">Pause</button>
+        <button id="resetBtn" class="secondary">Reset</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel controls">
+        <h2>Controls</h2>
+        <form id="configForm">
+          <label>
+            Strategy
+            <select name="strategy">
+              <option value="cold">cold</option>
+              <option value="hot">hot</option>
+              <option value="warm-snapshot">warm-snapshot</option>
+              <option value="hybrid">hybrid</option>
+            </select>
+          </label>
+          <label>
+            Users
+            <input name="targetUsers" type="number" min="1" step="1" />
+          </label>
+          <label>
+            Arrivals / sec
+            <input name="arrivalRatePerSec" type="number" min="0" step="0.1" />
+          </label>
+          <label>
+            Max running VMs
+            <input name="maxActiveVms" type="number" min="1" step="1" />
+          </label>
+          <label>
+            Boot concurrency
+            <input name="bootConcurrency" type="number" min="1" step="1" />
+          </label>
+          <label>
+            Hot TTL ms
+            <input name="hotIdleTtlMs" type="number" min="0" step="1000" />
+          </label>
+          <label>
+            Warm snapshot TTL ms
+            <input name="warmSnapshotTtlMs" type="number" min="0" step="1000" />
+          </label>
+          <label>
+            VM memory
+            <input name="vmMemory" type="text" />
+          </label>
+          <label>
+            Start timeout ms
+            <input name="vmStartTimeoutMs" type="number" min="1" step="1000" />
+          </label>
+          <label>
+            Task iterations
+            <input name="taskCpuIterations" type="number" min="0" step="1000" />
+          </label>
+          <label class="check">
+            <input name="networkEnabled" type="checkbox" />
+            Network
+          </label>
+          <label class="wide">
+            Tiny image path
+            <input name="imagePath" type="text" />
+          </label>
+          <label class="wide">
+            Work directory
+            <input name="workDir" type="text" />
+          </label>
+          <button type="submit">Apply</button>
+        </form>
+
+        <div class="burst">
+          <input id="burstCount" type="number" min="1" value="10" />
+          <button id="burstBtn">Queue Burst</button>
+        </div>
+        <div class="burst">
+          <input id="userTaskId" type="text" placeholder="user-00001" />
+          <button id="userTaskBtn">Queue User</button>
+        </div>
+      </section>
+
+      <section class="main">
+        <section id="cards" class="cards"></section>
+        <section class="panel chart-panel">
+          <div class="section-head">
+            <h2>Resource History</h2>
+            <span id="statusPill" class="pill">paused</span>
+          </div>
+          <canvas id="historyChart" width="960" height="260"></canvas>
+        </section>
+
+        <section class="grid2">
+          <div class="panel">
+            <h2>Sessions</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Status</th>
+                    <th>PID</th>
+                    <th>Tasks</th>
+                    <th>Snapshot</th>
+                    <th>Last result</th>
+                  </tr>
+                </thead>
+                <tbody id="sessionsBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>Events</h2>
+            <ol id="eventsList" class="events"></ol>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

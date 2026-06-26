@@ -182,3 +182,7 @@ Repo layout:
 - [Kubernetes](docs/kubernetes.md)
 - [Security](docs/security.md)
 - [Limitations](docs/limitations.md)
+
+## Examples
+
+- [Multitenant simulator](examples/multitenant-sim/README.md) - dashboard for testing cold, hot, warm snapshot, and hybrid tiny-VM session strategies
