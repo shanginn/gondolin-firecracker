@@ -1,24 +1,18 @@
 let latest = null;
 let formReady = false;
+let saveTimer = null;
 let lastLiveAt = 0;
 
 const $ = (selector) => document.querySelector(selector);
-
 const form = $("#configForm");
-const chart = $("#historyChart");
 const streamStatus = $("#streamStatus");
 
-const score = {
-  completed: $("#scoreCompleted"),
-  run: $("#scoreRun"),
-  queued: $("#scoreQueued"),
-  active: $("#scoreActive"),
-  slots: $("#scoreSlots"),
-  hot: $("#scoreHot"),
-  warm: $("#scoreWarm"),
-  snapshotBytes: $("#scoreSnapshotBytes"),
-  failed: $("#scoreFailed"),
-  snapshotFails: $("#scoreSnapshotFails"),
+const outputs = {
+  targetUsers: $("#targetUsersOut"),
+  arrivalRatePerSec: $("#arrivalRatePerSecOut"),
+  maxActiveVms: $("#maxActiveVmsOut"),
+  bootConcurrency: $("#bootConcurrencyOut"),
+  taskCpuIterations: $("#taskCpuIterationsOut"),
 };
 
 $("#startBtn").addEventListener("click", () => post("/api/start"));
@@ -27,54 +21,78 @@ $("#resetBtn").addEventListener("click", () => post("/api/reset"));
 $("#burstBtn").addEventListener("click", () =>
   post("/api/burst", { count: Number($("#burstCount").value || 1) }),
 );
-$("#userTaskBtn").addEventListener("click", () =>
-  post("/api/user-task", { userId: $("#userTaskId").value }),
-);
+$("#copyReportBtn").addEventListener("click", copyReport);
+$("#downloadReportBtn").addEventListener("click", downloadReport);
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  submitConfig();
-});
-$("#applyConfigBtn").addEventListener("click", (event) => {
-  event.preventDefault();
-  submitConfig();
-});
-$("#topApplyConfigBtn").addEventListener("click", (event) => {
-  event.preventDefault();
-  submitConfig();
+  submitConfig("advanced saved");
 });
 
-function submitConfig() {
-  const data = new FormData(form);
-  post(
-    "/api/config",
-    {
-      strategy: data.get("strategy"),
-      targetUsers: Number(data.get("targetUsers")),
-      arrivalRatePerSec: Number(data.get("arrivalRatePerSec")),
-      maxActiveVms: Number(data.get("maxActiveVms")),
-      bootConcurrency: Number(data.get("bootConcurrency")),
-      hotIdleTtlMs: Number(data.get("hotIdleTtlMs")),
-      warmSnapshotTtlMs: Number(data.get("warmSnapshotTtlMs")),
-      vmMemory: String(data.get("vmMemory") || ""),
-      vmStartTimeoutMs: Number(data.get("vmStartTimeoutMs")),
-      taskCpuIterations: Number(data.get("taskCpuIterations")),
-      networkEnabled: Boolean(data.get("networkEnabled")),
-      imagePath: String(data.get("imagePath") || ""),
-      workDir: String(data.get("workDir") || ""),
-    },
-    true,
-  );
+form.addEventListener("input", (event) => {
+  updateOutputs();
+  if (event.target.matches("[data-live]")) scheduleSubmit();
+});
+
+form.addEventListener("change", (event) => {
+  updateOutputs();
+  if (event.target.matches("[data-live]")) submitConfig("saved");
+});
+
+$("#strategyButtons").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-strategy]");
+  if (!button) return;
+  form.elements.strategy.value = button.dataset.strategy;
+  updateStrategyButtons();
+  submitConfig("strategy saved");
+});
+
+document.querySelectorAll("[data-preset]").forEach((button) => {
+  button.addEventListener("click", () => {
+    applyPreset(button.dataset.preset);
+    submitConfig(`${button.textContent} loaded`);
+  });
+});
+
+function scheduleSubmit() {
+  $("#saveStatus").textContent = "saving...";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => submitConfig("saved"), 350);
 }
 
-async function post(url, body = {}, refill = false) {
+function submitConfig(message = "saved") {
+  clearTimeout(saveTimer);
+  post("/api/config", configFromForm()).then(() => {
+    $("#saveStatus").textContent = message;
+  });
+}
+
+function configFromForm() {
+  const data = new FormData(form);
+  return {
+    strategy: data.get("strategy"),
+    targetUsers: Number(data.get("targetUsers")),
+    arrivalRatePerSec: Number(data.get("arrivalRatePerSec")),
+    maxActiveVms: Number(data.get("maxActiveVms")),
+    bootConcurrency: Number(data.get("bootConcurrency")),
+    hotIdleTtlMs: Number(data.get("hotIdleTtlMs")),
+    warmSnapshotTtlMs: Number(data.get("warmSnapshotTtlMs")),
+    vmMemory: String(data.get("vmMemory") || ""),
+    vmStartTimeoutMs: Number(data.get("vmStartTimeoutMs")),
+    taskCpuIterations: Number(data.get("taskCpuIterations")),
+    networkEnabled: Boolean(data.get("networkEnabled")),
+    imagePath: String(data.get("imagePath") || ""),
+    workDir: String(data.get("workDir") || ""),
+  };
+}
+
+async function post(url, body = {}) {
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   renderState(await response.json());
-  if (refill && latest) fillForm(latest.config);
 }
 
 function connectStream() {
@@ -117,13 +135,11 @@ function setStreamStatus(text, online) {
 function renderState(state) {
   latest = state;
   if (!formReady) fillForm(state.config);
-  renderHeader();
-  renderScore();
-  renderLanes();
-  renderMeters();
-  renderSessions();
+  renderTop();
+  renderWorld();
+  renderHealth();
   renderEvents();
-  drawChart();
+  renderReport();
 }
 
 function fillForm(config) {
@@ -134,248 +150,243 @@ function fillForm(config) {
     else input.value = value;
   }
   formReady = true;
+  updateOutputs();
+  updateStrategyButtons();
 }
 
-function renderHeader() {
+function updateOutputs() {
+  outputs.targetUsers.textContent = form.elements.targetUsers.value;
+  outputs.arrivalRatePerSec.textContent = `${form.elements.arrivalRatePerSec.value} / sec`;
+  outputs.maxActiveVms.textContent = form.elements.maxActiveVms.value;
+  outputs.bootConcurrency.textContent = form.elements.bootConcurrency.value;
+  outputs.taskCpuIterations.textContent = form.elements.taskCpuIterations.value;
+}
+
+function updateStrategyButtons() {
+  const value = form.elements.strategy.value;
+  document.querySelectorAll("[data-strategy]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.strategy === value);
+  });
+}
+
+function renderTop() {
+  const c = latest.counts;
+  const m = latest.metrics;
   $("#runState").textContent = latest.running ? "running" : "paused";
   $("#runState").classList.toggle("running", latest.running);
-  $("#strategyReadout").textContent = `${latest.config.strategy} strategy`;
-  document.body.dataset.running = latest.running ? "true" : "false";
+  $("#doneText").textContent = m.tasksCompleted;
+  $("#waitText").textContent = c.queued || 0;
+  $("#vmText").textContent = `${c.slots || 0}/${latest.config.maxActiveVms}`;
+  $("#memoryText").textContent = bytes(latest.resource.vmmRssBytes);
 }
 
-function renderScore() {
+function renderWorld() {
   const counts = latest.counts;
-  const metrics = latest.metrics;
-  const active = activeCount(counts);
-  score.completed.textContent = metrics.tasksCompleted;
-  score.run.textContent = `${ms(metrics.avgRunMs)} avg run`;
-  score.queued.textContent = counts.queued || 0;
-  score.active.textContent = active;
-  score.slots.textContent = `${counts.slots || 0} / ${latest.config.maxActiveVms} slots`;
-  score.hot.textContent = counts.hot || 0;
-  score.warm.textContent = counts.warm || 0;
-  score.snapshotBytes.textContent = bytes(metrics.snapshotBytes);
-  score.failed.textContent = metrics.tasksFailed;
-  score.snapshotFails.textContent = `${metrics.snapshotFailures} snapshot fails`;
+  $("#zoneQueued").textContent = counts.queued || 0;
+  $("#zoneActive").textContent = activeCount(counts);
+  $("#zoneHot").textContent = counts.hot || 0;
+  $("#zoneWarm").textContent = counts.warm || 0;
+  fillTokens("#queueTokens", ["queued"]);
+  fillTokens("#activeTokens", ["starting", "running", "snapshotting", "closing"]);
+  fillTokens("#hotTokens", ["hot"]);
+  fillTokens("#warmTokens", ["warm"]);
 }
 
-function renderLanes() {
-  const counts = latest.counts;
-  const lanes = [
-    {
-      key: "queued",
-      title: "Queue",
-      value: counts.queued || 0,
-      statuses: ["queued"],
-    },
-    {
-      key: "active",
-      title: "Booting + Running",
-      value: activeCount(counts),
-      statuses: ["starting", "running", "snapshotting", "closing"],
-    },
-    {
-      key: "hot",
-      title: "Hot VMs",
-      value: counts.hot || 0,
-      statuses: ["hot"],
-    },
-    {
-      key: "warm",
-      title: "Saved VMs",
-      value: counts.warm || 0,
-      statuses: ["warm"],
-    },
-    {
-      key: "error",
-      title: "Needs Attention",
-      value: counts.error || latest.metrics.tasksFailed || 0,
-      statuses: ["error"],
-    },
-  ];
-
-  $("#laneGrid").replaceChildren(
-    ...lanes.map((lane) => {
-      const sessions = latest.sessions
-        .filter((session) => lane.statuses.includes(session.status))
-        .slice(0, 24);
-      const node = el("article", `lane lane-${lane.key}`);
-      const head = el("div", "lane-head");
-      head.append(el("span", "", lane.title), el("strong", "", String(lane.value)));
-      const tokens = el("div", "tokens");
-      if (sessions.length === 0) {
-        tokens.append(el("span", "empty-token", "clear"));
-      } else {
-        for (const session of sessions) tokens.append(sessionToken(session));
-      }
-      node.append(head, tokens);
-      return node;
-    }),
-  );
-}
-
-function sessionToken(session) {
-  const token = el("div", `token token-${session.status}`);
-  token.title = `${session.id} ${session.status}`;
-  token.append(
-    el("span", "token-dot"),
-    el("span", "token-id", compactUser(session.id)),
-    el("span", "token-tasks", String(session.tasksCompleted)),
-  );
-  return token;
-}
-
-function renderMeters() {
-  const counts = latest.counts;
-  const config = latest.config;
-  const resource = latest.resource;
-  const metrics = latest.metrics;
-  const activeSlots = counts.slots || 0;
-  const slotRatio = ratio(activeSlots, config.maxActiveVms);
-  const queueRatio = ratio(counts.queued || 0, Math.max(1, config.maxActiveVms * 2));
-  const vmMemBytes = parseBytes(config.vmMemory);
-  const rssLimit = vmMemBytes ? vmMemBytes * Math.max(1, config.maxActiveVms) * 1.5 : 1;
-  const rssRatio = ratio(resource.vmmRssBytes, rssLimit);
-  const hostFreeRatio = ratio(resource.freeMemBytes, resource.totalMemBytes);
-
-  setBar("#slotBar", slotRatio);
-  setBar("#rssBar", rssRatio);
-  setBar("#hostBar", hostFreeRatio);
-  setBar("#queueBar", queueRatio);
-  $("#slotText").textContent = percent(slotRatio);
-  $("#rssText").textContent = bytes(resource.vmmRssBytes);
-  $("#hostText").textContent = bytes(resource.freeMemBytes);
-  $("#queueText").textContent = percent(queueRatio);
-  $("#resourceReadout").textContent =
-    `cold ${metrics.coldBoots} | restores ${metrics.restores} | host ${bytes(resource.processRssBytes)}`;
-}
-
-function setBar(selector, value) {
-  $(selector).style.width = `${Math.round(Math.max(0.02, Math.min(1, value)) * 100)}%`;
-}
-
-function renderSessions() {
-  $("#rosterSummary").textContent = `${latest.sessions.length} visible sessions`;
-  const sessions = latest.sessions.slice(0, 18);
-  $("#sessionsList").replaceChildren(
+function fillTokens(selector, statuses) {
+  const sessions = latest.sessions
+    .filter((session) => statuses.includes(session.status))
+    .slice(0, 16);
+  const node = $(selector);
+  node.replaceChildren(
     ...(sessions.length
       ? sessions.map((session) => {
-          const card = el("article", `session-card status-${session.status}`);
-          card.append(
-            el("strong", "", session.id),
-            el("span", "session-status", session.status),
-            el(
-              "small",
-              "",
-              `tasks ${session.tasksCompleted} | pid ${session.pid || "none"}`,
-            ),
-            el(
-              "p",
-              session.lastError ? "bad" : "",
-              session.lastError || session.lastResult || "waiting",
-            ),
-          );
-          return card;
+          const chip = el("span", `vm-chip ${session.status}`);
+          chip.title = `${session.id}: ${session.status}`;
+          chip.textContent = compactUser(session.id);
+          return chip;
         })
-      : [el("div", "empty-panel", "No user sessions yet")]),
+      : [el("span", "empty", "clear")]),
   );
+}
+
+function renderHealth() {
+  const c = latest.counts;
+  const r = latest.resource;
+  const config = latest.config;
+  const slotRatio = ratio(c.slots || 0, config.maxActiveVms);
+  const queueRatio = ratio(c.queued || 0, Math.max(1, config.maxActiveVms * 3));
+  const hostFreeRatio = ratio(r.freeMemBytes, r.totalMemBytes);
+  setBar("#slotBar", slotRatio);
+  setBar("#queueBar", queueRatio);
+  setBar("#hostBar", hostFreeRatio);
+  $("#slotText").textContent = percent(slotRatio);
+  $("#queueText").textContent = percent(queueRatio);
+  $("#hostText").textContent = bytes(r.freeMemBytes);
 }
 
 function renderEvents() {
-  const events = latest.events.slice(0, 40);
-  $("#feedSummary").textContent = events.length
-    ? `${events.length} recent events`
-    : "no events yet";
+  const events = latest.events.slice(0, 8);
   $("#eventsList").replaceChildren(
     ...(events.length
       ? events.map((event) => {
           const item = el("li", event.level);
-          item.append(
-            el("span", "event-time", new Date(event.at).toLocaleTimeString()),
-            el("span", "event-text", event.message),
-          );
+          item.textContent = `${new Date(event.at).toLocaleTimeString()} ${event.message}`;
           return item;
         })
-      : [el("li", "info", "Waiting for arena events")]),
+      : [el("li", "info", "No events yet")]),
   );
 }
 
-function drawChart() {
-  const ctx = chart.getContext("2d");
-  const dpr = window.devicePixelRatio || 1;
-  const width = chart.clientWidth;
-  const height = chart.clientHeight;
-  chart.width = Math.floor(width * dpr);
-  chart.height = Math.floor(height * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-
-  const history = latest.history || [];
-  if (history.length < 2) {
-    ctx.fillStyle = "#657182";
-    ctx.font = "13px system-ui";
-    ctx.fillText("Waiting for live samples", 24, 42);
-    return;
-  }
-
-  const pad = 30;
-  const maxCount = Math.max(
-    1,
-    ...history.map((p) => Math.max(p.queued, p.active, p.hot, p.warm)),
-  );
-  const maxRss = Math.max(1, ...history.map((p) => p.vmmRssBytes));
-
-  drawGrid(ctx, width, height, pad);
-  drawLine(ctx, history, width, height, pad, maxCount, "queued", "#c47a11");
-  drawLine(ctx, history, width, height, pad, maxCount, "active", "#009b72");
-  drawLine(ctx, history, width, height, pad, maxCount, "hot", "#2563eb");
-  drawLine(ctx, history, width, height, pad, maxCount, "warm", "#8b5cf6");
-  drawLine(ctx, history, width, height, pad, maxRss, "vmmRssBytes", "#e11d48");
-  drawLegend(ctx, [
-    ["queue", "#c47a11"],
-    ["active", "#009b72"],
-    ["hot", "#2563eb"],
-    ["saved", "#8b5cf6"],
-    ["rss", "#e11d48"],
-  ]);
+function renderReport() {
+  $("#reportText").value = buildReport();
 }
 
-function drawGrid(ctx, width, height, pad) {
-  ctx.strokeStyle = "#d8dee9";
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i += 1) {
-    const y = pad + ((height - pad * 2) * i) / 4;
-    ctx.beginPath();
-    ctx.moveTo(pad, y);
-    ctx.lineTo(width - pad, y);
-    ctx.stroke();
-  }
+function buildReport() {
+  if (!latest) return "";
+  const m = latest.metrics;
+  const c = latest.counts;
+  const r = latest.resource;
+  const config = latest.config;
+  const recentEvents = latest.events
+    .slice(0, 10)
+    .map((event) => `- ${new Date(event.at).toISOString()} [${event.level}] ${event.message}`)
+    .join("\n");
+  const sessions = latest.sessions
+    .slice(0, 12)
+    .map(
+      (session) =>
+        `- ${session.id}: ${session.status}, tasks=${session.tasksCompleted}, ${
+          session.lastError || session.lastResult || "no result"
+        }`,
+    )
+    .join("\n");
+
+  return [
+    "# Gondolin VM testing report",
+    `time: ${new Date().toISOString()}`,
+    "",
+    "## Scenario",
+    `strategy: ${config.strategy}`,
+    `users: ${config.targetUsers}`,
+    `traffic: ${config.arrivalRatePerSec} tasks/sec`,
+    `vm_slots: ${config.maxActiveVms}`,
+    `boot_gates: ${config.bootConcurrency}`,
+    `vm_memory: ${config.vmMemory}`,
+    `network: ${config.networkEnabled ? "on" : "off"}`,
+    "",
+    "## Results",
+    `tasks_completed: ${m.tasksCompleted}`,
+    `tasks_failed: ${m.tasksFailed}`,
+    `queued_now: ${c.queued || 0}`,
+    `cold_boots: ${m.coldBoots}`,
+    `restores: ${m.restores}`,
+    `snapshots: ${m.snapshots}`,
+    `snapshot_failures: ${m.snapshotFailures}`,
+    `avg_wait_ms: ${Math.round(m.avgWaitMs)}`,
+    `avg_run_ms: ${Math.round(m.avgRunMs)}`,
+    "",
+    "## Resources",
+    `active_vm_slots: ${c.slots || 0}/${config.maxActiveVms}`,
+    `vmm_rss: ${bytes(r.vmmRssBytes)}`,
+    `simulator_rss: ${bytes(r.processRssBytes)}`,
+    `host_free: ${bytes(r.freeMemBytes)}`,
+    `snapshot_bytes: ${bytes(m.snapshotBytes)}`,
+    "",
+    "## Recent sessions",
+    sessions || "- none",
+    "",
+    "## Recent events",
+    recentEvents || "- none",
+    "",
+    "## Raw summary",
+    JSON.stringify(
+      {
+        running: latest.running,
+        config,
+        metrics: m,
+        counts: c,
+        resource: r,
+      },
+      null,
+      2,
+    ),
+  ].join("\n");
 }
 
-function drawLine(ctx, history, width, height, pad, max, key, color) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 3;
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  history.forEach((point, index) => {
-    const x = pad + ((width - pad * 2) * index) / (history.length - 1);
-    const y = height - pad - ((height - pad * 2) * point[key]) / max;
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
+async function copyReport() {
+  const text = buildReport();
+  $("#reportText").value = text;
+  try {
+    if (!navigator.clipboard) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(text);
+  } catch {
+    $("#reportText").select();
+    document.execCommand("copy");
+    window.getSelection()?.removeAllRanges();
+  }
+  $("#reportSummary").textContent = "Copied. Send this report back for analysis.";
 }
 
-function drawLegend(ctx, items) {
-  ctx.font = "12px system-ui";
-  let x = 34;
-  for (const [label, color] of items) {
-    ctx.fillStyle = color;
-    ctx.fillRect(x, 10, 10, 10);
-    ctx.fillStyle = "#354052";
-    ctx.fillText(label, x + 14, 20);
-    x += 78;
+function downloadReport() {
+  const blob = new Blob([buildReport()], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `gondolin-vm-report-${Date.now()}.md`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function applyPreset(name) {
+  const presets = {
+    demo: {
+      strategy: "hybrid",
+      targetUsers: 100,
+      arrivalRatePerSec: 0,
+      maxActiveVms: 2,
+      bootConcurrency: 1,
+      taskCpuIterations: 20000,
+      vmMemory: "30M",
+    },
+    rush: {
+      strategy: "hot",
+      targetUsers: 1000,
+      arrivalRatePerSec: 8,
+      maxActiveVms: 8,
+      bootConcurrency: 2,
+      taskCpuIterations: 30000,
+      vmMemory: "30M",
+    },
+    save: {
+      strategy: "warm-snapshot",
+      targetUsers: 500,
+      arrivalRatePerSec: 2,
+      maxActiveVms: 3,
+      bootConcurrency: 1,
+      taskCpuIterations: 20000,
+      vmMemory: "30M",
+    },
+    cold: {
+      strategy: "cold",
+      targetUsers: 200,
+      arrivalRatePerSec: 3,
+      maxActiveVms: 4,
+      bootConcurrency: 2,
+      taskCpuIterations: 20000,
+      vmMemory: "30M",
+    },
+  };
+  const preset = presets[name];
+  for (const [key, value] of Object.entries(preset)) {
+    const input = form.elements.namedItem(key);
+    if (input) input.value = value;
   }
+  updateOutputs();
+  updateStrategyButtons();
+}
+
+function setBar(selector, value) {
+  $(selector).style.width = `${Math.round(Math.max(0.03, Math.min(1, value)) * 100)}%`;
 }
 
 function activeCount(counts) {
@@ -400,15 +411,6 @@ function percent(value) {
   return `${Math.round(value * 100)}%`;
 }
 
-function parseBytes(value) {
-  const match = String(value).trim().match(/^(\d+(?:\.\d+)?)([kmgt])?b?$/i);
-  if (!match) return 0;
-  const n = Number(match[1]);
-  const unit = (match[2] || "").toUpperCase();
-  const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4 };
-  return n * scale[unit];
-}
-
 function bytes(value) {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -419,11 +421,6 @@ function bytes(value) {
     i += 1;
   }
   return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-function ms(value) {
-  if (!Number.isFinite(value)) return "0 ms";
-  return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(0)} ms`;
 }
 
 function el(tag, className = "", text = "") {

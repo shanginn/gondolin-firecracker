@@ -3,220 +3,266 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Gondolin VM Arena</title>
+    <title>Gondolin Testing Grounds</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <header class="arena-header">
-      <div class="brand">
-        <div class="mark" aria-hidden="true"></div>
-        <div>
-          <h1>VM Arena</h1>
-          <p>Tiny Firecracker sessions for simulated users</p>
-        </div>
+    <header class="topbar">
+      <div>
+        <h1>Testing Grounds</h1>
+        <p>Tiny VM sessions, shown as a live arena</p>
       </div>
-      <div class="status-strip">
-        <span id="streamStatus" class="stream off">connecting</span>
-        <span id="runState" class="run-state">paused</span>
-      </div>
-      <div class="header-actions">
-        <button id="startBtn" class="primary">Start</button>
-        <button id="pauseBtn">Pause</button>
-        <button id="resetBtn" class="danger">Reset</button>
+      <div class="top-pills">
+        <span id="streamStatus" class="pill off">connecting</span>
+        <span id="runState" class="pill">paused</span>
       </div>
     </header>
 
-    <main class="shell">
-      <section class="scoreboard" aria-label="Live score">
-        <article class="score hero-score">
-          <span class="score-label">Tasks Cleared</span>
-          <strong id="scoreCompleted">0</strong>
-          <small id="scoreRun">0 ms avg run</small>
-        </article>
-        <article class="score">
-          <span class="score-label">Waiting</span>
-          <strong id="scoreQueued">0</strong>
-          <small>queued tasks</small>
-        </article>
-        <article class="score">
-          <span class="score-label">VMs Awake</span>
-          <strong id="scoreActive">0</strong>
-          <small id="scoreSlots">0 / 0 slots</small>
-        </article>
-        <article class="score">
-          <span class="score-label">Hot Ready</span>
-          <strong id="scoreHot">0</strong>
-          <small>warm hands</small>
-        </article>
-        <article class="score">
-          <span class="score-label">Saved State</span>
-          <strong id="scoreWarm">0</strong>
-          <small id="scoreSnapshotBytes">0 B</small>
-        </article>
-        <article class="score alert-score">
-          <span class="score-label">Fails</span>
-          <strong id="scoreFailed">0</strong>
-          <small id="scoreSnapshotFails">0 snapshot fails</small>
-        </article>
+    <main class="app">
+      <section class="hero">
+        <div class="hero-actions">
+          <button id="startBtn" class="go">Start</button>
+          <button id="pauseBtn">Pause</button>
+          <button id="resetBtn" class="danger">Reset</button>
+        </div>
+
+        <div class="world" aria-label="Live testing ground">
+          <div class="sun"></div>
+          <div class="track">
+            <section class="zone zone-queued">
+              <span>Queue</span>
+              <strong id="zoneQueued">0</strong>
+              <div id="queueTokens" class="token-row"></div>
+            </section>
+            <section class="zone zone-active">
+              <span>Boot + Run</span>
+              <strong id="zoneActive">0</strong>
+              <div id="activeTokens" class="token-row"></div>
+            </section>
+            <section class="zone zone-hot">
+              <span>Hot</span>
+              <strong id="zoneHot">0</strong>
+              <div id="hotTokens" class="token-row"></div>
+            </section>
+            <section class="zone zone-warm">
+              <span>Saved</span>
+              <strong id="zoneWarm">0</strong>
+              <div id="warmTokens" class="token-row"></div>
+            </section>
+          </div>
+          <div class="ground">
+            <div class="gate"></div>
+            <div class="gate"></div>
+            <div class="gate"></div>
+          </div>
+        </div>
+
+        <div class="big-stats">
+          <article>
+            <span>Done</span>
+            <strong id="doneText">0</strong>
+          </article>
+          <article>
+            <span>Wait</span>
+            <strong id="waitText">0</strong>
+          </article>
+          <article>
+            <span>VMs</span>
+            <strong id="vmText">0/0</strong>
+          </article>
+          <article>
+            <span>Memory</span>
+            <strong id="memoryText">0 B</strong>
+          </article>
+        </div>
       </section>
 
-      <section class="game-grid">
-        <section class="arena-panel board-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Session Board</h2>
-              <p id="boardSubtitle">Live lanes update twice per second</p>
-            </div>
-            <button id="burstBtn" class="primary">Queue Burst</button>
+      <section class="controls-card">
+        <div class="section-head">
+          <div>
+            <h2>Scenario knobs</h2>
+            <p id="saveStatus">Move sliders. Changes apply live.</p>
           </div>
-          <div class="lane-grid" id="laneGrid"></div>
-        </section>
+          <button id="burstBtn" class="accent">Burst</button>
+        </div>
 
-        <aside class="arena-panel control-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Mission Control</h2>
-              <p id="strategyReadout">hybrid strategy</p>
-            </div>
-            <button id="topApplyConfigBtn" class="primary">Apply</button>
-          </div>
-          <form id="configForm" class="settings">
-            <label class="full">
-              Strategy
-              <select name="strategy">
-                <option value="cold">Cold: boot every task</option>
-                <option value="hot">Hot: keep idle VMs</option>
-                <option value="warm-snapshot">Warm: save VM state</option>
-                <option value="hybrid">Hybrid: hot then saved</option>
-              </select>
-            </label>
-            <label>
-              Users
-              <input name="targetUsers" type="number" min="1" step="1" />
-            </label>
-            <label>
-              Tasks / sec
-              <input name="arrivalRatePerSec" type="number" min="0" step="0.1" />
-            </label>
-            <label>
-              VM slots
-              <input name="maxActiveVms" type="number" min="1" step="1" />
-            </label>
-            <label>
-              Boot gates
-              <input name="bootConcurrency" type="number" min="1" step="1" />
-            </label>
-            <label>
-              Hot TTL ms
-              <input name="hotIdleTtlMs" type="number" min="0" step="1000" />
-            </label>
-            <label>
-              Save TTL ms
-              <input name="warmSnapshotTtlMs" type="number" min="0" step="1000" />
-            </label>
-            <label>
-              VM memory
-              <input name="vmMemory" type="text" />
-            </label>
-            <label>
-              Timeout ms
-              <input name="vmStartTimeoutMs" type="number" min="1" step="1" />
-            </label>
-            <label>
-              CPU work
-              <input name="taskCpuIterations" type="number" min="0" step="1000" />
-            </label>
-            <label class="switch-row">
-              Network
-              <input name="networkEnabled" type="checkbox" />
-            </label>
-            <label class="full">
-              Image path
-              <input name="imagePath" type="text" />
-            </label>
-            <label class="full">
-              Work path
-              <input name="workDir" type="text" />
-            </label>
-            <button id="applyConfigBtn" type="submit" class="primary full">
-              Apply Settings
-            </button>
-          </form>
+        <div class="presets">
+          <button data-preset="demo">Demo</button>
+          <button data-preset="rush">Rush</button>
+          <button data-preset="save">Save RAM</button>
+          <button data-preset="cold">Cold Race</button>
+        </div>
 
-          <div class="quick-queue">
-            <label>
-              Burst size
-              <input id="burstCount" type="number" min="1" value="10" />
-            </label>
-            <label>
-              User task
-              <input id="userTaskId" type="text" placeholder="user-00001" />
-            </label>
-            <button id="userTaskBtn">Queue User</button>
-          </div>
-        </aside>
+        <form id="configForm" class="sliders">
+          <fieldset>
+            <legend>Strategy</legend>
+            <div class="segmented" id="strategyButtons">
+              <button type="button" data-strategy="hybrid">Hybrid</button>
+              <button type="button" data-strategy="hot">Hot</button>
+              <button type="button" data-strategy="warm-snapshot">Saved</button>
+              <button type="button" data-strategy="cold">Cold</button>
+            </div>
+            <select name="strategy" hidden>
+              <option value="cold">cold</option>
+              <option value="hot">hot</option>
+              <option value="warm-snapshot">warm-snapshot</option>
+              <option value="hybrid">hybrid</option>
+            </select>
+          </fieldset>
+
+          <label class="slider">
+            <span>Users in the world</span>
+            <output id="targetUsersOut">100</output>
+            <input
+              name="targetUsers"
+              type="range"
+              min="1"
+              max="5000"
+              step="1"
+              data-live
+            />
+          </label>
+
+          <label class="slider">
+            <span>Traffic</span>
+            <output id="arrivalRatePerSecOut">0 / sec</output>
+            <input
+              name="arrivalRatePerSec"
+              type="range"
+              min="0"
+              max="50"
+              step="0.1"
+              data-live
+            />
+          </label>
+
+          <label class="slider">
+            <span>VM slots</span>
+            <output id="maxActiveVmsOut">2</output>
+            <input
+              name="maxActiveVms"
+              type="range"
+              min="1"
+              max="64"
+              step="1"
+              data-live
+            />
+          </label>
+
+          <label class="slider">
+            <span>Boot gates</span>
+            <output id="bootConcurrencyOut">1</output>
+            <input
+              name="bootConcurrency"
+              type="range"
+              min="1"
+              max="32"
+              step="1"
+              data-live
+            />
+          </label>
+
+          <label class="slider">
+            <span>CPU work per task</span>
+            <output id="taskCpuIterationsOut">20000</output>
+            <input
+              name="taskCpuIterations"
+              type="range"
+              min="0"
+              max="200000"
+              step="1000"
+              data-live
+            />
+          </label>
+
+          <label class="select-row">
+            <span>VM memory</span>
+            <select name="vmMemory" data-live>
+              <option value="30M">30M tiny</option>
+              <option value="50M">50M safer</option>
+              <option value="84M">84M default</option>
+              <option value="128M">128M roomy</option>
+            </select>
+          </label>
+
+          <label class="switch-row">
+            <span>Network fetch</span>
+            <input name="networkEnabled" type="checkbox" data-live />
+          </label>
+
+          <details class="advanced">
+            <summary>Advanced</summary>
+            <div class="advanced-grid">
+              <label>
+                Hot TTL ms
+                <input name="hotIdleTtlMs" type="number" min="0" step="1000" />
+              </label>
+              <label>
+                Save TTL ms
+                <input name="warmSnapshotTtlMs" type="number" min="0" step="1000" />
+              </label>
+              <label>
+                Timeout ms
+                <input name="vmStartTimeoutMs" type="number" min="1" step="1" />
+              </label>
+              <label>
+                Burst size
+                <input id="burstCount" type="number" min="1" value="10" />
+              </label>
+              <label>
+                Image path
+                <input name="imagePath" type="text" />
+              </label>
+              <label>
+                Work path
+                <input name="workDir" type="text" />
+              </label>
+            </div>
+            <button id="applyConfigBtn" type="submit">Apply advanced</button>
+          </details>
+        </form>
       </section>
 
-      <section class="lower-grid">
-        <section class="arena-panel meter-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Power Meters</h2>
-              <p id="resourceReadout">waiting for data</p>
-            </div>
+      <section class="report-card">
+        <div class="section-head">
+          <div>
+            <h2>Run report</h2>
+            <p id="reportSummary">Run a scenario, then copy this back for analysis.</p>
           </div>
+          <div class="report-actions">
+            <button id="copyReportBtn">Copy</button>
+            <button id="downloadReportBtn">Download</button>
+          </div>
+        </div>
+        <textarea id="reportText" readonly></textarea>
+      </section>
+
+      <section class="details-grid">
+        <article class="mini-card">
+          <h2>Health</h2>
           <div class="meters">
-            <div class="meter">
-              <div class="meter-row">
-                <span>Slot pressure</span>
-                <strong id="slotText">0%</strong>
-              </div>
-              <div class="bar"><span id="slotBar"></span></div>
-            </div>
-            <div class="meter">
-              <div class="meter-row">
-                <span>VMM memory</span>
-                <strong id="rssText">0 B</strong>
-              </div>
-              <div class="bar"><span id="rssBar"></span></div>
-            </div>
-            <div class="meter">
-              <div class="meter-row">
-                <span>Host free</span>
-                <strong id="hostText">0 B</strong>
-              </div>
-              <div class="bar"><span id="hostBar"></span></div>
-            </div>
-            <div class="meter">
-              <div class="meter-row">
-                <span>Queue heat</span>
-                <strong id="queueText">0%</strong>
-              </div>
-              <div class="bar"><span id="queueBar"></span></div>
-            </div>
+            <label>
+              Slot pressure
+              <span id="slotText">0%</span>
+              <i><b id="slotBar"></b></i>
+            </label>
+            <label>
+              Queue heat
+              <span id="queueText">0%</span>
+              <i><b id="queueBar"></b></i>
+            </label>
+            <label>
+              Host free
+              <span id="hostText">0 B</span>
+              <i><b id="hostBar"></b></i>
+            </label>
           </div>
-          <canvas id="historyChart" width="980" height="280"></canvas>
-        </section>
+        </article>
 
-        <section class="arena-panel feed-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Activity Feed</h2>
-              <p id="feedSummary">no events yet</p>
-            </div>
-          </div>
+        <article class="mini-card">
+          <h2>Events</h2>
           <ol id="eventsList" class="events"></ol>
-        </section>
-
-        <section class="arena-panel roster-panel">
-          <div class="panel-head">
-            <div>
-              <h2>User Roster</h2>
-              <p id="rosterSummary">no sessions yet</p>
-            </div>
-          </div>
-          <div id="sessionsList" class="sessions"></div>
-        </section>
+        </article>
       </section>
     </main>
 
