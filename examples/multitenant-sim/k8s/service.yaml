@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gondolin-user-sim
+  labels:
+    app.kubernetes.io/name: gondolin-user-sim
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gondolin-user-sim
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

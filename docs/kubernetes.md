@@ -150,9 +150,10 @@ Do not size the default image for sub-`50M` guests. The x86_64 Firecracker
 kernel asset is an uncompressed ELF and currently weighs `38M`. The
 `images/alpine-tiny-firecracker.json` no-initrd profile is the pod-density
 option; it passed the bash, VFS, and mediated HTTP smoke test at `29M` on June
-26, 2026. Use `30M` plus host/controller overhead when you want a small guard
-band. The initramfs-root profile is the startup-latency option; it passed the
-same smoke test at `50M` and failed at `49M`.
+26, 2026. Use the published `alpine-tiny-firecracker:<tag>` image selector with
+`30M` plus host/controller overhead when you want a small guard band. The
+initramfs-root profile is the startup-latency option; it passed the same smoke
+test at `50M` and failed at `49M`.
 
 The read-only rootfs avoids a full raw rootfs copy before boot. Guest paths such
 as `/tmp`, `/root`, `/var/tmp`, `/var/cache`, and `/var/log` are tmpfs-backed.
@@ -191,3 +192,10 @@ For Kubernetes:
   on disk-backed `emptyDir` or persistent scratch storage.
 - Use `rootfs.mode="readonly"` whenever the workload writes only to tmpfs and
   VFS mounts.
+
+## Load Simulator Example
+
+`examples/multitenant-sim` contains a dashboard-driven Kubernetes example that
+simulates many users, assigns each user a behavior profile, and backs active
+sessions with Gondolin VMs without calling an LLM. The base manifests are
+generic, start paused, and intentionally avoid embedding cluster context names.

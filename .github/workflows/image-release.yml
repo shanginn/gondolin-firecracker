@@ -31,6 +31,7 @@ jobs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
       source_ref: ${{ steps.meta.outputs.source_ref }}
       build_config: ${{ steps.meta.outputs.build_config }}
+      build_matrix: ${{ steps.meta.outputs.build_matrix }}
     steps:
       - name: Resolve source ref
         id: source
@@ -115,6 +116,35 @@ jobs:
           }
 
           const releaseTag = `image-${imageName}--${imageTag}`;
+          const firecrackerKernelPath =
+            typeof parsed.firecrackerKernelPath === 'string'
+              ? parsed.firecrackerKernelPath
+              : '';
+          const usesTinyX86Kernel = firecrackerKernelPath.includes(
+            'tmp/firecracker-tiny-kernel',
+          );
+          const buildMatrix = {
+            include: usesTinyX86Kernel
+              ? [
+                  {
+                    arch: 'x86_64',
+                    zig_target: 'x86_64-linux-musl',
+                    archive_arch: 'x86_64',
+                  },
+                ]
+              : [
+                  {
+                    arch: 'aarch64',
+                    zig_target: 'aarch64-linux-musl',
+                    archive_arch: 'aarch64',
+                  },
+                  {
+                    arch: 'x86_64',
+                    zig_target: 'x86_64-linux-musl',
+                    archive_arch: 'x86_64',
+                  },
+                ],
+          };
 
           const output = fs.createWriteStream(process.env.GITHUB_OUTPUT, {
             flags: 'a',
@@ -124,6 +154,7 @@ jobs:
           output.write(`image_tag=${imageTag}\n`);
           output.write(`source_ref=${sourceRef}\n`);
           output.write(`build_config=${relativeConfig}\n`);
+          output.write(`build_matrix=${JSON.stringify(buildMatrix)}\n`);
           output.end();
           NODE
 
@@ -133,14 +164,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            zig_target: aarch64-linux-musl
-            archive_arch: aarch64
-          - arch: x86_64
-            zig_target: x86_64-linux-musl
-            archive_arch: x86_64
+      matrix: ${{ fromJson(needs.prepare.outputs.build_matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -162,7 +186,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y lz4
+          sudo apt-get install -y bc bison build-essential flex libssl-dev lz4 xz-utils
           curl -LsSf https://astral.sh/uv/install.sh | sh
 
           UV_BIN_DIR=""
@@ -183,6 +207,20 @@ jobs:
         run: |
           cd guest
           zig build -Doptimize=ReleaseSmall -Dtarget=${{ matrix.zig_target }}
+
+      - name: Prepare optional image inputs
+        env:
+          BUILD_CONFIG: ${{ needs.prepare.outputs.build_config }}
+          ZIG_TARGET: ${{ matrix.zig_target }}
+        run: |
+          NEEDS_TINY_KERNEL="$(node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync(process.env.BUILD_CONFIG,'utf8'));process.stdout.write(String(typeof c.firecrackerKernelPath === 'string' && c.firecrackerKernelPath.includes('tmp/firecracker-tiny-kernel')))")"
+          NEEDS_FAST_INIT="$(node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync(process.env.BUILD_CONFIG,'utf8'));process.stdout.write(String(typeof c.init?.rootfsInitBinary === 'string' && c.init.rootfsInitBinary.includes('tmp/fast-agent-init')))")"
+          if [ "$NEEDS_TINY_KERNEL" = "true" ]; then
+            scripts/build-tiny-firecracker-kernel.sh tmp/firecracker-tiny-kernel
+          fi
+          if [ "$NEEDS_FAST_INIT" = "true" ]; then
+            TARGET="$ZIG_TARGET" scripts/build-fast-agent-init.sh tmp/fast-agent-init
+          fi
 
       - name: Build guest image
         run: |
@@ -257,12 +295,9 @@ jobs:
           prerelease: ${{ contains(needs.prepare.outputs.image_tag, '-') }}
           make_latest: "false"
           files: |
-            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz
-            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz.sha256
-            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-aarch64.tar.gz.meta.json
-            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-x86_64.tar.gz
-            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-x86_64.tar.gz.sha256
-            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-x86_64.tar.gz.meta.json
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-*.tar.gz
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-*.tar.gz.sha256
+            gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-*.tar.gz.meta.json
           body: |
             ## Gondolin image: `${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}`
 
@@ -321,9 +356,24 @@ jobs:
             throw new Error('invalid builtin-image-registry builds');
           }
 
-          const loadArchMeta = (arch) => {
-            const file = `gondolin-image-${imageName}-${imageTag}-${arch}.tar.gz.meta.json`;
+          const metaFiles = fs
+            .readdirSync('.')
+            .filter((file) =>
+              file.startsWith(`gondolin-image-${imageName}-${imageTag}-`) &&
+              file.endsWith('.tar.gz.meta.json'),
+            )
+            .sort();
+
+          if (metaFiles.length === 0) {
+            throw new Error('no image metadata files found');
+          }
+
+          const loadArchMeta = (file) => {
             const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const arch = parsed.arch;
+            if (arch !== 'aarch64' && arch !== 'x86_64') {
+              throw new Error(`invalid image metadata arch in ${file}: ${arch}`);
+            }
             const url = `https://github.com/${owner}/${repo}/releases/download/${releaseTag}/gondolin-image-${imageName}-${imageTag}-${arch}.tar.gz`;
             return {
               arch,
@@ -333,27 +383,19 @@ jobs:
             };
           };
 
-          const aarch64 = loadArchMeta('aarch64');
-          const x86_64 = loadArchMeta('x86_64');
-
-          const refValue = {
-            aarch64: aarch64.buildId,
-            x86_64: x86_64.buildId,
-          };
+          const refValue = {};
+          for (const file of metaFiles) {
+            const meta = loadArchMeta(file);
+            refValue[meta.arch] = meta.buildId;
+            registry.builds[meta.buildId] = {
+              arch: meta.arch,
+              url: meta.url,
+              sha256: meta.sha256,
+            };
+          }
 
           registry.refs[`${imageName}:${imageTag}`] = refValue;
           registry.refs[`${imageName}:latest`] = JSON.parse(JSON.stringify(refValue));
-
-          registry.builds[aarch64.buildId] = {
-            arch: 'aarch64',
-            url: aarch64.url,
-            sha256: aarch64.sha256,
-          };
-          registry.builds[x86_64.buildId] = {
-            arch: 'x86_64',
-            url: x86_64.url,
-            sha256: x86_64.sha256,
-          };
 
           fs.writeFileSync(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
           NODE
