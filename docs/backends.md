@@ -99,12 +99,20 @@ The vfkit backend boots with vfkit's Linux bootloader, a `virtio-blk` root disk,
 uses `gondolin.transport=vsock`, so `sandboxd`, `sandboxfs`, `sandboxssh`, and
 `sandboxingress` reuse the existing protocol.
 
-Use a published Apple Silicon image with:
+Use a published Apple Silicon image from this fork with the checked-out CLI:
 
 ```bash
 brew install vfkit
-gondolin exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
+git clone https://github.com/shanginn/gondolin-firecracker.git
+cd gondolin-firecracker
+corepack enable
+pnpm install
+GONDOLIN_IMAGE_REGISTRY_URL=https://raw.githubusercontent.com/shanginn/gondolin-firecracker/master/builtin-image-registry.json \
+  node host/bin/gondolin.ts exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
 ```
+
+The published npm package `@earendil-works/gondolin@0.12.0` does not include
+the vfkit backend yet; it still accepts only the older macOS backends.
 
 Build a local Apple Silicon image with Docker Desktop:
 

@@ -56,11 +56,14 @@ Use `rootfs.mode="cow"` when the workload must write to the root disk. Use VFS
 mounts for workspaces and persistent data. Select local macOS execution with
 `sandbox.vmm = "vfkit"` or `gondolin bash --vmm vfkit`.
 
-For Apple Silicon local development, use a published vfkit image:
+For Apple Silicon local development, use a published vfkit image with a package
+build that includes the vfkit backend. The current npm package
+`@earendil-works/gondolin@0.12.0` does not include it yet.
 
 ```bash
 brew install vfkit
-gondolin exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
+GONDOLIN_IMAGE_REGISTRY_URL=https://raw.githubusercontent.com/shanginn/gondolin-firecracker/master/builtin-image-registry.json \
+  node host/bin/gondolin.ts exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
 ```
 
 Or build the vfkit image profile locally with Docker Desktop:

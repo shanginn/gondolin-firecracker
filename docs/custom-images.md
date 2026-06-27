@@ -40,10 +40,12 @@ gh workflow run image-release.yml -f image_tag=0.1.0 -f build_config=images/alpi
 The Image Release workflow builds the architectures declared by
 `release.arches` in the config and packages every asset listed in the manifest,
 including `vfkit-kernel`. Once the registry entry is available, macOS users only
-need `vfkit` at runtime:
+need `vfkit` at runtime, but they must run a package build that includes the
+vfkit backend:
 
 ```bash
-gondolin exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
+GONDOLIN_IMAGE_REGISTRY_URL=https://raw.githubusercontent.com/shanginn/gondolin-firecracker/master/builtin-image-registry.json \
+  node host/bin/gondolin.ts exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
 ```
 
 When publishing from a fork, set `GONDOLIN_IMAGE_REGISTRY_URL` to that fork's

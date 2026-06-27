@@ -44,13 +44,18 @@ The default Alpine image keeps the guest base intentionally small:
 `openssh`, `python3`, `nodejs`, `npm`, `uv`, or `e2fsprogs` through a custom
 image when a workload actually needs them.
 
-On macOS, select the vfkit backend explicitly. With a published vfkit image,
-runtime use does not require Docker:
+On macOS, select the vfkit backend explicitly. The current npm package
+`@earendil-works/gondolin@0.12.0` does not include this backend yet, so run the
+checked-out fork CLI until the next package release:
 
 ```bash
 brew install vfkit
-npx @earendil-works/gondolin bash --vmm vfkit
-gondolin exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
+git clone https://github.com/shanginn/gondolin-firecracker.git
+cd gondolin-firecracker
+corepack enable
+pnpm install
+GONDOLIN_IMAGE_REGISTRY_URL=https://raw.githubusercontent.com/shanginn/gondolin-firecracker/master/builtin-image-registry.json \
+  node host/bin/gondolin.ts exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
 ```
 
 The vfkit backend uses `vfkitKernel`/`initramfs`/`rootfs` image assets and
