@@ -2,8 +2,9 @@
 
 ## Requirements
 
-- Linux with `/dev/kvm`
-- Firecracker on `PATH` or `GONDOLIN_FIRECRACKER`
+- Firecracker backend: Linux with `/dev/kvm`
+- Firecracker backend: Firecracker on `PATH` or `GONDOLIN_FIRECRACKER`
+- vfkit backend: macOS with `vfkit` on `PATH` or `GONDOLIN_VFKIT`
 - Node.js `>=23.6`
 
 ## Shell
@@ -15,6 +16,8 @@ gondolin bash [options] [-- COMMAND [ARGS...]]
 Common options:
 
 - `--image IMAGE` - asset directory, build id, or `name:tag`
+- `--vmm firecracker|vfkit` - VM backend
+- `--vfkit PATH` - vfkit binary path
 - `--rootfs-size SIZE` - grow the effective writable root disk
 - `--mount-hostfs HOST:GUEST[:ro]` - mount a host directory
 - `--mount-memfs PATH` - mount an in-memory provider
@@ -33,6 +36,8 @@ Examples:
 
 ```bash
 gondolin bash
+gondolin bash --vmm vfkit
+gondolin exec --vmm vfkit --image alpine-vfkit:local -- uname -m
 gondolin bash --mount-hostfs "$PWD":/workspace:ro --cwd /workspace
 gondolin bash --listen 127.0.0.1:3000
 gondolin bash --ssh
@@ -73,11 +78,13 @@ Default snapshots are stored under
 gondolin image list
 gondolin image inspect alpine-base:latest
 gondolin build --config images/alpine-base.json --output ./guest/image/out
+gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --tag alpine-vfkit:local
 ```
 
 ## Environment
 
 - `GONDOLIN_FIRECRACKER` - Firecracker binary path
+- `GONDOLIN_VFKIT` - vfkit binary path
 - `GONDOLIN_RUNTIME_DIR` - short writable directory for Unix sockets
 - `GONDOLIN_GUEST_DIR` - local guest asset directory
 - `GONDOLIN_DEFAULT_IMAGE` - default image selector
@@ -86,9 +93,9 @@ gondolin build --config images/alpine-base.json --output ./guest/image/out
 
 ## Network
 
-Guest egress networking is disabled by default. `--allow-host`, `--dns`,
-`--tcp-map`, `--ssh-allow-host`, and related flags enable mediated Firecracker
-TAP egress. Gondolin handles DHCP, DNS, TCP, HTTP(S), mapped TCP, and outbound
-SSH in the host process and does not add generic host NAT rules. Host-to-guest
+Guest egress networking is disabled by default. With Firecracker, `--allow-host`,
+`--dns`, `--tcp-map`, `--ssh-allow-host`, and related flags enable mediated TAP
+egress. Gondolin handles DHCP, DNS, TCP, HTTP(S), mapped TCP, and outbound SSH
+in the host process and does not add generic host NAT rules. Host-to-guest
 ingress (`--listen`) and host-to-guest SSH (`--ssh`) are separate vsock-backed
-features.
+features. vfkit mediated guest egress is not implemented yet.

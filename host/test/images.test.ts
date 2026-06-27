@@ -42,17 +42,20 @@ function createFakeAssets(arch: "aarch64" | "x86_64"): FakeAssets {
   const initramfs = path.join(dir, "initramfs.cpio.lz4");
   const rootfs = path.join(dir, "rootfs.ext4");
   const firecrackerKernel = path.join(dir, "firecracker-kernel");
+  const vfkitKernel = path.join(dir, "vfkit-kernel");
 
   fs.writeFileSync(kernel, `kernel-${arch}`);
   fs.writeFileSync(initramfs, `initramfs-${arch}`);
   fs.writeFileSync(rootfs, `rootfs-${arch}`);
   fs.writeFileSync(firecrackerKernel, `firecracker-kernel-${arch}`);
+  fs.writeFileSync(vfkitKernel, `vfkit-kernel-${arch}`);
 
   const checksums = {
     kernel: `k-${arch}`,
     initramfs: `i-${arch}`,
     rootfs: `r-${arch}`,
     firecrackerKernel: `fc-${arch}`,
+    vfkitKernel: `vfkit-${arch}`,
   };
 
   const buildId = computeAssetBuildId({ checksums, arch });
@@ -73,6 +76,7 @@ function createFakeAssets(arch: "aarch64" | "x86_64"): FakeAssets {
       initramfs: "initramfs.cpio.lz4",
       rootfs: "rootfs.ext4",
       firecrackerKernel: "firecracker-kernel",
+      vfkitKernel: "vfkit-kernel",
     },
     checksums,
   };
@@ -103,6 +107,7 @@ function patchManifestAssets(
     rootfs?: string;
     firecrackerKernel?: string;
     firecrackerInitrd?: string | null;
+    vfkitKernel?: string;
   },
 ): void {
   patchManifest(dir, (manifest) => {
@@ -201,6 +206,27 @@ test("images: import preserves disabled Firecracker initrd from manifest", () =>
     assert.equal(
       fs.existsSync(path.join(imported.assetDir, "firecracker-initrd")),
       false,
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import preserves optional vfkit kernel from manifest", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+
+    assert.equal(
+      fs.readFileSync(path.join(imported.assetDir, "vfkit-kernel"), "utf8"),
+      "vfkit-kernel-aarch64",
     );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
@@ -578,6 +604,7 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
         "initramfs.cpio.lz4",
         "rootfs.ext4",
         "firecracker-kernel",
+        "vfkit-kernel",
       ],
       { cwd: assets.dir, stdio: "pipe" },
     );

@@ -162,6 +162,17 @@ export function verifyAssets(assetDir: string): boolean {
     });
   }
 
+  if (manifest.assets.vfkitKernel) {
+    if (!manifest.checksums.vfkitKernel) {
+      return false;
+    }
+    assets.push({
+      name: "vfkitKernel",
+      file: manifest.assets.vfkitKernel,
+      expected: manifest.checksums.vfkitKernel,
+    });
+  }
+
   for (const { name, file, expected } of assets) {
     const filePath = path.join(assetDir, file);
     if (!fs.existsSync(filePath)) {

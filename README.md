@@ -1,10 +1,12 @@
 # Gondolin Firecracker Sandbox
 
-**Linux micro-VMs for agent workloads, backed only by Firecracker.**
+**Linux micro-VMs for agent workloads.**
 
-Gondolin runs untrusted code inside a Firecracker VM and exposes a small host
-control plane for command execution, VFS mounts, optional host-to-guest SSH,
-ingress, and disk checkpoints. The runtime is Linux/KVM only.
+Gondolin runs untrusted code inside a small Linux VM and exposes a host control
+plane for command execution, VFS mounts, optional host-to-guest SSH, ingress,
+and disk checkpoints. The default runtime is Firecracker on Linux/KVM. An
+experimental `vfkit` backend is available on macOS for local Apple Silicon
+development.
 
 ## Quick Start
 
@@ -23,12 +25,14 @@ npx @earendil-works/gondolin bash --resume <snapshot-id-or-raw-path>
 
 ## Requirements
 
-- Linux host with `/dev/kvm`
-- Firecracker binary on `PATH` or `GONDOLIN_FIRECRACKER=/path/to/firecracker`
+- Firecracker backend: Linux host with `/dev/kvm`
+- Firecracker backend: Firecracker binary on `PATH` or `GONDOLIN_FIRECRACKER=/path/to/firecracker`
+- vfkit backend: macOS with `vfkit` on `PATH` or `GONDOLIN_VFKIT=/path/to/vfkit`
 - Python 3 and `ip` from iproute2 when mediated guest egress is enabled
 - `/dev/net/tun` plus `CAP_NET_ADMIN`/`CAP_NET_RAW` when mediated guest egress is enabled
 - Node.js `>=23.6`
-- Guest assets with `manifest.assets.firecrackerKernel`
+- Firecracker images with `manifest.assets.firecrackerKernel`
+- vfkit images with `manifest.assets.vfkitKernel`
 
 Defaults are tuned for low memory and startup cost: `1` vCPU, `84M`, no serial
 console, no guest network device unless `netEnabled` is set, and read-only base
@@ -39,6 +43,23 @@ The default Alpine image keeps the guest base intentionally small:
 `linux-virt`, `bash`, `ca-certificates`, and `curl`. Add packages such as
 `openssh`, `python3`, `nodejs`, `npm`, `uv`, or `e2fsprogs` through a custom
 image when a workload actually needs them.
+
+On macOS, select the vfkit backend explicitly:
+
+```bash
+npx @earendil-works/gondolin bash --vmm vfkit
+```
+
+The vfkit backend uses `vfkitKernel`/`initramfs`/`rootfs` image assets and
+guest-to-host vsock sockets. Build a local Apple Silicon image with:
+
+```bash
+gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --tag alpine-vfkit:local
+gondolin exec --vmm vfkit --image alpine-vfkit:local -- uname -m
+```
+
+Mediated guest egress, Firecracker VM-state snapshots, and the current x86_64
+tiny Firecracker kernel profile are not supported by vfkit.
 
 For lower cold-start and memory floors, the repo also includes:
 
@@ -71,11 +92,12 @@ await vm.close();
 
 ## Network Model
 
-Guest egress is disabled by default. When enabled, Firecracker attaches to a
-short-lived TAP device and Gondolin mediates DHCP, DNS, TCP, HTTP(S), mapped TCP,
-and outbound SSH in the host process. Gondolin does not install host NAT rules;
-guest packets only leave through the configured policy hooks. Host-to-guest
-ingress and host-to-guest SSH use vsock-backed forwarders.
+Guest egress is disabled by default. With the Firecracker backend, enabling
+egress attaches a short-lived TAP device and Gondolin mediates DHCP, DNS, TCP,
+HTTP(S), mapped TCP, and outbound SSH in the host process. Gondolin does not
+install host NAT rules; guest packets only leave through the configured policy
+hooks. Host-to-guest ingress and host-to-guest SSH use vsock-backed forwarders.
+The vfkit backend does not support mediated guest egress yet.
 
 ## Benchmark Snapshot
 

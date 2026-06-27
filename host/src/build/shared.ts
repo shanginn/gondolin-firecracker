@@ -17,6 +17,7 @@ export const INITRAMFS_FILENAME = "initramfs.cpio.lz4";
 export const ROOTFS_FILENAME = "rootfs.ext4";
 export const FIRECRACKER_KERNEL_FILENAME = "firecracker-kernel";
 export const FIRECRACKER_INITRD_FILENAME = "firecracker-initrd";
+export const VFKIT_KERNEL_FILENAME = "vfkit-kernel";
 
 /** Zig target triples for cross-compilation */
 const ZIG_TARGETS: Record<Architecture, string> = {
@@ -531,6 +532,7 @@ export function writeAssetManifest(
     outputDir,
     FIRECRACKER_INITRD_FILENAME,
   );
+  const vfkitKernelDst = path.join(outputDir, VFKIT_KERNEL_FILENAME);
 
   const checksums: AssetManifest["checksums"] = {
     kernel: computeFileHash(kernelDst),
@@ -554,6 +556,11 @@ export function writeAssetManifest(
     checksums.firecrackerInitrd = computeFileHash(firecrackerInitrdDst);
   } else if (config.firecrackerInitrdPath === null) {
     assets.firecrackerInitrd = null;
+  }
+
+  if (fs.existsSync(vfkitKernelDst)) {
+    assets.vfkitKernel = VFKIT_KERNEL_FILENAME;
+    checksums.vfkitKernel = computeFileHash(vfkitKernelDst);
   }
 
   const manifest: AssetManifest = {

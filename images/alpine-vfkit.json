@@ -1,0 +1,20 @@
+{
+  "imageName": "alpine-vfkit",
+  "arch": "aarch64",
+  "distro": "alpine",
+  "alpine": {
+    "version": "3.23.0",
+    "kernelPackage": "linux-virt",
+    "kernelImage": "vmlinuz-virt",
+    "rootfsPackages": ["linux-virt", "rng-tools", "bash", "ca-certificates", "curl"],
+    "initramfsPackages": []
+  },
+  "rootfs": {
+    "label": "gondolin-root"
+  },
+  "container": {
+    "force": true,
+    "runtime": "docker",
+    "image": "alpine:3.23"
+  }
+}

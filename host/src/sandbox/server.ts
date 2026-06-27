@@ -27,6 +27,10 @@ import {
   FirecrackerController,
   type FirecrackerConfig,
 } from "./firecracker-controller.ts";
+import {
+  VfkitController,
+  type VfkitConfig,
+} from "./vfkit-controller.ts";
 import { MediatedNetworkBackend } from "../net/backend.ts";
 import { FsRpcService } from "../vfs/rpc-service.ts";
 import { LINUX_ERRNO } from "../vfs/linux-errno.ts";
@@ -41,6 +45,7 @@ import {
   type GuestFileReadOptions,
   type GuestFileWriteOptions,
   type ResolvedSandboxServerOptions,
+  type SandboxVmm,
   type SandboxServerOptions,
   resolveSandboxServerOptions,
   resolveSandboxServerOptionsAsync,
@@ -298,13 +303,16 @@ export class SandboxServer extends EventEmitter {
   private startupTimings: StartupTimingEntry[] = [];
 
   /** @internal resolved VM backend name */
-  getVmmBackend(): "firecracker" {
-    return "firecracker";
+  getVmmBackend(): SandboxVmm {
+    return this.options.vmm;
   }
 
   /** @internal resolved VM backend binary path */
   getVmmPath(): string {
-    return this.options.firecrackerPath;
+    if (this.options.vmm === "vfkit") {
+      return this.options.vfkitPath ?? "vfkit";
+    }
+    return this.options.firecrackerPath ?? "firecracker";
   }
 
   /**
@@ -369,13 +377,18 @@ export class SandboxServer extends EventEmitter {
         : new SandboxVfsProvider(this.options.vfsProvider)
       : null;
 
-    const firecrackerConsole =
-      this.options.console === "stdio" ? "console=ttyS0" : "8250.nr_uarts=0";
-    const firecrackerLogLevel =
-      this.options.console === "stdio" ? "" : "quiet loglevel=1";
+    const consoleArg =
+      this.options.vmm === "vfkit"
+        ? this.options.console === "stdio"
+          ? "console=hvc0"
+          : "quiet loglevel=1"
+        : this.options.console === "stdio"
+          ? "console=ttyS0"
+          : "8250.nr_uarts=0";
+    const logLevel = this.options.console === "stdio" ? "" : "quiet loglevel=1";
     const defaultAppend = [
-      firecrackerConsole,
-      firecrackerLogLevel,
+      consoleArg,
+      this.options.vmm === "vfkit" ? "" : logLevel,
       "reboot=k",
       "panic=1",
       "root=/dev/vda",
@@ -395,31 +408,50 @@ export class SandboxServer extends EventEmitter {
       this.bootConfig = this.options.firecrackerSnapshot.bootConfig;
     }
 
-    const firecrackerConfig: FirecrackerConfig = {
-      firecrackerPath: this.options.firecrackerPath,
-      apiSocketPath: this.options.firecrackerApiSocketPath,
-      vsockPath: this.options.firecrackerVsockPath,
-      guestCid: this.options.firecrackerGuestCid,
-      kernelPath: this.options.kernelPath,
-      initrdPath: this.options.initrdPath,
-      rootDiskPath: this.options.rootDiskPath,
-      rootDiskFormat: this.options.rootDiskFormat,
-      rootDiskReadOnly: this.options.rootDiskReadOnly,
-      memory: this.options.memory,
-      cpus: this.options.cpus,
-      append: this.baseAppend,
-      console: this.options.console,
-      autoRestart: this.options.autoRestart,
-      netTapName: this.options.netEnabled ? this.options.netTapName : undefined,
-      netMac: this.options.netMac,
-      snapshotLoad: this.options.firecrackerSnapshot
-        ? {
-            snapshotPath: this.options.firecrackerSnapshot.snapshotPath,
-            memPath: this.options.firecrackerSnapshot.memPath,
-          }
-        : undefined,
-    };
-    this.controller = new FirecrackerController(firecrackerConfig);
+    if (this.options.vmm === "vfkit") {
+      const vfkitConfig: VfkitConfig = {
+        vfkitPath: this.options.vfkitPath ?? "vfkit",
+        vsockPath: this.options.vfkitVsockPath ?? "",
+        kernelPath: this.options.kernelPath,
+        initrdPath: this.options.initrdPath,
+        rootDiskPath: this.options.rootDiskPath,
+        rootDiskFormat: this.options.rootDiskFormat,
+        memory: this.options.memory,
+        cpus: this.options.cpus,
+        append: this.baseAppend,
+        console: this.options.console,
+        autoRestart: this.options.autoRestart,
+      };
+      this.controller = new VfkitController(vfkitConfig);
+    } else {
+      const firecrackerConfig: FirecrackerConfig = {
+        firecrackerPath: this.options.firecrackerPath ?? "firecracker",
+        apiSocketPath: this.options.firecrackerApiSocketPath ?? "",
+        vsockPath: this.options.firecrackerVsockPath ?? "",
+        guestCid: this.options.firecrackerGuestCid ?? 3,
+        kernelPath: this.options.kernelPath,
+        initrdPath: this.options.initrdPath,
+        rootDiskPath: this.options.rootDiskPath,
+        rootDiskFormat: this.options.rootDiskFormat,
+        rootDiskReadOnly: this.options.rootDiskReadOnly,
+        memory: this.options.memory,
+        cpus: this.options.cpus,
+        append: this.baseAppend,
+        console: this.options.console,
+        autoRestart: this.options.autoRestart,
+        netTapName: this.options.netEnabled
+          ? this.options.netTapName
+          : undefined,
+        netMac: this.options.netMac,
+        snapshotLoad: this.options.firecrackerSnapshot
+          ? {
+              snapshotPath: this.options.firecrackerSnapshot.snapshotPath,
+              memPath: this.options.firecrackerSnapshot.memPath,
+            }
+          : undefined,
+      };
+      this.controller = new FirecrackerController(firecrackerConfig);
+    }
     this.controller.on("startup-timing", (name: string) => {
       this.recordStartupTiming(name);
     });

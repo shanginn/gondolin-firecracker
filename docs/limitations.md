@@ -1,16 +1,28 @@
 # Current Limitations
 
-## Linux/KVM Only
+## Firecracker Is Linux/KVM Only
 
-The runtime requires Linux with `/dev/kvm`. macOS and Windows hosts are not
-supported by the Firecracker backend.
+The Firecracker backend requires Linux with `/dev/kvm`. Windows hosts are not
+supported. macOS hosts can use the experimental `vfkit` backend for local
+Apple Silicon development.
+
+## vfkit Backend Is Experimental
+
+The vfkit backend runs on macOS and uses `vfkitKernel`/initramfs/rootfs assets
+plus guest-to-host vsock sockets. It does not support mediated guest egress,
+Firecracker VM-state snapshots, or the current x86_64 tiny Firecracker kernel
+profile. On Apple Silicon, vfkit's Linux bootloader requires an uncompressed
+arm64 kernel; images built only around Firecracker PVH/KVM kernels are not
+expected to boot. Use `images/alpine-vfkit.json` for the working aarch64 local
+development profile.
 
 ## Mediated Guest Egress Requires Host Network Capabilities
 
-Guest egress is disabled by default. Enabling it creates a TAP device and
-requires Python 3, iproute2, `/dev/net/tun`, `CAP_NET_ADMIN`, and `CAP_NET_RAW`.
-The guest still cannot use generic host NAT; DHCP, DNS, TCP, HTTP(S), mapped
-TCP, and outbound SSH are mediated by the host policy stack.
+Guest egress is disabled by default. Enabling it on Firecracker creates a TAP
+device and requires Python 3, iproute2, `/dev/net/tun`, `CAP_NET_ADMIN`, and
+`CAP_NET_RAW`. The guest still cannot use generic host NAT; DHCP, DNS, TCP,
+HTTP(S), mapped TCP, and outbound SSH are mediated by the host policy stack.
+vfkit mediated guest egress is not implemented yet.
 
 ## No Full VM Save/Restore
 

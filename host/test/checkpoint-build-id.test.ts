@@ -74,13 +74,13 @@ test("checkpoint: legacy trailers without backend metadata are incompatible", ()
   assert.deepEqual(compatible, []);
 });
 
-test("checkpoint: compatibility list accepts only Firecracker", () => {
+test("checkpoint: compatibility list accepts supported backends", () => {
   const compatible = checkpointTest.resolveCheckpointCompatibleVmm(
     makeCheckpointData({
-      compatibleVmm: ["firecracker", "unknown" as any],
+      compatibleVmm: ["firecracker", "vfkit", "unknown" as any],
     }),
   );
-  assert.deepEqual(compatible, ["firecracker"]);
+  assert.deepEqual(compatible, ["firecracker", "vfkit"]);
 });
 
 test("checkpoint: Firecracker metadata is resume-compatible", () => {
@@ -95,6 +95,21 @@ test("checkpoint: Firecracker metadata is resume-compatible", () => {
       makeCheckpointData({ createdWithVmm: "firecracker" }),
     ),
     ["firecracker"],
+  );
+});
+
+test("checkpoint: vfkit metadata is resume-compatible", () => {
+  assert.deepEqual(
+    checkpointTest.resolveCheckpointCompatibleVmm(
+      makeCheckpointData({ compatibleVmm: ["vfkit"] }),
+    ),
+    ["vfkit"],
+  );
+  assert.deepEqual(
+    checkpointTest.resolveCheckpointCompatibleVmm(
+      makeCheckpointData({ createdWithVmm: "vfkit" }),
+    ),
+    ["vfkit"],
   );
 });
 

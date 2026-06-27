@@ -178,6 +178,9 @@ export interface BuildConfig {
   /** custom Firecracker initrd path; `null` disables Firecracker initrd */
   firecrackerInitrdPath?: string | null;
 
+  /** custom vfkit kernel path (built-in Alpine kernel when undefined) */
+  vfkitKernelPath?: string;
+
   /** custom sandboxd binary path (built-in when undefined) */
   sandboxdPath?: string;
 
@@ -407,6 +410,10 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
   }
 
   if (!isOptionalStringOrNull(cfg.firecrackerInitrdPath)) {
+    return false;
+  }
+
+  if (!isOptionalString(cfg.vfkitKernelPath)) {
     return false;
   }
 

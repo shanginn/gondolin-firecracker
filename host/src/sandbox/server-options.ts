@@ -42,7 +42,7 @@ import type { FsRpcSnapshotState } from "../vfs/rpc-service.ts";
 export type ImagePath = string | GuestAssets;
 
 /** vm backend implementation */
-export type SandboxVmm = "firecracker";
+export type SandboxVmm = "firecracker" | "vfkit";
 
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
 const DEFAULT_MAX_QUEUED_STDIN_BYTES = 8 * 1024 * 1024;
@@ -50,6 +50,8 @@ const DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_QUEUED_EXECS = 64;
 const DEFAULT_FIRECRACKER_MEMORY = "84M";
 const DEFAULT_FIRECRACKER_CPUS = 1;
+const DEFAULT_VFKIT_MEMORY = "256M";
+const DEFAULT_VFKIT_CPUS = 1;
 
 /**
  * sandbox server options
@@ -59,6 +61,8 @@ const DEFAULT_FIRECRACKER_CPUS = 1;
  * - an object with explicit asset paths
  */
 export type SandboxServerOptions = {
+  /** vm backend implementation */
+  vmm?: SandboxVmm;
   /** firecracker binary path */
   firecrackerPath?: string;
   /** firecracker API socket path */
@@ -69,6 +73,10 @@ export type SandboxServerOptions = {
   firecrackerGuestCid?: number;
   /** Firecracker snapshot to restore instead of cold boot */
   firecrackerSnapshot?: FirecrackerSnapshotRestoreOptions;
+  /** vfkit binary path */
+  vfkitPath?: string;
+  /** vfkit guest-to-host vsock base Unix socket path */
+  vfkitVsockPath?: string;
   /** guest asset directory or explicit asset paths */
   imagePath?: ImagePath;
   /** vm memory size (e.g. "1G") */
@@ -178,15 +186,19 @@ export type ResolvedSandboxServerOptions = {
   /** vm backend implementation */
   vmm: SandboxVmm;
   /** firecracker binary path */
-  firecrackerPath: string;
+  firecrackerPath?: string;
   /** firecracker API socket path */
-  firecrackerApiSocketPath: string;
+  firecrackerApiSocketPath?: string;
   /** firecracker vsock base Unix socket path */
-  firecrackerVsockPath: string;
+  firecrackerVsockPath?: string;
   /** firecracker guest vsock CID */
-  firecrackerGuestCid: number;
+  firecrackerGuestCid?: number;
   /** Firecracker snapshot to restore instead of cold boot */
   firecrackerSnapshot?: FirecrackerSnapshotRestoreOptions;
+  /** vfkit binary path */
+  vfkitPath?: string;
+  /** vfkit guest-to-host vsock base Unix socket path */
+  vfkitVsockPath?: string;
   /** kernel image path */
   kernelPath: string;
   /** initrd/initramfs image path */
@@ -363,6 +375,10 @@ function resolveDefaultFirecrackerPath(): string {
   return process.env.GONDOLIN_FIRECRACKER?.trim() || "firecracker";
 }
 
+function resolveDefaultVfkitPath(): string {
+  return process.env.GONDOLIN_VFKIT?.trim() || "vfkit";
+}
+
 function resolveRuntimeDir(): string {
   const envDir = process.env.GONDOLIN_RUNTIME_DIR?.trim();
   if (envDir) return path.resolve(envDir);
@@ -425,11 +441,23 @@ function validateTapName(value: string): string {
   return value;
 }
 
+function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
+  if (typeof value !== "string") return null;
+  const lower = value.trim().toLowerCase();
+  if (lower === "firecracker" || lower === "vfkit") return lower;
+  return null;
+}
+
 type FirecrackerKernelOverride = {
   /** replacement kernel image path */
   kernelPath: string;
   /** replacement initrd path */
   initrdPath: string;
+};
+
+type VfkitKernelOverride = {
+  /** replacement kernel image path */
+  kernelPath: string;
 };
 
 function resolveManifestAssetPath(
@@ -511,6 +539,36 @@ function resolveFirecrackerKernelOverride(
   return {
     kernelPath,
     initrdPath,
+  };
+}
+
+function resolveVfkitKernelOverride(
+  imageManifest: ReturnType<typeof loadAssetManifest>,
+  imageDir: string | null,
+): VfkitKernelOverride | null {
+  const assets = imageManifest?.assets as
+    | {
+        vfkitKernel?: string;
+      }
+    | undefined;
+  if (!imageDir || !assets?.vfkitKernel) {
+    return null;
+  }
+
+  const kernelPath = resolveManifestAssetPath(
+    imageDir,
+    assets.vfkitKernel,
+    "manifest.assets.vfkitKernel",
+  );
+
+  if (!fs.existsSync(kernelPath)) {
+    throw new Error(
+      `manifest.assets.vfkitKernel points to missing file: ${assets.vfkitKernel}`,
+    );
+  }
+
+  return {
+    kernelPath,
   };
 }
 
@@ -702,14 +760,28 @@ export function resolveSandboxServerOptions(
     tmpDir,
     `gondolin-firecracker-vsock-${randomUUID().slice(0, 8)}.sock`,
   );
+  const defaultVfkitVsock = path.resolve(
+    tmpDir,
+    `gondolin-vfkit-vsock-${randomUUID().slice(0, 8)}.sock`,
+  );
   const hostArch = getHostNodeArchCached();
   const envDebugFlags = parseDebugEnv();
   const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
   const debug = debugFlagsToArray(resolvedDebugFlags);
 
-  const vmm: SandboxVmm = "firecracker";
-  const memory = options.memory ?? DEFAULT_FIRECRACKER_MEMORY;
-  const cpus = options.cpus ?? DEFAULT_FIRECRACKER_CPUS;
+  const vmm = normalizeSandboxVmm(options.vmm ?? "firecracker");
+  if (!vmm) {
+    throw new Error(
+      `invalid sandbox.vmm: ${String(options.vmm)} (expected firecracker or vfkit)`,
+    );
+  }
+  const backendLabel = vmm === "vfkit" ? "vfkit" : "Firecracker";
+  const memory =
+    options.memory ??
+    (vmm === "vfkit" ? DEFAULT_VFKIT_MEMORY : DEFAULT_FIRECRACKER_MEMORY);
+  const cpus =
+    options.cpus ??
+    (vmm === "vfkit" ? DEFAULT_VFKIT_CPUS : DEFAULT_FIRECRACKER_CPUS);
   const firecrackerPath =
     options.firecrackerPath ?? resolveDefaultFirecrackerPath();
   const firecrackerApiSocketPath =
@@ -717,6 +789,8 @@ export function resolveSandboxServerOptions(
   const firecrackerVsockPath =
     options.firecrackerVsockPath ?? defaultFirecrackerVsock;
   const firecrackerGuestCid = options.firecrackerGuestCid ?? 3;
+  const vfkitPath = options.vfkitPath ?? resolveDefaultVfkitPath();
+  const vfkitVsockPath = options.vfkitVsockPath ?? defaultVfkitVsock;
   const netEnabled = options.netEnabled ?? false;
   const netTapName = validateTapName(
     options.netTapName ?? `gtap${randomUUID().replace(/-/g, "").slice(0, 8)}`,
@@ -724,11 +798,14 @@ export function resolveSandboxServerOptions(
   const netMac = options.netMac ?? "02:00:00:00:00:01";
 
   const supportedKeys = new Set([
+    "vmm",
     "firecrackerPath",
     "firecrackerApiSocketPath",
     "firecrackerVsockPath",
     "firecrackerGuestCid",
     "firecrackerSnapshot",
+    "vfkitPath",
+    "vfkitVsockPath",
     "imagePath",
     "memory",
     "cpus",
@@ -764,37 +841,89 @@ export function resolveSandboxServerOptions(
 
   if (unsupported.length > 0) {
     throw new Error(
-      `Unsupported Firecracker option${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}.`,
+      `Unsupported ${backendLabel} option${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}.`,
     );
   }
 
-  if (platform !== "linux") {
+  if (vmm === "firecracker" && platform !== "linux") {
     throw new Error(
       "Firecracker backend requires Linux/KVM and is not supported on this host platform.",
     );
   }
 
-  if (!Number.isInteger(firecrackerGuestCid) || firecrackerGuestCid < 3) {
+  if (vmm === "vfkit" && platform !== "darwin") {
+    throw new Error(
+      "vfkit backend requires macOS and is not supported on this host platform.",
+    );
+  }
+
+  if (vmm === "vfkit") {
+    const firecrackerOnly = [
+      options.firecrackerPath !== undefined ? "sandbox.firecrackerPath" : null,
+      options.firecrackerApiSocketPath !== undefined
+        ? "sandbox.firecrackerApiSocketPath"
+        : null,
+      options.firecrackerVsockPath !== undefined
+        ? "sandbox.firecrackerVsockPath"
+        : null,
+      options.firecrackerGuestCid !== undefined
+        ? "sandbox.firecrackerGuestCid"
+        : null,
+      options.firecrackerSnapshot !== undefined
+        ? "sandbox.firecrackerSnapshot"
+        : null,
+    ].filter((key): key is string => key !== null);
+    if (firecrackerOnly.length > 0) {
+      throw new Error(
+        `Unsupported vfkit option${firecrackerOnly.length === 1 ? "" : "s"}: ${firecrackerOnly.join(", ")}.`,
+      );
+    }
+    if (netEnabled) {
+      throw new Error(
+        "vfkit backend does not support mediated guest egress yet; leave sandbox.netEnabled unset/false.",
+      );
+    }
+  }
+
+  if (vmm === "firecracker") {
+    const vfkitOnly = [
+      options.vfkitPath !== undefined ? "sandbox.vfkitPath" : null,
+      options.vfkitVsockPath !== undefined ? "sandbox.vfkitVsockPath" : null,
+    ].filter((key): key is string => key !== null);
+    if (vfkitOnly.length > 0) {
+      throw new Error(
+        `Unsupported Firecracker option${vfkitOnly.length === 1 ? "" : "s"}: ${vfkitOnly.join(", ")}.`,
+      );
+    }
+  }
+
+  if (
+    vmm === "firecracker" &&
+    (!Number.isInteger(firecrackerGuestCid) || firecrackerGuestCid < 3)
+  ) {
     throw new Error(
       `invalid sandbox.firecrackerGuestCid: ${String(firecrackerGuestCid)} (expected integer >= 3)`,
     );
   }
 
-  validateFirecrackerSocketPaths(
-    firecrackerApiSocketPath,
-    firecrackerVsockPath,
-    platform,
-  );
-  parseMemoryToMiB(memory, "Firecracker");
-  validateCpuCount(cpus, "Firecracker");
+  if (vmm === "firecracker") {
+    validateFirecrackerSocketPaths(
+      firecrackerApiSocketPath,
+      firecrackerVsockPath,
+      platform,
+    );
+  }
+  parseMemoryToMiB(memory, backendLabel);
+  validateCpuCount(cpus, backendLabel);
 
   const imageManifest = imageDir ? loadAssetManifest(imageDir) : null;
 
   let kernelPath = baseKernelPath;
   let initrdPath = baseInitrdPath;
   let firecrackerKernelOverride: FirecrackerKernelOverride | null = null;
+  let vfkitKernelOverride: VfkitKernelOverride | null = null;
 
-  if (!explicitImageObject) {
+  if (vmm === "firecracker" && !explicitImageObject) {
     firecrackerKernelOverride = resolveFirecrackerKernelOverride(
       imageManifest,
       imageDir,
@@ -802,6 +931,13 @@ export function resolveSandboxServerOptions(
     if (firecrackerKernelOverride) {
       kernelPath = firecrackerKernelOverride.kernelPath;
       initrdPath = firecrackerKernelOverride.initrdPath;
+    }
+  }
+
+  if (vmm === "vfkit" && !explicitImageObject) {
+    vfkitKernelOverride = resolveVfkitKernelOverride(imageManifest, imageDir);
+    if (vfkitKernelOverride) {
+      kernelPath = vfkitKernelOverride.kernelPath;
     }
   }
 
@@ -827,19 +963,32 @@ export function resolveSandboxServerOptions(
     const host = normalizeArch(hostArch);
     if (host && guestFromManifest.arch !== host) {
       throw new Error(
-        "Guest image architecture mismatch for Firecracker backend.\n" +
+        `Guest image architecture mismatch for ${vmm} backend.\n` +
           `  guest assets: ${guestFromManifest.arch} (from ${guestFromManifest.manifestPath})\n` +
           `  host arch:    ${host}\n\n` +
-          "Fix: select a guest image that matches the Firecracker host architecture.",
+          `Fix: select a guest image that matches the ${vmm} host architecture.`,
       );
     }
   }
 
-  if (!explicitImageObject && !firecrackerKernelOverride) {
+  if (vmm === "firecracker" && !explicitImageObject && !firecrackerKernelOverride) {
     throw new Error(
       "Selected image does not provide Firecracker boot assets.\n" +
         "Expected manifest assets `firecrackerKernel` (and optional `firecrackerInitrd`).\n" +
         "Fix: use an image built with `gondolin build` or choose a published image that includes Firecracker assets.",
+    );
+  }
+
+  if (
+    vmm === "vfkit" &&
+    !explicitImageObject &&
+    imageManifest &&
+    !vfkitKernelOverride
+  ) {
+    throw new Error(
+      "Selected image does not provide vfkit boot assets.\n" +
+        "Expected manifest asset `vfkitKernel`.\n" +
+        "Fix: rebuild the image with a current `gondolin build` or choose a published image that includes vfkit assets.",
     );
   }
 
@@ -857,16 +1006,25 @@ export function resolveSandboxServerOptions(
     options.maxTotalQueuedStdinBytes ?? DEFAULT_MAX_TOTAL_QUEUED_STDIN_BYTES,
     maxQueuedStdinBytes,
   );
+  const bridgeSocketBase =
+    vmm === "vfkit" ? vfkitVsockPath : firecrackerVsockPath;
 
   return {
     vmm,
-    firecrackerPath,
-    firecrackerApiSocketPath,
-    firecrackerVsockPath,
-    firecrackerGuestCid,
-    firecrackerSnapshot: normalizeFirecrackerSnapshot(
-      options.firecrackerSnapshot,
-    ),
+    ...(vmm === "firecracker"
+      ? {
+          firecrackerPath,
+          firecrackerApiSocketPath,
+          firecrackerVsockPath,
+          firecrackerGuestCid,
+          firecrackerSnapshot: normalizeFirecrackerSnapshot(
+            options.firecrackerSnapshot,
+          ),
+        }
+      : {
+          vfkitPath,
+          vfkitVsockPath,
+        }),
     kernelPath,
     initrdPath,
     rootfsPath,
@@ -875,10 +1033,10 @@ export function resolveSandboxServerOptions(
     rootDiskReadOnly,
     memory,
     cpus,
-    virtioSocketPath: `${firecrackerVsockPath}_1024`,
-    virtioFsSocketPath: `${firecrackerVsockPath}_1025`,
-    virtioSshSocketPath: `${firecrackerVsockPath}_1026`,
-    virtioIngressSocketPath: `${firecrackerVsockPath}_1027`,
+    virtioSocketPath: `${bridgeSocketBase}_1024`,
+    virtioFsSocketPath: `${bridgeSocketBase}_1025`,
+    virtioSshSocketPath: `${bridgeSocketBase}_1026`,
+    virtioIngressSocketPath: `${bridgeSocketBase}_1027`,
     netTapName,
     netMac,
     netEnabled,

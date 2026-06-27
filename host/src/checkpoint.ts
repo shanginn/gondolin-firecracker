@@ -76,7 +76,7 @@ export type VmCheckpointData = {
 function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "firecracker") {
+  if (normalized === "firecracker" || normalized === "vfkit") {
     return normalized;
   }
   return null;
@@ -84,16 +84,28 @@ function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
 
 function resolveCheckpointCompatibleVmm(data: VmCheckpointData): SandboxVmm[] {
   if (Array.isArray(data.compatibleVmm)) {
+    const compatible: SandboxVmm[] = [];
     for (const entry of data.compatibleVmm) {
-      if (normalizeSandboxVmm(entry) === "firecracker") return ["firecracker"];
+      const normalized = normalizeSandboxVmm(entry);
+      if (normalized && !compatible.includes(normalized)) {
+        compatible.push(normalized);
+      }
+    }
+    if (compatible.length > 0) {
+      return compatible;
     }
   }
 
-  if (normalizeSandboxVmm(data.createdWithVmm) === "firecracker") {
-    return ["firecracker"];
+  const createdWithVmm = normalizeSandboxVmm(data.createdWithVmm);
+  if (createdWithVmm) {
+    return [createdWithVmm];
   }
 
   return [];
+}
+
+function formatSandboxVmm(value: SandboxVmm): string {
+  return value === "firecracker" ? "Firecracker" : "vfkit";
 }
 
 function writeCheckpointTrailer(
@@ -379,9 +391,17 @@ export class VmCheckpoint {
     };
 
     const compatibleVmm = resolveCheckpointCompatibleVmm(this.data);
-    if (!compatibleVmm.includes("firecracker")) {
+    const requestedVmm = normalizeSandboxVmm(
+      mergedForResume.sandbox?.vmm ?? "firecracker",
+    );
+    if (!requestedVmm) {
       throw new Error(
-        `checkpoint is not compatible with Firecracker (compatible backends: ${compatibleVmm.join(", ")})`,
+        `checkpoint resume requested unsupported backend: ${String(mergedForResume.sandbox?.vmm)}`,
+      );
+    }
+    if (!compatibleVmm.includes(requestedVmm)) {
+      throw new Error(
+        `checkpoint is not compatible with ${formatSandboxVmm(requestedVmm)} (compatible backends: ${compatibleVmm.join(", ")})`,
       );
     }
 
@@ -397,7 +417,7 @@ export class VmCheckpoint {
 
     if ((this.data.diskFormat ?? "raw") !== "raw") {
       throw new Error(
-        "checkpoint disk format is not supported by Firecracker-only runtime",
+        "checkpoint disk format is not supported by this runtime",
       );
     }
     assertRawDiskImage(checkpointDisk);

@@ -2068,7 +2068,7 @@ fi
       snapshotKind: "disk",
       diskFormat: rootDisk.format,
       createdWithVmm,
-      compatibleVmm: ["firecracker"],
+      compatibleVmm: [createdWithVmm],
     };
 
     VmCheckpoint.writeTrailer(resolvedCheckpointPath, data);
@@ -2151,6 +2151,16 @@ function prepareBaseRootDisk(
   resolved: ResolvedSandboxServerOptions,
   opts: Pick<RootDiskState, "readOnly" | "snapshot">,
 ): RootDiskState {
+  if (resolved.vmm === "vfkit" && opts.readOnly) {
+    return installRootDisk(resolved, {
+      path: createTempRawCopy(resolved.rootfsPath),
+      format: "raw",
+      snapshot: false,
+      readOnly: true,
+      deleteOnClose: true,
+    });
+  }
+
   return installRootDisk(resolved, {
     path: resolved.rootfsPath,
     format: "raw",

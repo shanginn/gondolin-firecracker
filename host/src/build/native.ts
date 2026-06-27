@@ -14,6 +14,7 @@ import {
   INITRAMFS_FILENAME,
   KERNEL_FILENAME,
   ROOTFS_FILENAME,
+  VFKIT_KERNEL_FILENAME,
   resolveConfigPath,
   resolveSandboxBinaryPaths,
   writeAssetManifest,
@@ -22,6 +23,7 @@ import {
   type ResolvedAlpineConfig,
 } from "./shared.ts";
 import { materializeFirecrackerKernel } from "./firecracker-kernel.ts";
+import { materializeVfkitKernel } from "./vfkit-kernel.ts";
 
 function hasOciRootfs(config: BuildConfig): boolean {
   return config.oci !== undefined;
@@ -185,12 +187,30 @@ export async function buildNative(
     );
   }
 
+  const vfkitKernelOut = path.join(workDir, VFKIT_KERNEL_FILENAME);
+  if (config.vfkitKernelPath) {
+    log("Using custom vfkit kernel...");
+    fs.copyFileSync(
+      resolveConfigPath(config.vfkitKernelPath, configDir),
+      vfkitKernelOut,
+    );
+  } else {
+    log("Preparing vfkit-compatible kernel...");
+    materializeVfkitKernel({
+      sourceKernelPath: path.join(workDir, KERNEL_FILENAME),
+      outputKernelPath: vfkitKernelOut,
+      arch: config.arch,
+      log,
+    });
+  }
+
   log("Copying assets to output directory...");
 
   const kernelSrc = path.join(workDir, KERNEL_FILENAME);
   const initramfsSrc = path.join(workDir, INITRAMFS_FILENAME);
   const rootfsSrc = path.join(workDir, ROOTFS_FILENAME);
   const firecrackerKernelSrc = path.join(workDir, FIRECRACKER_KERNEL_FILENAME);
+  const vfkitKernelSrc = path.join(workDir, VFKIT_KERNEL_FILENAME);
 
   const kernelDst = path.join(outputDir, KERNEL_FILENAME);
   const initramfsDst = path.join(outputDir, INITRAMFS_FILENAME);
@@ -199,12 +219,16 @@ export async function buildNative(
     outputDir,
     FIRECRACKER_KERNEL_FILENAME,
   );
+  const vfkitKernelDst = path.join(outputDir, VFKIT_KERNEL_FILENAME);
 
   fs.copyFileSync(kernelSrc, kernelDst);
   fs.copyFileSync(initramfsSrc, initramfsDst);
   fs.copyFileSync(rootfsSrc, rootfsDst);
   if (fs.existsSync(firecrackerKernelSrc)) {
     fs.copyFileSync(firecrackerKernelSrc, firecrackerKernelDst);
+  }
+  if (fs.existsSync(vfkitKernelSrc)) {
+    fs.copyFileSync(vfkitKernelSrc, vfkitKernelDst);
   }
 
   log("Generating manifest...");

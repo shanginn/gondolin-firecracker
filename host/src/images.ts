@@ -410,6 +410,14 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
               manifest.assets.firecrackerInitrd,
               "manifest.assets.firecrackerInitrd",
             );
+      const sourceVfkitKernelPath =
+        manifest.assets?.vfkitKernel === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              resolvedDir,
+              manifest.assets.vfkitKernel,
+              "manifest.assets.vfkitKernel",
+            );
 
       if (!fs.existsSync(sourceKernelPath)) {
         throw new Error(
@@ -440,6 +448,11 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       ) {
         throw new Error(
           `missing manifest.assets.firecrackerInitrd file at ${sourceFirecrackerInitrdPath}`,
+        );
+      }
+      if (sourceVfkitKernelPath && !fs.existsSync(sourceVfkitKernelPath)) {
+        throw new Error(
+          `missing manifest.assets.vfkitKernel file at ${sourceVfkitKernelPath}`,
         );
       }
 
@@ -491,6 +504,14 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
               manifest.assets!.firecrackerInitrd!,
               "manifest.assets.firecrackerInitrd",
             );
+      const targetVfkitKernelPath =
+        sourceVfkitKernelPath === undefined
+          ? undefined
+          : resolveContainedAssetPath(
+              tmpDir,
+              manifest.assets!.vfkitKernel!,
+              "manifest.assets.vfkitKernel",
+            );
 
       fs.mkdirSync(path.dirname(targetKernelPath), {
         recursive: true,
@@ -508,6 +529,11 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       }
       if (targetFirecrackerInitrdPath) {
         fs.mkdirSync(path.dirname(targetFirecrackerInitrdPath), {
+          recursive: true,
+        });
+      }
+      if (targetVfkitKernelPath) {
+        fs.mkdirSync(path.dirname(targetVfkitKernelPath), {
           recursive: true,
         });
       }
@@ -536,6 +562,14 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
           safeFirecrackerInitrdPath,
           targetFirecrackerInitrdPath,
         );
+      }
+      if (targetVfkitKernelPath && sourceVfkitKernelPath) {
+        const safeVfkitKernelPath = ensureSafeImportSourcePath(
+          resolvedDir,
+          sourceVfkitKernelPath,
+          "manifest.assets.vfkitKernel",
+        );
+        fs.copyFileSync(safeVfkitKernelPath, targetVfkitKernelPath);
       }
 
       fs.mkdirSync(imageObjectRootDir(), { recursive: true });

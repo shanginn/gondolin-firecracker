@@ -10,6 +10,7 @@ import {
   INITRAMFS_FILENAME,
   KERNEL_FILENAME,
   ROOTFS_FILENAME,
+  VFKIT_KERNEL_FILENAME,
   writeAssetManifest,
 } from "../src/build/shared.ts";
 import type { BuildConfig } from "../src/build/config.ts";
@@ -88,6 +89,31 @@ test("builder: writeAssetManifest records disabled Firecracker initrd", () => {
 
     assert.equal(manifest.assets.firecrackerInitrd, null);
     assert.equal(manifest.checksums.firecrackerInitrd, undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("builder: writeAssetManifest includes vfkit checksums when assets exist", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-manifest-"));
+
+  try {
+    fs.writeFileSync(path.join(dir, KERNEL_FILENAME), "kernel");
+    fs.writeFileSync(path.join(dir, INITRAMFS_FILENAME), "initramfs");
+    fs.writeFileSync(path.join(dir, ROOTFS_FILENAME), "rootfs");
+    fs.writeFileSync(path.join(dir, VFKIT_KERNEL_FILENAME), "vfkit-kernel");
+
+    const { manifest } = writeAssetManifest(dir, {
+      ...makeConfig(),
+      arch: "aarch64",
+    });
+
+    assert.equal(manifest.assets.vfkitKernel, VFKIT_KERNEL_FILENAME);
+    assert.ok(manifest.checksums.vfkitKernel);
+    assert.equal(
+      manifest.buildId,
+      computeAssetBuildId({ checksums: manifest.checksums, arch: "aarch64" }),
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

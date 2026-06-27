@@ -266,6 +266,7 @@ export type AssetBuildIdInput = {
     rootfs: string;
     firecrackerKernel?: string;
     firecrackerInitrd?: string;
+    vfkitKernel?: string;
   };
   /** guest architecture identifier (e.g. "aarch64") */
   arch?: string;
@@ -291,6 +292,9 @@ export function computeAssetBuildId(input: AssetBuildIdInput): string {
   }
   if (input.checksums.firecrackerInitrd !== undefined) {
     parts.push(`firecrackerInitrd=${input.checksums.firecrackerInitrd}`);
+  }
+  if (input.checksums.vfkitKernel !== undefined) {
+    parts.push(`vfkitKernel=${input.checksums.vfkitKernel}`);
   }
 
   parts.push(`arch=${arch}`);
@@ -348,6 +352,8 @@ export interface AssetManifest {
     firecrackerKernel?: string;
     /** Firecracker initrd image filename, or `null` to boot without one */
     firecrackerInitrd?: string | null;
+    /** vfkit-compatible uncompressed kernel image filename */
+    vfkitKernel?: string;
   };
 
   /** sha256 checksums (hex) */
@@ -362,6 +368,8 @@ export interface AssetManifest {
     firecrackerKernel?: string;
     /** Firecracker initrd checksum */
     firecrackerInitrd?: string;
+    /** vfkit-compatible kernel checksum */
+    vfkitKernel?: string;
   };
 }
 
@@ -456,6 +464,13 @@ export function loadGuestAssets(assetDir: string): GuestAssets {
     }
   }
 
+  if (assetFiles.vfkitKernel) {
+    const vfkitKernelPath = path.join(resolvedDir, assetFiles.vfkitKernel);
+    if (!fs.existsSync(vfkitKernelPath)) {
+      missing.push(assetFiles.vfkitKernel);
+    }
+  }
+
   if (missing.length > 0) {
     throw new Error(
       `Missing guest assets in ${resolvedDir}: ${missing.join(", ")}\n` +
@@ -500,6 +515,13 @@ function assetsExist(dir: string): boolean {
   if (
     assetFiles.firecrackerInitrd &&
     !fs.existsSync(path.join(dir, assetFiles.firecrackerInitrd))
+  ) {
+    return false;
+  }
+
+  if (
+    assetFiles.vfkitKernel &&
+    !fs.existsSync(path.join(dir, assetFiles.vfkitKernel))
   ) {
     return false;
   }

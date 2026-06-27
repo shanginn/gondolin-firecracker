@@ -181,6 +181,13 @@ export async function buildInContainer(
     );
     containerConfig.firecrackerInitrdPath = "/work/firecracker-initrd";
   }
+  if (containerConfig.vfkitKernelPath) {
+    copyExecutable(
+      resolveConfigPath(containerConfig.vfkitKernelPath, options.configDir),
+      "vfkit-kernel",
+    );
+    containerConfig.vfkitKernelPath = "/work/vfkit-kernel";
+  }
   copyExecutable(sandboxHelpers.sandboxdPath, "sandboxd");
   containerConfig.sandboxdPath = "/work/sandboxd";
   copyExecutable(sandboxHelpers.sandboxfsPath, "sandboxfs");

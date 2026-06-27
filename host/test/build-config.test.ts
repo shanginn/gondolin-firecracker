@@ -128,6 +128,20 @@ test("build-config: accepts custom Firecracker boot assets", () => {
   assert.equal(parsed.firecrackerInitrdPath, null);
 });
 
+test("build-config: accepts custom vfkit boot asset", () => {
+  const cfg = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    vfkitKernelPath: "./Image",
+  };
+
+  assert.equal(validateBuildConfig(cfg), true);
+
+  const parsed = parseBuildConfig(JSON.stringify(cfg));
+  assert.equal(parsed.vfkitKernelPath, "./Image");
+});
+
 test("build-config: accepts fast init options", () => {
   const cfg = {
     arch: "x86_64",
@@ -152,6 +166,17 @@ test("build-config: rejects invalid custom Firecracker boot assets", () => {
     distro: "alpine",
     alpine: { version: "3.23.0" },
     firecrackerKernelPath: ["./vmlinux"],
+  };
+
+  assert.equal(validateBuildConfig(invalid), false);
+});
+
+test("build-config: rejects invalid custom vfkit boot asset", () => {
+  const invalid = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    vfkitKernelPath: ["./Image"],
   };
 
   assert.equal(validateBuildConfig(invalid), false);

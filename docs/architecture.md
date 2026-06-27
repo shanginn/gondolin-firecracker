@@ -1,13 +1,13 @@
 # Architecture Overview
 
-Gondolin is a Firecracker VM runtime plus a Node.js control plane.
+Gondolin is a Linux VM runtime plus a Node.js control plane.
 
 ## Components
 
-- **Host package and CLI** start Firecracker, manage guest assets, expose `VM`,
-  and provide VFS/exec/SSH/ingress services.
+- **Host package and CLI** start the selected VMM, manage guest assets, expose
+  `VM`, and provide VFS/exec/SSH/ingress services.
 - **Guest image** is Alpine Linux with small Zig daemons.
-- **Firecracker** is the only VM boundary. It runs on Linux/KVM.
+- **VMM backend** is Firecracker on Linux/KVM or experimental vfkit on macOS.
 
 ## Guest Daemons
 
@@ -21,9 +21,9 @@ Gondolin is a Firecracker VM runtime plus a Node.js control plane.
 ```
 trusted host process
   |
-  | Firecracker API socket
+  | VMM process control
   v
-Firecracker VM process
+VMM process
   |
   | vsock ports 1024-1027
   v
@@ -43,5 +43,6 @@ workspace and persistent data.
 
 The VM boundary isolates compute. The host controls every exposed channel:
 exec, VFS, SSH, ingress, checkpointing, and image selection. Guest egress is
-disabled until a Firecracker network path can enforce Gondolin policy without
-falling back to generic NAT.
+disabled until a backend network path can enforce Gondolin policy without
+falling back to generic NAT. Today that mediated egress path exists for
+Firecracker only.

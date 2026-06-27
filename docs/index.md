@@ -1,8 +1,9 @@
 # Gondolin Documentation
 
-Gondolin runs untrusted code inside Linux/KVM Firecracker micro-VMs and exposes a
-host-side TypeScript control plane for command execution, VFS mounts, host-to-
-guest SSH, ingress, images, and disk checkpoints.
+Gondolin runs untrusted code inside Linux micro-VMs and exposes a host-side
+TypeScript control plane for command execution, VFS mounts, host-to-guest SSH,
+ingress, images, and disk checkpoints. Firecracker on Linux/KVM is the default
+backend; vfkit on macOS is available for experimental local development.
 
 ```bash
 npx @earendil-works/gondolin bash
@@ -22,8 +23,8 @@ console.log(result.stdout);
 await vm.close();
 ```
 
-Guest egress networking is disabled by default. When enabled, Firecracker uses a
-TAP device and Gondolin mediates DNS, TCP, HTTP(S), mapped TCP, and outbound SSH
+Guest egress networking is disabled by default. When enabled on Firecracker, a
+TAP device lets Gondolin mediate DNS, TCP, HTTP(S), mapped TCP, and outbound SSH
 in the host process. Host-to-guest ingress and SSH are supported separately.
 
 ## Using Gondolin
@@ -53,5 +54,5 @@ in the host process. Host-to-guest ingress and SSH are supported separately.
 - [Architecture Overview](./architecture.md): components and data flow
 - [Security Design](./security.md): threat model and guarantees
 - [Network Stack](./network.md): current network behavior
-- [Firecracker Runtime](./backends.md): runtime constraints and defaults
+- [VM Backends](./backends.md): runtime constraints and defaults
 - [Limitations](./limitations.md): current limits

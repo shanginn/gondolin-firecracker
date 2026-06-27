@@ -187,6 +187,11 @@ function renderCliError(err: unknown) {
       );
       return;
     }
+    if (binary.includes("vfkit")) {
+      console.error(`Error: vfkit binary '${binary}' not found.`);
+      console.error("Install vfkit on macOS or set sandbox.vfkitPath / GONDOLIN_VFKIT.");
+      return;
+    }
   }
 
   const message = err instanceof Error ? err.message : String(err);
@@ -240,6 +245,8 @@ function bashUsage() {
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
   );
+  console.log("  --vmm NAME                      VM backend: firecracker|vfkit");
+  console.log("  --vfkit PATH                    vfkit binary path");
   console.log();
   console.log("VFS Options:");
   console.log(
@@ -384,6 +391,8 @@ function execUsage() {
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
   );
+  console.log("  --vmm NAME                      VM backend: firecracker|vfkit");
+  console.log("  --vfkit PATH                    vfkit binary path");
   console.log();
   console.log("Network Options (VM mode only):");
   console.log(
@@ -446,6 +455,12 @@ type CommonOptions = {
   memoryMounts: string[];
   allowedHosts: string[];
   secrets: SecretSpec[];
+
+  /** VM backend */
+  vmm?: "firecracker" | "vfkit";
+
+  /** vfkit binary path */
+  vfkitPath?: string;
 
   /** image selector (asset dir, build id, or name:tag) */
   image?: string;
@@ -903,6 +918,20 @@ function buildVmOptions(common: CommonOptions) {
     };
   }
 
+  if (common.vmm) {
+    vmOptions.sandbox = {
+      ...(vmOptions.sandbox ?? {}),
+      vmm: common.vmm,
+    };
+  }
+
+  if (common.vfkitPath) {
+    vmOptions.sandbox = {
+      ...(vmOptions.sandbox ?? {}),
+      vfkitPath: common.vfkitPath,
+    };
+  }
+
   if (common.rootfsSize !== undefined) {
     vmOptions.rootfs = {
       ...(vmOptions.rootfs ?? {}),
@@ -977,6 +1006,20 @@ function parseExecArgs(argv: string[]): ExecArgs {
         const image = optionArgs[++i];
         if (!image) fail("--image requires an argument");
         args.common.image = image;
+        return i;
+      }
+      case "--vmm": {
+        const vmm = optionArgs[++i] as any;
+        if (vmm !== "firecracker" && vmm !== "vfkit") {
+          fail("--vmm must be one of: firecracker, vfkit");
+        }
+        args.common.vmm = vmm;
+        return i;
+      }
+      case "--vfkit": {
+        const vfkitPath = optionArgs[++i];
+        if (!vfkitPath) fail("--vfkit requires a path argument");
+        args.common.vfkitPath = vfkitPath;
         return i;
       }
       case "--rootfs-size": {
@@ -1415,6 +1458,24 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.image = image;
+        break;
+      }
+      case "--vmm": {
+        const vmm = argv[++i] as any;
+        if (vmm !== "firecracker" && vmm !== "vfkit") {
+          console.error("--vmm must be one of: firecracker, vfkit");
+          process.exit(1);
+        }
+        args.vmm = vmm;
+        break;
+      }
+      case "--vfkit": {
+        const vfkitPath = argv[++i];
+        if (!vfkitPath) {
+          console.error("--vfkit requires a path argument");
+          process.exit(1);
+        }
+        args.vfkitPath = vfkitPath;
         break;
       }
       case "--rootfs-size": {
