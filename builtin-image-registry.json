@@ -22,6 +22,12 @@
     },
     "alpine-tiny-firecracker:latest": {
       "x86_64": "d887b797-e4a3-5bb3-94c9-26bf5a43c367"
+    },
+    "alpine-vfkit:0.1.0": {
+      "aarch64": "bf49d64f-7cd2-56f3-8efe-8eb3c0d0d776"
+    },
+    "alpine-vfkit:latest": {
+      "aarch64": "bf49d64f-7cd2-56f3-8efe-8eb3c0d0d776"
     }
   },
   "builds": {
@@ -59,6 +65,11 @@
       "arch": "x86_64",
       "url": "https://github.com/shanginn/gondolin-firecracker/releases/download/image-alpine-tiny-firecracker--0.1.0/gondolin-image-alpine-tiny-firecracker-0.1.0-x86_64.tar.gz",
       "sha256": "1f4c68cdd83f42b1b86bb3222d5ffb35839b1795cc54b53ef892b26ff24e1236"
+    },
+    "bf49d64f-7cd2-56f3-8efe-8eb3c0d0d776": {
+      "arch": "aarch64",
+      "url": "https://github.com/shanginn/gondolin-firecracker/releases/download/image-alpine-vfkit--0.1.0/gondolin-image-alpine-vfkit-0.1.0-aarch64.tar.gz",
+      "sha256": "f945cb29417addfcbdb6403248f60715a6eb324846d4dca557db82ec7a28d959"
     }
   }
 }
