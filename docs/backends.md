@@ -99,12 +99,29 @@ The vfkit backend boots with vfkit's Linux bootloader, a `virtio-blk` root disk,
 uses `gondolin.transport=vsock`, so `sandboxd`, `sandboxfs`, `sandboxssh`, and
 `sandboxingress` reuse the existing protocol.
 
-Build a local Apple Silicon image with:
+Use a published Apple Silicon image with:
+
+```bash
+brew install vfkit
+gondolin exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
+```
+
+Build a local Apple Silicon image with Docker Desktop:
 
 ```bash
 gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --tag alpine-vfkit:local
 gondolin exec --vmm vfkit --image alpine-vfkit:local -- uname -m
 ```
+
+Publish the CI-built image with the Image Release workflow:
+
+```bash
+gh workflow run image-release.yml -f image_tag=0.1.0 -f build_config=images/alpine-vfkit.json
+```
+
+When publishing from a fork, set `GONDOLIN_IMAGE_REGISTRY_URL` to that fork's
+raw `builtin-image-registry.json` until the entry is available from the default
+upstream registry.
 
 The current x86_64 tiny Firecracker profile does not run locally on Apple
 Silicon. It is an x86_64 PVH/KVM kernel profile, while vfkit on M-series Macs

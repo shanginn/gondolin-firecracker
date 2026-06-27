@@ -44,19 +44,28 @@ The default Alpine image keeps the guest base intentionally small:
 `openssh`, `python3`, `nodejs`, `npm`, `uv`, or `e2fsprogs` through a custom
 image when a workload actually needs them.
 
-On macOS, select the vfkit backend explicitly:
+On macOS, select the vfkit backend explicitly. With a published vfkit image,
+runtime use does not require Docker:
 
 ```bash
+brew install vfkit
 npx @earendil-works/gondolin bash --vmm vfkit
+gondolin exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
 ```
 
 The vfkit backend uses `vfkitKernel`/`initramfs`/`rootfs` image assets and
-guest-to-host vsock sockets. Build a local Apple Silicon image with:
+guest-to-host vsock sockets. Build a local Apple Silicon image with Docker
+Desktop, or publish it from CI with the Image Release workflow:
 
 ```bash
 gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --tag alpine-vfkit:local
 gondolin exec --vmm vfkit --image alpine-vfkit:local -- uname -m
+gh workflow run image-release.yml -f image_tag=0.1.0 -f build_config=images/alpine-vfkit.json
 ```
+
+When consuming a fork-hosted image release before its registry entry is
+available in the default upstream registry, set `GONDOLIN_IMAGE_REGISTRY_URL` to
+that fork's raw `builtin-image-registry.json`.
 
 Mediated guest egress, Firecracker VM-state snapshots, and the current x86_64
 tiny Firecracker kernel profile are not supported by vfkit.

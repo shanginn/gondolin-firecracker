@@ -135,6 +135,11 @@ export interface RuntimeDefaultsConfig {
   rootfsMode?: RootfsMode;
 }
 
+export interface ReleaseConfig {
+  /** image release workflow target architectures */
+  arches?: Architecture[];
+}
+
 /**
  * Build configuration for generating custom VM assets.
  */
@@ -171,6 +176,9 @@ export interface BuildConfig {
 
   /** runtime defaults baked into the asset manifest */
   runtimeDefaults?: RuntimeDefaultsConfig;
+
+  /** release workflow metadata */
+  release?: ReleaseConfig;
 
   /** custom Firecracker kernel path (built-in Alpine kernel when undefined) */
   firecrackerKernelPath?: string;
@@ -250,6 +258,10 @@ const isOptionalNumber = (value: unknown): boolean =>
 
 const isOptionalStringArray = (value: unknown): boolean =>
   value === undefined || isStringArray(value);
+
+const isArchitectureArray = (value: unknown): value is Architecture[] =>
+  Array.isArray(value) &&
+  value.every((entry) => entry === "aarch64" || entry === "x86_64");
 
 const isPostBuildCopyEntry = (value: unknown): value is PostBuildCopyEntry =>
   isRecord(value) &&
@@ -396,6 +408,19 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
     if (
       runtimeDefaults.rootfsMode !== undefined &&
       !isRootfsMode(runtimeDefaults.rootfsMode)
+    ) {
+      return false;
+    }
+  }
+
+  if (cfg.release !== undefined) {
+    if (!isRecord(cfg.release)) {
+      return false;
+    }
+    const release = cfg.release as Record<string, unknown>;
+    if (
+      release.arches !== undefined &&
+      !isArchitectureArray(release.arches)
     ) {
       return false;
     }

@@ -12,6 +12,16 @@ on:
         required: false
         default: "images/alpine-base.json"
         type: string
+      build_arches:
+        description: "Architectures to build"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - both
+          - aarch64
+          - x86_64
       image_name:
         description: "Optional image name override"
         required: false
@@ -52,6 +62,7 @@ jobs:
         env:
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
           INPUT_BUILD_CONFIG: ${{ inputs.build_config }}
+          INPUT_BUILD_ARCHES: ${{ inputs.build_arches }}
           INPUT_IMAGE_NAME: ${{ inputs.image_name }}
           SOURCE_REF: ${{ steps.source.outputs.source_ref }}
         run: |
@@ -61,6 +72,7 @@ jobs:
 
           const imageTag = (process.env.INPUT_IMAGE_TAG || '').trim();
           const buildConfigInput = (process.env.INPUT_BUILD_CONFIG || '').trim();
+          const buildArchesInput = (process.env.INPUT_BUILD_ARCHES || 'auto').trim() || 'auto';
           const imageNameInput = (process.env.INPUT_IMAGE_NAME || '').trim();
           const sourceRef = (process.env.SOURCE_REF || '').trim();
 
@@ -93,6 +105,12 @@ jobs:
           }
 
           const parsed = JSON.parse(fs.readFileSync(resolvedConfig, 'utf8'));
+          const buildArchChoices = new Set(['auto', 'both', 'aarch64', 'x86_64']);
+          if (!buildArchChoices.has(buildArchesInput)) {
+            throw new Error(
+              `build_arches must be one of: ${Array.from(buildArchChoices).join(', ')}`,
+            );
+          }
 
           const configImageName =
             typeof parsed.imageName === 'string' && parsed.imageName.trim().length > 0
@@ -123,27 +141,49 @@ jobs:
           const usesTinyX86Kernel = firecrackerKernelPath.includes(
             'tmp/firecracker-tiny-kernel',
           );
+
+          const configRelease = parsed.release;
+          const releaseArchEntries =
+            configRelease &&
+            typeof configRelease === 'object' &&
+            !Array.isArray(configRelease) &&
+            Array.isArray(configRelease.arches)
+              ? configRelease.arches
+              : [];
+          const releaseArches = Array.from(new Set(releaseArchEntries));
+          for (const arch of releaseArches) {
+            if (arch !== 'aarch64' && arch !== 'x86_64') {
+              throw new Error(`release.arches contains unsupported architecture: ${arch}`);
+            }
+          }
+
+          let arches;
+          if (buildArchesInput === 'both') {
+            arches = ['aarch64', 'x86_64'];
+          } else if (buildArchesInput === 'aarch64' || buildArchesInput === 'x86_64') {
+            arches = [buildArchesInput];
+          } else if (usesTinyX86Kernel) {
+            arches = ['x86_64'];
+          } else if (releaseArches.length > 0) {
+            arches = releaseArches;
+          } else {
+            arches = ['aarch64', 'x86_64'];
+          }
+
+          if (usesTinyX86Kernel && arches.some((arch) => arch !== 'x86_64')) {
+            throw new Error(
+              `${buildConfig} uses the x86_64 tiny Firecracker kernel; build_arches must be x86_64 or auto`,
+            );
+          }
+
+          const matrixEntry = (arch) => ({
+            arch,
+            zig_target:
+              arch === 'aarch64' ? 'aarch64-linux-musl' : 'x86_64-linux-musl',
+            archive_arch: arch,
+          });
           const buildMatrix = {
-            include: usesTinyX86Kernel
-              ? [
-                  {
-                    arch: 'x86_64',
-                    zig_target: 'x86_64-linux-musl',
-                    archive_arch: 'x86_64',
-                  },
-                ]
-              : [
-                  {
-                    arch: 'aarch64',
-                    zig_target: 'aarch64-linux-musl',
-                    archive_arch: 'aarch64',
-                  },
-                  {
-                    arch: 'x86_64',
-                    zig_target: 'x86_64-linux-musl',
-                    archive_arch: 'x86_64',
-                  },
-                ],
+            include: arches.map(matrixEntry),
           };
 
           const output = fs.createWriteStream(process.env.GITHUB_OUTPUT, {
@@ -236,8 +276,55 @@ jobs:
       - name: Package image asset
         run: |
           ARCHIVE="gondolin-image-${{ needs.prepare.outputs.image_name }}-${{ needs.prepare.outputs.image_tag }}-${{ matrix.archive_arch }}.tar.gz"
-          cd guest/image/out
-          tar -czvf "../../../${ARCHIVE}" manifest.json vmlinuz-virt firecracker-kernel initramfs.cpio.lz4 rootfs.ext4
+          export ARCHIVE
+          node - <<'NODE'
+          const childProcess = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
+
+          const imageDir = path.resolve('guest/image/out');
+          const archive = path.resolve(process.env.ARCHIVE);
+          const manifest = JSON.parse(
+            fs.readFileSync(path.join(imageDir, 'manifest.json'), 'utf8'),
+          );
+          const files = ['manifest.json'];
+          const seen = new Set(files);
+
+          function addAsset(field, value) {
+            if (typeof value !== 'string' || value.length === 0) return;
+            if (path.isAbsolute(value)) {
+              throw new Error(`manifest.assets.${field} must be relative: ${value}`);
+            }
+
+            const resolved = path.resolve(imageDir, value);
+            const relative = path.relative(imageDir, resolved);
+            if (
+              relative === '' ||
+              relative === '..' ||
+              relative.startsWith(`..${path.sep}`) ||
+              path.isAbsolute(relative)
+            ) {
+              throw new Error(`manifest.assets.${field} escapes image dir: ${value}`);
+            }
+            if (!fs.existsSync(resolved)) {
+              throw new Error(`manifest.assets.${field} points to missing file: ${value}`);
+            }
+            if (!seen.has(value)) {
+              seen.add(value);
+              files.push(value);
+            }
+          }
+
+          for (const [field, value] of Object.entries(manifest.assets || {})) {
+            addAsset(field, value);
+          }
+
+          childProcess.execFileSync(
+            'tar',
+            ['-czvf', archive, '-C', imageDir, ...files],
+            { stdio: 'inherit' },
+          );
+          NODE
 
       - name: Compute sha256 + metadata
         run: |

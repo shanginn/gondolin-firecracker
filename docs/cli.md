@@ -88,6 +88,7 @@ gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --
 - `GONDOLIN_RUNTIME_DIR` - short writable directory for Unix sockets
 - `GONDOLIN_GUEST_DIR` - local guest asset directory
 - `GONDOLIN_DEFAULT_IMAGE` - default image selector
+- `GONDOLIN_IMAGE_REGISTRY_URL` - builtin image registry URL override
 - `GONDOLIN_CHECKPOINT_DIR` - snapshot cache directory
 - `GONDOLIN_DEBUG` - comma-separated debug components
 

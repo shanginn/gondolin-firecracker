@@ -1,6 +1,9 @@
 {
   "imageName": "alpine-vfkit",
   "arch": "aarch64",
+  "release": {
+    "arches": ["aarch64"]
+  },
   "distro": "alpine",
   "alpine": {
     "version": "3.23.0",

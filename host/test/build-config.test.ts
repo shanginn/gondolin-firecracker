@@ -112,6 +112,22 @@ test("build-config: accepts runtimeDefaults.rootfsMode", () => {
   assert.equal(parsed.runtimeDefaults?.rootfsMode, "readonly");
 });
 
+test("build-config: accepts release architecture metadata", () => {
+  const cfg = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    release: {
+      arches: ["aarch64"],
+    },
+  };
+
+  assert.equal(validateBuildConfig(cfg), true);
+
+  const parsed = parseBuildConfig(JSON.stringify(cfg));
+  assert.deepEqual(parsed.release?.arches, ["aarch64"]);
+});
+
 test("build-config: accepts custom Firecracker boot assets", () => {
   const cfg = {
     arch: "x86_64",
@@ -189,6 +205,23 @@ test("build-config: rejects invalid runtimeDefaults.rootfsMode", () => {
     alpine: { version: "3.23.0" },
     runtimeDefaults: {
       rootfsMode: "overlay",
+    },
+  };
+
+  assert.equal(validateBuildConfig(invalid), false);
+  assert.throws(
+    () => parseBuildConfig(JSON.stringify(invalid)),
+    /Invalid build configuration/,
+  );
+});
+
+test("build-config: rejects invalid release architecture metadata", () => {
+  const invalid = {
+    arch: "aarch64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    release: {
+      arches: ["arm64"],
     },
   };
 

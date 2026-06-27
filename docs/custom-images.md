@@ -31,6 +31,25 @@ gondolin exec --vmm vfkit --image alpine-vfkit:local -- uname -m
 The vfkit config forces Docker-based image assembly so macOS hosts do not need
 `mke2fs`, `cpio`, or `lz4` installed directly.
 
+Publish a CI-built Apple Silicon image with:
+
+```bash
+gh workflow run image-release.yml -f image_tag=0.1.0 -f build_config=images/alpine-vfkit.json
+```
+
+The Image Release workflow builds the architectures declared by
+`release.arches` in the config and packages every asset listed in the manifest,
+including `vfkit-kernel`. Once the registry entry is available, macOS users only
+need `vfkit` at runtime:
+
+```bash
+gondolin exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
+```
+
+When publishing from a fork, set `GONDOLIN_IMAGE_REGISTRY_URL` to that fork's
+raw `builtin-image-registry.json` until the image entry is available in the
+default upstream registry.
+
 ## Minimal Config
 
 ```json
