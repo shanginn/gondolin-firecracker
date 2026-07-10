@@ -36,6 +36,8 @@ const vm = await VM.create({
 ```
 
 The base image is never resized in place.
+The selected guest image must include `e2fsprogs` because Gondolin runs
+`resize2fs` inside the guest after growing the raw disk.
 
 ## Guest Assets
 

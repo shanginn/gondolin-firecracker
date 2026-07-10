@@ -2,6 +2,8 @@
 
 PNPM ?= pnpm
 NODE ?= node
+TSC ?= ./node_modules/.bin/tsc
+TSC_BUILD_INFO ?= ../.cache/host-typecheck.tsbuildinfo
 RUN_PARALLEL ?= ../scripts/run-parallel
 PRETTIER ?= ../node_modules/.bin/prettier
 
@@ -12,7 +14,8 @@ build:
 	@$(PNPM) run build
 
 typecheck:
-	@$(PNPM) exec tsc -p tsconfig.json --noEmit
+	@mkdir -p $(dir $(TSC_BUILD_INFO))
+	@$(TSC) -p tsconfig.json --noEmit --incremental --tsBuildInfoFile $(TSC_BUILD_INFO)
 
 lint: typecheck
 
@@ -35,4 +38,4 @@ fuzz:
 	@$(PNPM) run fuzz -- $(TARGET)
 
 clean:
-	@rm -rf dist
+	@rm -rf dist $(TSC_BUILD_INFO)

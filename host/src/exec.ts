@@ -385,6 +385,9 @@ export type ExecSession = {
   // Flow control window size in `bytes`
   windowBytes: number;
 
+  // Window update batching threshold in `bytes`
+  windowUpdateThreshold: number;
+
   // Remaining credits granted to the guest in `bytes`
   stdoutCredit: number;
   stderrCredit: number;
@@ -674,6 +677,10 @@ export function createExecSession(
   });
 
   const windowBytes = resolveWindowBytes(options.windowBytes);
+  const windowUpdateThreshold = Math.max(
+    1024,
+    Math.min(MIN_WINDOW_UPDATE_BYTES, Math.floor(windowBytes / 2)),
+  );
 
   const session: ExecSession = {
     id,
@@ -684,6 +691,7 @@ export function createExecSession(
     stdoutChunks: [],
     stderrChunks: [],
     windowBytes,
+    windowUpdateThreshold,
     stdoutCredit: windowBytes,
     stderrCredit: windowBytes,
     stdoutUpdatePending: 0,
@@ -744,14 +752,6 @@ function refillPipeWindow(session: ExecSession, stream: "stdout" | "stderr") {
   }
 }
 
-function updateThreshold(session: ExecSession): number {
-  // Coalesce updates, but ensure small windows still make progress.
-  return Math.max(
-    1024,
-    Math.min(MIN_WINDOW_UPDATE_BYTES, Math.floor(session.windowBytes / 2)),
-  );
-}
-
 function flushWindowUpdates(session: ExecSession) {
   if (!session.sendWindowUpdate) return;
 
@@ -779,7 +779,7 @@ function queueWindowUpdate(
   if (stream === "stdout") session.stdoutUpdatePending += bytes;
   else session.stderrUpdatePending += bytes;
 
-  const threshold = updateThreshold(session);
+  const threshold = session.windowUpdateThreshold;
 
   // Send if we have a meaningful batch, or if the guest is starved on this stream.
   if (
@@ -800,8 +800,8 @@ export function finishExecSession(
   const result = new ExecResult(
     session.id,
     exitCode,
-    Buffer.concat(session.stdoutChunks),
-    Buffer.concat(session.stderrChunks),
+    concatOutputChunks(session.stdoutChunks),
+    concatOutputChunks(session.stderrChunks),
     signal,
     session.encoding,
   );
@@ -814,6 +814,12 @@ export function finishExecSession(
   }
 
   session.resolve(result);
+}
+
+function concatOutputChunks(chunks: Buffer[]) {
+  if (chunks.length === 0) return Buffer.alloc(0);
+  if (chunks.length === 1) return chunks[0];
+  return Buffer.concat(chunks);
 }
 
 export function rejectExecSession(session: ExecSession, error: Error): void {

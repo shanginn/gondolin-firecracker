@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
+import { execFileSync } from "child_process";
 
 export type DiskFormat = "raw";
 
@@ -102,12 +103,47 @@ export function createTempRawCopy(sourcePath: string): string {
     `gondolin-disk-${randomUUID().slice(0, 8)}.raw`,
   );
   try {
-    fs.copyFileSync(sourcePath, copyPath);
+    copyFileCow(sourcePath, copyPath);
     return copyPath;
   } catch (err) {
     fs.rmSync(copyPath, { force: true });
     throw err;
   }
+}
+
+function copyFileCow(sourcePath: string, copyPath: string): void {
+  if (process.platform === "darwin") {
+    try {
+      // Node's COPYFILE_FICLONE currently falls back to a full copy on APFS,
+      // while macOS cp exposes clonefile(2) through -c.
+      execFileSync("/bin/cp", ["-c", "--", sourcePath, copyPath], {
+        stdio: "ignore",
+      });
+      return;
+    } catch {
+      // A failed cp may leave a partial destination behind.
+      fs.rmSync(copyPath, { force: true });
+    }
+  }
+
+  if (process.platform === "linux") {
+    try {
+      // Preserve sparse ext4 images and use a reflink when the filesystem
+      // supports one. Node's COPYFILE_FICLONE fallback expands sparse holes.
+      execFileSync(
+        "/bin/cp",
+        ["--reflink=auto", "--sparse=always", "--", sourcePath, copyPath],
+        { stdio: "ignore" },
+      );
+      return;
+    } catch {
+      // BusyBox and older cp implementations may not support these flags.
+      fs.rmSync(copyPath, { force: true });
+    }
+  }
+
+  // Non-FORCE mode transparently falls back on filesystems without reflinks.
+  fs.copyFileSync(sourcePath, copyPath, fs.constants.COPYFILE_FICLONE);
 }
 
 /**

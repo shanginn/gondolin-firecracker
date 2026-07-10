@@ -9,12 +9,23 @@ import { findGuestSourceRoot, runPostbuild } from "../scripts/postbuild.mjs";
 
 function makeHostPackage(root: string): string {
   const pkgRoot = path.join(root, "host");
-  fs.mkdirSync(path.join(pkgRoot, "src", "vfs", "node", "vendored-node-vfs"), {
-    recursive: true,
-  });
+  const vendoredRoot = path.join(
+    pkgRoot,
+    "src",
+    "vfs",
+    "node",
+    "vendored-node-vfs",
+  );
+  fs.mkdirSync(path.join(vendoredRoot, "lib"), { recursive: true });
+  fs.writeFileSync(path.join(vendoredRoot, "lib", "stub.js"), "vendored");
   fs.writeFileSync(
-    path.join(pkgRoot, "src", "vfs", "node", "vendored-node-vfs", "stub.txt"),
-    "vendored",
+    path.join(vendoredRoot, "package.json"),
+    '{"type":"commonjs"}\n',
+  );
+  fs.writeFileSync(path.join(vendoredRoot, "LICENSE"), "license\n");
+  fs.writeFileSync(
+    path.join(vendoredRoot, "README.md"),
+    "not needed at runtime\n",
   );
   fs.mkdirSync(path.join(pkgRoot, "dist", "src"), { recursive: true });
   fs.writeFileSync(
@@ -67,9 +78,24 @@ test("postbuild: finds guest sources via GONDOLIN_GUEST_SRC", () => {
           "vfs",
           "node",
           "vendored-node-vfs",
-          "stub.txt",
+          "lib",
+          "stub.js",
         ),
       ),
+    );
+    assert.equal(
+      fs.existsSync(
+        path.join(
+          pkgRoot,
+          "dist",
+          "src",
+          "vfs",
+          "node",
+          "vendored-node-vfs",
+          "README.md",
+        ),
+      ),
+      false,
     );
     assert.equal(
       fs.readFileSync(path.join(pkgRoot, "dist", "src", "index.d.ts"), "utf8"),

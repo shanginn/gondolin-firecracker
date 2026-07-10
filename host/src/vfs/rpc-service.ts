@@ -127,7 +127,7 @@ export class FsRpcService {
   }
 
   async handleRequest(message: FsRequest): Promise<FsResponse> {
-    const start = Date.now();
+    const start = this.logger ? Date.now() : 0;
     const op = message.p.op;
     let err = 0;
     let res: Record<string, unknown> | undefined;
@@ -144,18 +144,17 @@ export class FsRpcService {
       }
     }
 
-    this.record(op, err, res, Date.now() - start);
+    this.record(op, err, res, this.logger ? Date.now() - start : 0);
+
+    const payload: FsResponse["p"] = { op, err };
+    if (res) payload.res = res;
+    if (messageText && err !== 0) payload.message = messageText;
 
     return {
       v: 1,
       t: "fs_response",
       id: message.id,
-      p: {
-        op,
-        err,
-        ...(res ? { res } : {}),
-        ...(messageText && err !== 0 ? { message: messageText } : {}),
-      },
+      p: payload,
     };
   }
 
@@ -176,7 +175,7 @@ export class FsRpcService {
     );
   }
 
-  private async dispatch(op: string, req: Record<string, unknown>) {
+  private dispatch(op: string, req: Record<string, unknown>) {
     switch (op) {
       case "lookup":
         return this.handleLookup(req);
@@ -228,7 +227,7 @@ export class FsRpcService {
     const name = requireString(req.name, "lookup", "name");
     validateName(name, "lookup");
     const parentPath = this.requirePath(parentIno, "lookup");
-    const entryPath = normalizePath(path.posix.join(parentPath, name));
+    const entryPath = joinChildPath(parentPath, name);
     const stats = await this.provider.lstat(entryPath);
     const ino = this.ensureIno(entryPath);
     const attr = statsToAttr(ino, stats);
@@ -281,31 +280,29 @@ export class FsRpcService {
     const start = Math.min(offset, entries.length);
 
     const responseEntries: Array<Record<string, unknown>> = [];
+    let nextIndex = start;
     for (
-      let index = start;
-      index < entries.length && responseEntries.length < maxEntries;
-      index += 1
+      ;
+      nextIndex < entries.length && responseEntries.length < maxEntries;
+      nextIndex += 1
     ) {
-      const entry = entries[index];
+      const entry = entries[nextIndex];
       const name = typeof entry === "string" ? entry : entry.name;
-      if (!name || name.includes("/") || name.includes("\0")) {
+      if (!isValidName(name)) {
         continue;
       }
-      const childPath = normalizePath(path.posix.join(entryPath, name));
+      const childPath = joinChildPath(entryPath, name);
       const childIno = this.ensureIno(childPath);
       const type = await direntType(entry, childPath, this.provider);
       responseEntries.push({
         ino: childIno,
         name,
         type,
-        offset: index + 1,
+        offset: nextIndex + 1,
       });
     }
 
-    const nextOffset =
-      start + responseEntries.length >= entries.length
-        ? 0
-        : start + responseEntries.length;
+    const nextOffset = nextIndex >= entries.length ? 0 : nextIndex;
 
     return {
       entries: responseEntries,
@@ -387,7 +384,7 @@ export class FsRpcService {
     validateName(name, "create");
 
     const parentPath = this.requirePath(parentIno, "create");
-    const entryPath = normalizePath(path.posix.join(parentPath, name));
+    const entryPath = joinChildPath(parentPath, name);
     const append = (flags & LINUX_OPEN_FLAGS.O_APPEND) !== 0;
     const handle = await this.provider.open(
       entryPath,
@@ -418,7 +415,7 @@ export class FsRpcService {
     validateName(name, "mkdir");
 
     const parentPath = this.requirePath(parentIno, "mkdir");
-    const entryPath = normalizePath(path.posix.join(parentPath, name));
+    const entryPath = joinChildPath(parentPath, name);
     await this.provider.mkdir(entryPath, { mode });
     const stats = await this.provider.stat(entryPath);
     const ino = this.ensureIno(entryPath);
@@ -441,7 +438,7 @@ export class FsRpcService {
     validateName(name, "symlink");
 
     const parentPath = this.requirePath(parentIno, "symlink");
-    const entryPath = normalizePath(path.posix.join(parentPath, name));
+    const entryPath = joinChildPath(parentPath, name);
 
     const provider = this.provider as {
       symlink?: (target: string, path: string, type?: string) => Promise<void>;
@@ -471,7 +468,7 @@ export class FsRpcService {
     validateName(name, "unlink");
 
     const parentPath = this.requirePath(parentIno, "unlink");
-    const entryPath = normalizePath(path.posix.join(parentPath, name));
+    const entryPath = joinChildPath(parentPath, name);
     await this.provider.unlink(entryPath);
     this.removeMapping(entryPath);
     this.invalidateReaddirCacheEntries([parentPath]);
@@ -484,7 +481,7 @@ export class FsRpcService {
     validateName(name, "rmdir");
 
     const parentPath = this.requirePath(parentIno, "rmdir");
-    const entryPath = normalizePath(path.posix.join(parentPath, name));
+    const entryPath = joinChildPath(parentPath, name);
     await this.provider.rmdir(entryPath);
     this.removeMapping(entryPath);
     this.invalidateReaddirCacheEntries([parentPath, entryPath], true);
@@ -513,8 +510,8 @@ export class FsRpcService {
 
     const oldParentPath = this.requirePath(oldParentIno, "rename");
     const newParentPath = this.requirePath(newParentIno, "rename");
-    const oldPath = normalizePath(path.posix.join(oldParentPath, oldName));
-    const newPath = normalizePath(path.posix.join(newParentPath, newName));
+    const oldPath = joinChildPath(oldParentPath, oldName);
+    const newPath = joinChildPath(newParentPath, newName);
     await this.provider.rename(oldPath, newPath);
     this.renameMapping(oldPath, newPath);
     this.invalidateReaddirCacheEntries([oldParentPath, newParentPath]);
@@ -534,7 +531,7 @@ export class FsRpcService {
 
     const oldPath = this.requirePath(oldIno, "link");
     const newParentPath = this.requirePath(newParentIno, "link");
-    const newPath = normalizePath(path.posix.join(newParentPath, newName));
+    const newPath = joinChildPath(newParentPath, newName);
 
     const provider = this.provider as {
       link?: (existingPath: string, newPath: string) => Promise<void>;
@@ -757,7 +754,7 @@ export class FsRpcService {
   }
 
   private async readCachedDirEntries(entryPath: string) {
-    const normalized = normalizePath(entryPath);
+    const normalized = entryPath;
     const now = Date.now();
     const cached = this.readdirCache.get(normalized);
     if (cached && cached.expiresAt > now) {
@@ -834,7 +831,7 @@ export class FsRpcService {
   ) {
     const targets = new Set<string>();
     for (const entryPath of entryPaths) {
-      targets.add(normalizePath(entryPath));
+      targets.add(entryPath);
     }
     if (targets.size === 0) {
       return;
@@ -856,19 +853,18 @@ export class FsRpcService {
   }
 
   private ensureIno(entryPath: string, preferredIno?: number) {
-    const normalized = normalizePath(entryPath);
-    const existing = this.pathToIno.get(normalized);
+    const existing = this.pathToIno.get(entryPath);
     if (existing) return existing;
 
     const ino = preferredIno ?? this.nextIno++;
-    this.pathToIno.set(normalized, ino);
+    this.pathToIno.set(entryPath, ino);
 
     let paths = this.inoToPaths.get(ino);
     if (!paths) {
       paths = new Set();
       this.inoToPaths.set(ino, paths);
     }
-    paths.add(normalized);
+    paths.add(entryPath);
     return ino;
   }
 
@@ -930,9 +926,8 @@ export class FsRpcService {
   }
 
   private removeMapping(entryPath: string) {
-    const normalized = normalizePath(entryPath);
     for (const [pathKey, ino] of this.pathToIno.entries()) {
-      if (pathKey === normalized || pathKey.startsWith(normalized + "/")) {
+      if (pathKey === entryPath || pathKey.startsWith(entryPath + "/")) {
         this.pathToIno.delete(pathKey);
         const paths = this.inoToPaths.get(ino);
         if (paths) {
@@ -946,20 +941,15 @@ export class FsRpcService {
   }
 
   private renameMapping(oldPath: string, newPath: string) {
-    const normalizedOld = normalizePath(oldPath);
-    const normalizedNew = normalizePath(newPath);
     const updates: Array<{ oldPath: string; newPath: string; ino: number }> =
       [];
 
     for (const [pathKey, ino] of this.pathToIno.entries()) {
-      if (
-        pathKey === normalizedOld ||
-        pathKey.startsWith(normalizedOld + "/")
-      ) {
-        const suffix = pathKey.slice(normalizedOld.length);
+      if (pathKey === oldPath || pathKey.startsWith(oldPath + "/")) {
+        const suffix = pathKey.slice(oldPath.length);
         updates.push({
           oldPath: pathKey,
-          newPath: normalizedNew + suffix,
+          newPath: newPath + suffix,
           ino,
         });
       }
@@ -967,9 +957,9 @@ export class FsRpcService {
 
     for (const [pathKey, ino] of this.pathToIno.entries()) {
       const overlapsDestination =
-        pathKey === normalizedNew || pathKey.startsWith(normalizedNew + "/");
+        pathKey === newPath || pathKey.startsWith(newPath + "/");
       const isMovedSource =
-        pathKey === normalizedOld || pathKey.startsWith(normalizedOld + "/");
+        pathKey === oldPath || pathKey.startsWith(oldPath + "/");
       if (!overlapsDestination || isMovedSource) {
         continue;
       }
@@ -999,11 +989,11 @@ export class FsRpcService {
 
     for (const handleEntry of this.handles.values()) {
       if (
-        handleEntry.path === normalizedOld ||
-        handleEntry.path.startsWith(normalizedOld + "/")
+        handleEntry.path === oldPath ||
+        handleEntry.path.startsWith(oldPath + "/")
       ) {
-        const suffix = handleEntry.path.slice(normalizedOld.length);
-        handleEntry.path = normalizedNew + suffix;
+        const suffix = handleEntry.path.slice(oldPath.length);
+        handleEntry.path = newPath + suffix;
       }
     }
   }
@@ -1018,6 +1008,10 @@ function normalizePath(entryPath: string) {
     normalized = normalized.slice(0, -1);
   }
   return normalized;
+}
+
+function joinChildPath(parentPath: string, name: string) {
+  return parentPath === "/" ? `/${name}` : `${parentPath}/${name}`;
 }
 
 function matchesAnyTarget(
@@ -1037,9 +1031,19 @@ function matchesAnyTarget(
 }
 
 function validateName(name: string, op: string) {
-  if (!name || name.includes("/") || name.includes("\0")) {
+  if (!isValidName(name)) {
     throw createErrnoError(ERRNO.EINVAL, op, name);
   }
+}
+
+function isValidName(name: string) {
+  return (
+    name.length > 0 &&
+    name !== "." &&
+    name !== ".." &&
+    !name.includes("/") &&
+    !name.includes("\0")
+  );
 }
 
 function requireUint(value: unknown, op: string, field: string) {

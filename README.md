@@ -115,6 +115,57 @@ The vfkit backend does not support mediated guest egress yet.
 
 ## Benchmark Snapshot
 
+### July 10 optimization verification
+
+Measured on bare-metal Debian Linux `6.12.94+deb13-amd64`, an Intel Xeon
+E5-2699 v4, Firecracker `v1.16.0`, and Node.js `v24.14.0`. Values are medians
+from real KVM boots with warm assets. This end-to-end comparison intentionally
+combines the original shell-init tiny profile at commit `b761a40` (`32M`) with
+the optimized initramfs-root profile (`52M`); use the isolated measurements
+below for host-code-only effects.
+
+| Metric                       | Original tiny | Optimized initramfs root | Change |
+| ---------------------------- | ------------: | -----------------------: | -----: |
+| VM object creation           |     `7.28 ms` |                `2.13 ms` | `-71%` |
+| `VM.start()` with VFS ready  |      `689 ms` |                 `108 ms` | `-84%` |
+| First `/bin/true` exec       |     `16.4 ms` |                `14.3 ms` | `-13%` |
+| Cold create/start/first exec |      `712 ms` |                 `124 ms` | `-83%` |
+| Warm `/bin/true` exec p50    |     `16.0 ms` |                `12.1 ms` | `-24%` |
+
+With VFS disabled, the optimized profile's median cold total is `67.5 ms`.
+Twenty consecutive boots of the final stripped image passed. Isolated host
+measurements showed:
+
+- Firecracker spawn-to-API readiness: `28.0 ms` to `5.57 ms` (`-80%`)
+- Four-request Firecracker configuration sequence: `2.35 ms` to `1.82 ms`
+  (`-23%`)
+- Native config-file cold launch versus API-driven setup: `-7.5 ms` (`-6%`)
+- Writable COW `VM.create()` copy increment: `49.9 ms` to `38.6 ms` (`-23%`)
+
+Additional same-host measurements on a 1-vCPU Linux VPS showed CLI help startup
+falling from `274 ms` to `40.5 ms` (`-85%`) and a warm `make check` falling
+from `14.0 s` to `2.92 s` (`-79%`). The npm package fell from `561,166` to
+`358,335` compressed bytes (`-36%`), from `2,927,971` to `1,736,463`
+unpacked bytes (`-41%`), and from `372` to `204` entries (`-45%`).
+
+An 11-run Apple Silicon vfkit comparison reduced cold total from `529 ms` to
+`431 ms` (`-18%`); APFS clone-based VM creation fell from `83.2 ms` to
+`3.21 ms`.
+
+The initramfs-root asset directory fell from `49 MiB` to `19 MiB` (`-61%`).
+An equivalent gzip tarball fell from `24,505,613` to `7,428,596` bytes
+(`-70%`) by stripping the kernel, storing its compatibility name as a hard
+link, and replacing the unused ext4 root with a `512`-byte raw placeholder.
+
+Run repeatable backend and allocation-sensitive host benchmarks with:
+
+```bash
+node host/examples/backend-benchmark.ts --runs 11 --iterations 8 --image /path/to/image --memory 52M
+node host/examples/host-hot-path-benchmark.ts --rounds 9 --iterations 100000
+```
+
+### June 26 profile comparison
+
 Measured on a single-vCPU KVM VPS on June 26, 2026 with warm guest assets:
 Debian Linux `6.12.85+deb13-amd64`, `1` vCPU (`AMD EPYC 7543` under KVM),
 `1.9 GiB` RAM, Firecracker `v1.16.0`, QEMU `10.0.8`, Node.js `v26.4.0`,
@@ -128,17 +179,17 @@ from `@earendil-works/gondolin@0.12.0`, using `256M` and the rebuilt
 same explicit start split, so its cold path is `VM.create()` plus the first
 successful exec.
 
-| Metric                         | Tiny (`29M`) | Fast static init (`29M`) | Initramfs root (`50M`) | QEMU original (`256M`) |
-| ------------------------------ | -----------: | -----------------------: | ---------------------: | ---------------------: |
-| VM object creation             |     `2.0 ms` |                 `1.3 ms` |               `1.7 ms` |                    n/a |
-| Host-side `VM.start()`         |    `43.2 ms` |                `40.2 ms` |              `41.5 ms` |                    n/a |
-| First `/bin/true` exec         |     `976 ms` |                 `943 ms` |               `180 ms` |              `11.14 s` |
-| Cold create/start/first exec   |    `1.01 s` |                `985 ms` |               `223 ms` |              `11.14 s` |
-| Warm `/bin/true` exec p50      |    `16.0 ms` |                `15.9 ms` |              `16.0 ms` |              `15.3 ms` |
-| Warm `/bin/true` exec p95      |    `17.0 ms` |                `17.7 ms` |              `17.5 ms` |              `24.8 ms` |
-| VMM RSS after warm execs       |  `30.3 MiB` |              `30.3 MiB` |            `54.7 MiB` |            `176.9 MiB` |
-| VMM VSZ after warm execs       |  `37.1 MiB` |              `37.1 MiB` |            `58.1 MiB` |            `723.0 MiB` |
-| VM close                       |    `37.4 ms` |                `38.5 ms` |              `33.2 ms` |              `30.1 ms` |
+| Metric                       | Tiny (`29M`) | Fast static init (`29M`) | Initramfs root (`50M`) | QEMU original (`256M`) |
+| ---------------------------- | -----------: | -----------------------: | ---------------------: | ---------------------: |
+| VM object creation           |     `2.0 ms` |                 `1.3 ms` |               `1.7 ms` |                    n/a |
+| Host-side `VM.start()`       |    `43.2 ms` |                `40.2 ms` |              `41.5 ms` |                    n/a |
+| First `/bin/true` exec       |     `976 ms` |                 `943 ms` |               `180 ms` |              `11.14 s` |
+| Cold create/start/first exec |     `1.01 s` |                 `985 ms` |               `223 ms` |              `11.14 s` |
+| Warm `/bin/true` exec p50    |    `16.0 ms` |                `15.9 ms` |              `16.0 ms` |              `15.3 ms` |
+| Warm `/bin/true` exec p95    |    `17.0 ms` |                `17.7 ms` |              `17.5 ms` |              `24.8 ms` |
+| VMM RSS after warm execs     |   `30.3 MiB` |               `30.3 MiB` |             `54.7 MiB` |            `176.9 MiB` |
+| VMM VSZ after warm execs     |   `37.1 MiB` |               `37.1 MiB` |             `58.1 MiB` |            `723.0 MiB` |
+| VM close                     |    `37.4 ms` |                `38.5 ms` |              `33.2 ms` |              `30.1 ms` |
 
 The default Alpine-derived Firecracker image is still the conservative
 published baseline at `84M`; it keeps the larger distro kernel and package set.
@@ -167,7 +218,7 @@ gondolin build --config images/alpine-initramfs-firecracker.json --output ./gues
 ```
 
 The tiny profile uses a Linux `6.1.142` `tinyconfig`-derived PVH/KVM guest
-kernel (`15M` uncompressed ELF) with virtio block, virtio net, vsock, ext4,
+kernel (`13M` stripped ELF) with virtio block, virtio net, vsock, ext4,
 FUSE, ptys, IPv4, and bash-capable process support built in. It keeps
 `bash` and `ca-certificates` in the rootfs and sets
 `manifest.assets.firecrackerInitrd` to `null`. The fast profile swaps the shell

@@ -15,6 +15,17 @@ import {
   type BuildResult,
 } from "./shared.ts";
 
+function resolveContainerBuildPackages(config: BuildConfig): string[] {
+  return [
+    "nodejs",
+    "lz4",
+    "cpio",
+    ...(config.rootfs?.placeholder ? [] : ["e2fsprogs"]),
+    "bash",
+    "ca-certificates",
+  ];
+}
+
 /** Build assets inside a container */
 export async function buildInContainer(
   config: BuildConfig,
@@ -226,11 +237,14 @@ main().catch((err) => {
 
   fs.writeFileSync(runnerPath, runner, { mode: 0o644 });
 
+  const buildPackages =
+    resolveContainerBuildPackages(containerConfig).join(" ");
+
   const containerScript = `#!/bin/sh
 set -eu
 
 # Minimal build toolchain
-apk add --no-cache nodejs lz4 cpio e2fsprogs bash ca-certificates
+apk add --no-cache ${buildPackages}
 
 node /work/run-build.mjs
 `;
@@ -289,3 +303,6 @@ node /work/run-build.mjs
 function hasPostBuildCommands(config: BuildConfig): boolean {
   return (config.postBuild?.commands?.length ?? 0) > 0;
 }
+
+/** @internal */
+export const __test = { resolveContainerBuildPackages };

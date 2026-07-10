@@ -75,6 +75,7 @@ export async function buildNative(
   log("Building guest images...");
 
   const alpineConfig = resolveAlpineConfig(config);
+  const firecrackerOnlyAssets = usesFirecrackerOnlyAssets(config);
   if (
     hasOciRootfs(config) &&
     (config.alpine?.rootfsPackages?.length ?? 0) > 0
@@ -147,6 +148,7 @@ export async function buildNative(
     sandboxingressBin: binaries.sandboxingressPath,
     rootfsLabel: config.rootfs?.label ?? "gondolin-root",
     rootfsSizeMb: config.rootfs?.sizeMb,
+    rootfsPlaceholder: config.rootfs?.placeholder,
     rootfsInit,
     rootfsInitBinary,
     initramfsInit,
@@ -160,18 +162,21 @@ export async function buildNative(
     log,
   });
 
-  log("Fetching kernel...");
-  await fetchKernel(workDir, config.arch, alpineConfig, cacheDir, log);
+  if (!firecrackerOnlyAssets) {
+    log("Fetching kernel...");
+    await fetchKernel(workDir, config.arch, alpineConfig, cacheDir, log);
+  }
 
   const firecrackerKernelOut = path.join(workDir, FIRECRACKER_KERNEL_FILENAME);
   if (config.firecrackerKernelPath) {
     log("Using custom Firecracker kernel...");
-    fs.copyFileSync(
+    copyWorkAsset(
       resolveConfigPath(config.firecrackerKernelPath, configDir),
       firecrackerKernelOut,
     );
   } else {
     log("Preparing Firecracker-compatible kernel...");
+    fs.rmSync(firecrackerKernelOut, { force: true });
     materializeFirecrackerKernel({
       sourceKernelPath: path.join(workDir, KERNEL_FILENAME),
       outputKernelPath: firecrackerKernelOut,
@@ -181,55 +186,37 @@ export async function buildNative(
   }
 
   if (typeof config.firecrackerInitrdPath === "string") {
-    fs.copyFileSync(
+    copyWorkAsset(
       resolveConfigPath(config.firecrackerInitrdPath, configDir),
       path.join(workDir, FIRECRACKER_INITRD_FILENAME),
     );
+  } else {
+    fs.rmSync(path.join(workDir, FIRECRACKER_INITRD_FILENAME), { force: true });
   }
 
   const vfkitKernelOut = path.join(workDir, VFKIT_KERNEL_FILENAME);
   if (config.vfkitKernelPath) {
     log("Using custom vfkit kernel...");
-    fs.copyFileSync(
+    copyWorkAsset(
       resolveConfigPath(config.vfkitKernelPath, configDir),
       vfkitKernelOut,
     );
-  } else {
+  } else if (!firecrackerOnlyAssets) {
     log("Preparing vfkit-compatible kernel...");
+    fs.rmSync(vfkitKernelOut, { force: true });
     materializeVfkitKernel({
       sourceKernelPath: path.join(workDir, KERNEL_FILENAME),
       outputKernelPath: vfkitKernelOut,
       arch: config.arch,
       log,
     });
+  } else {
+    fs.rmSync(vfkitKernelOut, { force: true });
   }
 
   log("Copying assets to output directory...");
 
-  const kernelSrc = path.join(workDir, KERNEL_FILENAME);
-  const initramfsSrc = path.join(workDir, INITRAMFS_FILENAME);
-  const rootfsSrc = path.join(workDir, ROOTFS_FILENAME);
-  const firecrackerKernelSrc = path.join(workDir, FIRECRACKER_KERNEL_FILENAME);
-  const vfkitKernelSrc = path.join(workDir, VFKIT_KERNEL_FILENAME);
-
-  const kernelDst = path.join(outputDir, KERNEL_FILENAME);
-  const initramfsDst = path.join(outputDir, INITRAMFS_FILENAME);
-  const rootfsDst = path.join(outputDir, ROOTFS_FILENAME);
-  const firecrackerKernelDst = path.join(
-    outputDir,
-    FIRECRACKER_KERNEL_FILENAME,
-  );
-  const vfkitKernelDst = path.join(outputDir, VFKIT_KERNEL_FILENAME);
-
-  fs.copyFileSync(kernelSrc, kernelDst);
-  fs.copyFileSync(initramfsSrc, initramfsDst);
-  fs.copyFileSync(rootfsSrc, rootfsDst);
-  if (fs.existsSync(firecrackerKernelSrc)) {
-    fs.copyFileSync(firecrackerKernelSrc, firecrackerKernelDst);
-  }
-  if (fs.existsSync(vfkitKernelSrc)) {
-    fs.copyFileSync(vfkitKernelSrc, vfkitKernelDst);
-  }
+  copyNativeBuildAssets(config, workDir, outputDir, firecrackerOnlyAssets);
 
   log("Generating manifest...");
   const { manifestPath, manifest } = writeAssetManifest(
@@ -250,6 +237,110 @@ export async function buildNative(
 function usesCustomFirecrackerKernel(config: BuildConfig): boolean {
   return Boolean(config.firecrackerKernelPath);
 }
+
+function usesFirecrackerOnlyAssets(config: BuildConfig): boolean {
+  return (
+    config.arch === "x86_64" &&
+    usesCustomFirecrackerKernel(config) &&
+    !config.vfkitKernelPath &&
+    (config.firecrackerInitrdPath === null ||
+      config.init?.initramfsRoot === true)
+  );
+}
+
+function copyNativeBuildAssets(
+  config: BuildConfig,
+  workDir: string,
+  outputDir: string,
+  firecrackerOnlyAssets = usesFirecrackerOnlyAssets(config),
+): void {
+  const kernelSrc = path.join(workDir, KERNEL_FILENAME);
+  const initramfsSrc = path.join(workDir, INITRAMFS_FILENAME);
+  const rootfsSrc = path.join(workDir, ROOTFS_FILENAME);
+  const firecrackerKernelSrc = path.join(workDir, FIRECRACKER_KERNEL_FILENAME);
+  const firecrackerInitrdSrc = path.join(workDir, FIRECRACKER_INITRD_FILENAME);
+  const vfkitKernelSrc = path.join(workDir, VFKIT_KERNEL_FILENAME);
+
+  const kernelDst = path.join(outputDir, KERNEL_FILENAME);
+  const initramfsDst = path.join(outputDir, INITRAMFS_FILENAME);
+  const rootfsDst = path.join(outputDir, ROOTFS_FILENAME);
+  const firecrackerKernelDst = path.join(
+    outputDir,
+    FIRECRACKER_KERNEL_FILENAME,
+  );
+  const firecrackerInitrdDst = path.join(
+    outputDir,
+    FIRECRACKER_INITRD_FILENAME,
+  );
+  const vfkitKernelDst = path.join(outputDir, VFKIT_KERNEL_FILENAME);
+
+  fs.mkdirSync(outputDir, { recursive: true });
+  for (const outputPath of [
+    kernelDst,
+    initramfsDst,
+    rootfsDst,
+    firecrackerKernelDst,
+    firecrackerInitrdDst,
+    vfkitKernelDst,
+  ]) {
+    fs.rmSync(outputPath, { force: true });
+  }
+
+  if (fs.existsSync(firecrackerKernelSrc)) {
+    fs.copyFileSync(firecrackerKernelSrc, firecrackerKernelDst);
+  }
+  if (
+    typeof config.firecrackerInitrdPath === "string" &&
+    fs.existsSync(firecrackerInitrdSrc)
+  ) {
+    fs.copyFileSync(firecrackerInitrdSrc, firecrackerInitrdDst);
+  }
+  const expectsVfkitKernel =
+    Boolean(config.vfkitKernelPath) ||
+    (!firecrackerOnlyAssets && config.arch === "aarch64");
+  if (expectsVfkitKernel && fs.existsSync(vfkitKernelSrc)) {
+    fs.copyFileSync(vfkitKernelSrc, vfkitKernelDst);
+  }
+  if (firecrackerOnlyAssets) {
+    // Schema-v1 readers require generic asset names. Hard-link the custom
+    // kernel so release tarballs store it once, and use an empty initrd
+    // placeholder when Firecracker is explicitly configured without one.
+    linkOrCopyFile(firecrackerKernelDst, kernelDst);
+    if (config.firecrackerInitrdPath === null) {
+      fs.writeFileSync(initramfsDst, "");
+    } else {
+      fs.copyFileSync(initramfsSrc, initramfsDst);
+    }
+  } else {
+    fs.copyFileSync(kernelSrc, kernelDst);
+    fs.copyFileSync(initramfsSrc, initramfsDst);
+  }
+  fs.copyFileSync(rootfsSrc, rootfsDst);
+}
+
+function linkOrCopyFile(src: string, dst: string): void {
+  try {
+    fs.linkSync(src, dst);
+  } catch {
+    fs.copyFileSync(src, dst);
+  }
+}
+
+function copyWorkAsset(src: string, dst: string): void {
+  if (path.resolve(src) === path.resolve(dst)) {
+    fs.accessSync(src, fs.constants.R_OK);
+    return;
+  }
+  fs.rmSync(dst, { force: true });
+  fs.copyFileSync(src, dst);
+}
+
+export const __test = {
+  copyNativeBuildAssets,
+  copyWorkAsset,
+  linkOrCopyFile,
+  usesFirecrackerOnlyAssets,
+};
 
 type AlpineKernelConfig = {
   kernelPackage: string;

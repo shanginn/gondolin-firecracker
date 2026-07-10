@@ -342,6 +342,57 @@ function ensureSafeImportSourcePath(
   return realSourcePath;
 }
 
+type CopiedAsset = {
+  targetPath: string;
+  identity: FileIdentity;
+};
+
+type FileIdentity = {
+  dev: bigint;
+  ino: bigint;
+};
+
+function sameFileIdentity(a: FileIdentity, b: FileIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function copyImportedAsset(
+  sourcePath: string,
+  targetPath: string,
+  copiedAssets: CopiedAsset[],
+): void {
+  const resolvedTarget = path.resolve(targetPath);
+  if (
+    copiedAssets.some(
+      (asset) => path.resolve(asset.targetPath) === resolvedTarget,
+    )
+  ) {
+    return;
+  }
+
+  const stat = fs.statSync(sourcePath, { bigint: true });
+  const identity = { dev: stat.dev, ino: stat.ino };
+  const existing =
+    stat.ino === 0n
+      ? undefined
+      : copiedAssets.find((asset) =>
+          sameFileIdentity(asset.identity, identity),
+        );
+
+  if (existing) {
+    try {
+      fs.linkSync(existing.targetPath, targetPath);
+      copiedAssets.push({ targetPath, identity });
+      return;
+    } catch {
+      // Filesystems without hard-link support still get a correct full copy.
+    }
+  }
+
+  fs.copyFileSync(sourcePath, targetPath);
+  copiedAssets.push({ targetPath, identity });
+}
+
 export function importImageFromDirectory(assetDir: string): ImportedImage {
   const resolvedDir = path.resolve(assetDir);
   const manifest = loadAssetManifest(resolvedDir);
@@ -538,18 +589,20 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         });
       }
 
-      fs.copyFileSync(safeKernelPath, targetKernelPath);
-      fs.copyFileSync(safeInitramfsPath, targetInitramfsPath);
-      fs.copyFileSync(safeRootfsPath, targetRootfsPath);
+      const copiedAssets: CopiedAsset[] = [];
+      copyImportedAsset(safeKernelPath, targetKernelPath, copiedAssets);
+      copyImportedAsset(safeInitramfsPath, targetInitramfsPath, copiedAssets);
+      copyImportedAsset(safeRootfsPath, targetRootfsPath, copiedAssets);
       if (targetFirecrackerKernelPath && sourceFirecrackerKernelPath) {
         const safeFirecrackerKernelPath = ensureSafeImportSourcePath(
           resolvedDir,
           sourceFirecrackerKernelPath,
           "manifest.assets.firecrackerKernel",
         );
-        fs.copyFileSync(
+        copyImportedAsset(
           safeFirecrackerKernelPath,
           targetFirecrackerKernelPath,
+          copiedAssets,
         );
       }
       if (targetFirecrackerInitrdPath && sourceFirecrackerInitrdPath) {
@@ -558,9 +611,10 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
           sourceFirecrackerInitrdPath,
           "manifest.assets.firecrackerInitrd",
         );
-        fs.copyFileSync(
+        copyImportedAsset(
           safeFirecrackerInitrdPath,
           targetFirecrackerInitrdPath,
+          copiedAssets,
         );
       }
       if (targetVfkitKernelPath && sourceVfkitKernelPath) {
@@ -569,7 +623,11 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
           sourceVfkitKernelPath,
           "manifest.assets.vfkitKernel",
         );
-        fs.copyFileSync(safeVfkitKernelPath, targetVfkitKernelPath);
+        copyImportedAsset(
+          safeVfkitKernelPath,
+          targetVfkitKernelPath,
+          copiedAssets,
+        );
       }
 
       fs.mkdirSync(imageObjectRootDir(), { recursive: true });
@@ -1530,4 +1588,5 @@ export const __test = {
   isBuildId,
   normalizeImageBuildId,
   parseBuiltinRegistry,
+  sameFileIdentity,
 };

@@ -7,47 +7,15 @@ import path from "path";
 import { PassThrough } from "stream";
 import { fileURLToPath } from "url";
 
-import { VmCheckpoint } from "../src/checkpoint.ts";
 import { parseDiskSizeToBytes } from "../src/disk/image.ts";
-import { VM } from "../src/vm/core.ts";
+import type { VM } from "../src/vm/core.ts";
 import type { VirtualProvider } from "../src/vfs/node/index.ts";
-import { MemoryProvider, RealFSProvider } from "../src/vfs/node/index.ts";
-import { ReadonlyProvider } from "../src/vfs/readonly.ts";
-import { createHttpHooks } from "../src/http/hooks.ts";
-import {
-  FrameReader,
-  buildExecRequest,
-  decodeMessage,
-  encodeFrame,
-  type IncomingMessage,
-} from "../src/sandbox/virtio-protocol.ts";
-import { attachTty } from "../src/utils/tty-attach.ts";
-import {
-  getDefaultBuildConfig,
-  serializeBuildConfig,
-  parseBuildConfig,
-  type BuildConfig,
-} from "../src/build/config.ts";
-import { buildAssets, verifyAssets } from "../src/build/index.ts";
-import { loadAssetManifest } from "../src/assets.ts";
-import {
-  ensureImageSelector,
-  importImageFromDirectory,
-  listImageRefs,
-  setImageRef,
-  tagImage,
-  type ImageArch,
-} from "../src/images.ts";
-import {
-  connectToSession,
-  findSession,
-  gcSessions,
-  listSessions,
-} from "../src/session-registry.ts";
-import {
-  decodeOutputFrame,
-  type ServerMessage,
-  type SnapshotResponseMessage,
+import type { IncomingMessage } from "../src/sandbox/virtio-protocol.ts";
+import type { BuildConfig } from "../src/build/config.ts";
+import type { ImageArch } from "../src/images.ts";
+import type {
+  ServerMessage,
+  SnapshotResponseMessage,
 } from "../src/sandbox/control-protocol.ts";
 
 type Command = {
@@ -103,6 +71,7 @@ async function waitForCheckpointReady(
   checkpointPath: string,
   timeoutMs = 2000,
 ): Promise<boolean> {
+  const { VmCheckpoint } = await import("../src/checkpoint.ts");
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -189,7 +158,9 @@ function renderCliError(err: unknown) {
     }
     if (binary.includes("vfkit")) {
       console.error(`Error: vfkit binary '${binary}' not found.`);
-      console.error("Install vfkit on macOS or set sandbox.vfkitPath / GONDOLIN_VFKIT.");
+      console.error(
+        "Install vfkit on macOS or set sandbox.vfkitPath / GONDOLIN_VFKIT.",
+      );
       return;
     }
   }
@@ -245,7 +216,9 @@ function bashUsage() {
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
   );
-  console.log("  --vmm NAME                      VM backend: firecracker|vfkit");
+  console.log(
+    "  --vmm NAME                      VM backend: firecracker|vfkit",
+  );
   console.log("  --vfkit PATH                    vfkit binary path");
   console.log();
   console.log("VFS Options:");
@@ -391,7 +364,9 @@ function execUsage() {
   console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
   );
-  console.log("  --vmm NAME                      VM backend: firecracker|vfkit");
+  console.log(
+    "  --vmm NAME                      VM backend: firecracker|vfkit",
+  );
   console.log("  --vfkit PATH                    vfkit binary path");
   console.log();
   console.log("Network Options (VM mode only):");
@@ -754,8 +729,17 @@ function parseListenSpec(spec: string): { host: string; port: number } {
   return { host, port };
 }
 
-function buildVmOptions(common: CommonOptions) {
+async function buildVmOptions(common: CommonOptions) {
   const mounts: Record<string, VirtualProvider> = {};
+
+  const needsProviders =
+    common.mounts.length > 0 || common.memoryMounts.length > 0;
+  const providers = needsProviders
+    ? await import("../src/vfs/node/index.ts")
+    : null;
+  const readonlyProvider = common.mounts.some((mount) => mount.readonly)
+    ? await import("../src/vfs/readonly.ts")
+    : null;
 
   // Add host filesystem mounts
   for (const mount of common.mounts) {
@@ -769,22 +753,25 @@ function buildVmOptions(common: CommonOptions) {
       throw new Error(`Host path is not a directory: ${mount.hostPath}`);
     }
 
-    let provider: VirtualProvider = new RealFSProvider(resolvedHostPath);
+    let provider: VirtualProvider = new providers!.RealFSProvider(
+      resolvedHostPath,
+    );
     if (mount.readonly) {
-      provider = new ReadonlyProvider(provider);
+      provider = new readonlyProvider!.ReadonlyProvider(provider);
     }
     mounts[mount.guestPath] = provider;
   }
 
   // Add memory mounts
   for (const path of common.memoryMounts) {
-    mounts[path] = new MemoryProvider();
+    mounts[path] = new providers!.MemoryProvider();
   }
 
   let httpHooks;
   let env: Record<string, string> | undefined;
 
   if (common.allowedHosts.length > 0 || common.secrets.length > 0) {
+    const { createHttpHooks } = await import("../src/http/hooks.ts");
     const secrets: Record<string, { hosts: string[]; value: string }> = {};
     for (const secret of common.secrets) {
       secrets[secret.name] = { hosts: secret.hosts, value: secret.value };
@@ -1234,7 +1221,10 @@ function buildCommandPayload(command: Command) {
 }
 
 async function runExecVm(args: ExecArgs) {
-  const vmOptions = buildVmOptions(args.common);
+  const [{ VM }, vmOptions] = await Promise.all([
+    import("../src/vm/core.ts"),
+    buildVmOptions(args.common),
+  ]);
   let vm: VM | null = null;
   let exitCode = 0;
 
@@ -1277,7 +1267,9 @@ async function runExecVm(args: ExecArgs) {
   process.exit(exitCode);
 }
 
-function runExecSocket(args: ExecArgs) {
+async function runExecSocket(args: ExecArgs) {
+  const { FrameReader, buildExecRequest, decodeMessage, encodeFrame } =
+    await import("../src/sandbox/virtio-protocol.ts");
   const socket = net.createConnection({ path: args.sock! });
   const reader = new FrameReader();
   let currentIndex = 0;
@@ -1366,7 +1358,7 @@ async function runExec(argv: string[] = process.argv.slice(2)) {
 
   if (args.sock) {
     // Socket mode (direct virtio connection)
-    runExecSocket(args);
+    await runExecSocket(args);
   } else {
     // VM mode (in-process server)
     await runExecVm(args);
@@ -1688,7 +1680,11 @@ function parseBashArgs(argv: string[]): BashArgs {
 
 async function runBash(argv: string[]) {
   const args = parseBashArgs(argv);
-  const vmOptions = buildVmOptions(args);
+  const [{ VM }, { attachTty }, vmOptions] = await Promise.all([
+    import("../src/vm/core.ts"),
+    import("../src/utils/tty-attach.ts"),
+    buildVmOptions(args),
+  ]);
   let vm: VM | null = null;
   let ingressAccess: { url: string; close(): Promise<void> } | null = null;
   let exitCode = 1;
@@ -1696,6 +1692,7 @@ async function runBash(argv: string[]) {
   try {
     if (args.resume) {
       const checkpointPath = resolveResumeCheckpoint(args.resume);
+      const { VmCheckpoint } = await import("../src/checkpoint.ts");
       const checkpoint = VmCheckpoint.load(checkpointPath);
       vm = (await checkpoint.resume(vmOptions)) as VM;
     } else {
@@ -1873,6 +1870,8 @@ function formatAge(createdAt: string): string {
 
 async function runList(argv: string[]) {
   const args = parseListArgs(argv);
+  const { gcSessions, listSessions } =
+    await import("../src/session-registry.ts");
 
   // Best-effort cleanup first.
   await gcSessions().catch(() => {
@@ -1993,6 +1992,14 @@ function parseAttachArgs(argv: string[]): AttachArgs {
 
 async function runAttach(argv: string[]) {
   const args = parseAttachArgs(argv);
+  const [sessionRegistry, controlProtocol, tty] = await Promise.all([
+    import("../src/session-registry.ts"),
+    import("../src/sandbox/control-protocol.ts"),
+    import("../src/utils/tty-attach.ts"),
+  ]);
+  const { connectToSession, findSession, gcSessions } = sessionRegistry;
+  const { decodeOutputFrame } = controlProtocol;
+  const { attachTty } = tty;
 
   await gcSessions().catch(() => {
     // ignore
@@ -2235,6 +2242,8 @@ function parseSnapshotArgs(argv: string[]): SnapshotArgs {
 
 async function runSnapshot(argv: string[]) {
   const args = parseSnapshotArgs(argv);
+  const { connectToSession, findSession, gcSessions } =
+    await import("../src/session-registry.ts");
 
   await gcSessions().catch(() => {
     // ignore
@@ -2474,6 +2483,8 @@ async function runBuild(argv: string[]) {
 
   // Handle --init-config
   if (args.initConfig) {
+    const { getDefaultBuildConfig, serializeBuildConfig } =
+      await import("../src/build/config.ts");
     const config = getDefaultBuildConfig();
     if (args.arch) {
       config.arch = args.arch;
@@ -2484,6 +2495,10 @@ async function runBuild(argv: string[]) {
 
   // Handle --verify
   if (args.verify) {
+    const [{ loadAssetManifest }, { verifyAssets }] = await Promise.all([
+      import("../src/assets.ts"),
+      import("../src/build/index.ts"),
+    ]);
     const assetDir = path.resolve(args.verify);
     const manifest = loadAssetManifest(assetDir);
 
@@ -2507,6 +2522,8 @@ async function runBuild(argv: string[]) {
   }
 
   // Load or create config
+  const { getDefaultBuildConfig, parseBuildConfig } =
+    await import("../src/build/config.ts");
   let config: BuildConfig;
   let configDir: string | undefined;
   if (args.configFile) {
@@ -2540,6 +2557,11 @@ async function runBuild(argv: string[]) {
 
   // Run the build
   try {
+    const [{ buildAssets }, imageStore] = await Promise.all([
+      import("../src/build/index.ts"),
+      import("../src/images.ts"),
+    ]);
+    const { importImageFromDirectory, setImageRef } = imageStore;
     const result = await buildAssets(config, {
       outputDir,
       configDir,
@@ -2639,6 +2661,14 @@ async function runImage(argv: string[]) {
     imageUsage();
     process.exit(subcommand ? 0 : 1);
   }
+
+  const {
+    ensureImageSelector,
+    importImageFromDirectory,
+    listImageRefs,
+    setImageRef,
+    tagImage,
+  } = await import("../src/images.ts");
 
   switch (subcommand) {
     case "ls": {
@@ -2786,6 +2816,7 @@ async function runImage(argv: string[]) {
       }
 
       const resolved = await ensureImageSelector(selector, arch);
+      const { loadAssetManifest } = await import("../src/assets.ts");
       const manifest = loadAssetManifest(resolved.assetDir);
 
       console.log(`selector: ${resolved.selector}`);

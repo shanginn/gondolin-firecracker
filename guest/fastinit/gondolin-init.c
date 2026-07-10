@@ -2,16 +2,25 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <stdarg.h>
+#include <net/if.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/socket.h>
+#include <sys/statfs.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#ifndef FUSE_SUPER_MAGIC
+#define FUSE_SUPER_MAGIC 0x65735546
+#endif
+
+#define MOUNT_POLL_INTERVAL_US 10000
+#define MOUNT_POLL_ATTEMPTS (30 * 1000000 / MOUNT_POLL_INTERVAL_US)
 
 static char sandboxfs_mount[256] = "/data";
 static char sandboxfs_binds[2048] = "";
@@ -19,17 +28,49 @@ static char gondolin_transport[32] = "vsock";
 static char gondolin_net[16] = "on";
 static char vsock_control_port[16] = "1024";
 static char vsock_fs_port[16] = "1025";
+static bool gondolin_debug = false;
 
-static void log_line(const char *fmt, ...) {
-  char buf[512];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
+static void write_all(int fd, const char *buf, size_t len) {
+  while (len > 0) {
+    ssize_t written = write(fd, buf, len);
+    if (written > 0) {
+      buf += written;
+      len -= (size_t)written;
+      continue;
+    }
+    if (written < 0 && errno == EINTR) continue;
+    break;
+  }
+}
 
+static int open_console(void) {
   int fd = open("/dev/console", O_WRONLY | O_CLOEXEC);
   if (fd < 0) fd = STDERR_FILENO;
-  dprintf(fd, "%s\n", buf);
+  return fd;
+}
+
+static void log_line(const char *message) {
+  int fd = open_console();
+  write_all(fd, message, strlen(message));
+  write_all(fd, "\n", 1);
+  if (fd != STDERR_FILENO) close(fd);
+}
+
+static void log_debug(const char *message) {
+  if (gondolin_debug) log_line(message);
+}
+
+static void log_failure(
+    const char *operation, const char *target, int error_number) {
+  int fd = open_console();
+  write_all(fd, "[init] ", 7);
+  write_all(fd, operation, strlen(operation));
+  write_all(fd, " ", 1);
+  write_all(fd, target, strlen(target));
+  write_all(fd, " failed: ", 9);
+  const char *message = strerror(error_number);
+  write_all(fd, message, strlen(message));
+  write_all(fd, "\n", 1);
   if (fd != STDERR_FILENO) close(fd);
 }
 
@@ -69,7 +110,7 @@ static void mount_try(
     const char *data) {
   mkdir_p(target, 0755);
   if (mount(src, target, fstype, flags, data) != 0 && errno != EBUSY) {
-    log_line("[init] mount %s failed: %s", target, strerror(errno));
+    log_failure("mount", target, errno);
   }
 }
 
@@ -111,8 +152,20 @@ static pid_t spawn_console(char *const argv[]) {
 }
 
 static void set_value(char *dst, size_t dst_len, const char *value) {
-  if (!value) return;
-  snprintf(dst, dst_len, "%s", value);
+  if (!value || dst_len == 0) return;
+  size_t len = strnlen(value, dst_len - 1);
+  memcpy(dst, value, len);
+  dst[len] = 0;
+}
+
+static bool join_values(
+    char *dst, size_t dst_len, const char *left, const char *right) {
+  size_t left_len = strlen(left);
+  size_t right_len = strlen(right);
+  if (left_len + right_len >= dst_len) return false;
+  memcpy(dst, left, left_len);
+  memcpy(dst + left_len, right, right_len + 1);
+  return true;
 }
 
 static void parse_cmdline(void) {
@@ -129,6 +182,8 @@ static void parse_cmdline(void) {
       set_value(gondolin_transport, sizeof(gondolin_transport), tok + 19);
     } else if (strncmp(tok, "gondolin.net=", 13) == 0) {
       set_value(gondolin_net, sizeof(gondolin_net), tok + 13);
+    } else if (strncmp(tok, "gondolin.debug=", 15) == 0) {
+      gondolin_debug = strcmp(tok + 15, "1") == 0;
     } else if (strncmp(tok, "gondolin.vsock.control=", 23) == 0) {
       set_value(vsock_control_port, sizeof(vsock_control_port), tok + 23);
     } else if (strncmp(tok, "gondolin.vsock.fs=", 18) == 0) {
@@ -141,27 +196,16 @@ static void parse_cmdline(void) {
   }
 }
 
-static bool proc_mount_has(const char *target) {
-  FILE *fp = fopen("/proc/mounts", "re");
-  if (!fp) return false;
-  char line[1024];
-  bool found = false;
-  while (fgets(line, sizeof(line), fp)) {
-    char src[256], dst[256], type[128];
-    if (sscanf(line, "%255s %255s %127s", src, dst, type) == 3 &&
-        strcmp(dst, target) == 0) {
-      found = true;
-      break;
-    }
-  }
-  fclose(fp);
-  return found;
+static bool fuse_mounted(const char *target) {
+  struct statfs fs;
+  return statfs(target, &fs) == 0 &&
+         (unsigned long)fs.f_type == FUSE_SUPER_MAGIC;
 }
 
 static bool wait_for_mount(const char *target) {
-  for (int i = 0; i < 300; i++) {
-    if (proc_mount_has(target)) return true;
-    usleep(100000);
+  for (int i = 0; i < MOUNT_POLL_ATTEMPTS; i++) {
+    if (fuse_mounted(target)) return true;
+    usleep(MOUNT_POLL_INTERVAL_US);
   }
   return false;
 }
@@ -203,13 +247,25 @@ static void setup_env(void) {
   setenv("UV_SYSTEM_CERTS", "true", 1);
 }
 
+static void set_interface_up(const char *name) {
+  int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) return;
+
+  struct ifreq request;
+  memset(&request, 0, sizeof(request));
+  set_value(request.ifr_name, sizeof(request.ifr_name), name);
+  if (ioctl(fd, SIOCGIFFLAGS, &request) == 0) {
+    request.ifr_flags |= IFF_UP;
+    ioctl(fd, SIOCSIFFLAGS, &request);
+  }
+  close(fd);
+}
+
 static void setup_network(void) {
-  char *lo[] = {"ip", "link", "set", "lo", "up", NULL};
-  run_wait(lo);
+  set_interface_up("lo");
   if (strcmp(gondolin_net, "off") == 0) return;
 
-  char *eth[] = {"ip", "link", "set", "eth0", "up", NULL};
-  run_wait(eth);
+  set_interface_up("eth0");
   if (executable("/sbin/udhcpc") || executable("/usr/bin/udhcpc")) {
     if (executable("/usr/share/udhcpc/default.script")) {
       char *dhcp[] = {"udhcpc", "-i", "eth0", "-q", "-n", "-s",
@@ -234,30 +290,33 @@ static void bind_sandboxfs(void) {
   if (sandboxfs_binds[0] == 0) return;
 
   char buf[sizeof(sandboxfs_binds)];
-  snprintf(buf, sizeof(buf), "%s", sandboxfs_binds);
+  set_value(buf, sizeof(buf), sandboxfs_binds);
   for (char *bind = strtok(buf, ","); bind; bind = strtok(NULL, ",")) {
     if (bind[0] != '/') continue;
     char source[512];
     if (strcmp(sandboxfs_mount, "/") == 0) {
-      snprintf(source, sizeof(source), "%s", bind);
+      set_value(source, sizeof(source), bind);
     } else {
-      snprintf(source, sizeof(source), "%s%s", sandboxfs_mount, bind);
+      if (!join_values(source, sizeof(source), sandboxfs_mount, bind)) {
+        log_failure("bind", bind, ENAMETOOLONG);
+        continue;
+      }
     }
     mkdir_p(bind, 0755);
     if (mount(source, bind, NULL, MS_BIND, NULL) != 0) {
-      log_line("[init] bind %s failed: %s", bind, strerror(errno));
+      log_failure("bind", bind, errno);
     }
   }
 }
 
-static bool start_sandboxfs(void) {
+static bool spawn_sandboxfs(void) {
   mkdir_p(sandboxfs_mount, 0755);
   if (!executable("/usr/bin/sandboxfs")) {
     write_file("/run/sandboxfs.failed", "sandboxfs binary missing\n", 0644);
     return false;
   }
 
-  log_line("[init] starting sandboxfs");
+  log_debug("[init] starting sandboxfs");
   char *argv[] = {
       "/usr/bin/sandboxfs",
       "--mount",
@@ -265,26 +324,32 @@ static bool start_sandboxfs(void) {
       "--rpc-vsock-port",
       vsock_fs_port,
       NULL};
-  spawn_console(argv);
+  if (spawn_console(argv) < 0) {
+    write_file("/run/sandboxfs.failed", "sandboxfs spawn failed\n", 0644);
+    return false;
+  }
+  return true;
+}
 
+static void finish_sandboxfs(void) {
   if (!wait_for_mount(sandboxfs_mount)) {
     write_file("/run/sandboxfs.failed", "sandboxfs mount not ready\n", 0644);
-    return false;
+    return;
   }
 
   bind_sandboxfs();
   write_file("/run/sandboxfs.ready", "ok\n", 0644);
-  return true;
 }
 
 int main(void) {
-  parse_cmdline();
   setup_mounts();
+  parse_cmdline();
   setup_env();
+  bool sandboxfs_started = spawn_sandboxfs();
   setup_network();
-  start_sandboxfs();
+  if (sandboxfs_started) finish_sandboxfs();
 
-  log_line("[init] starting sandboxd");
+  log_debug("[init] starting sandboxd");
   if (strcmp(gondolin_transport, "vsock") == 0) {
     char *argv[] = {
         "/usr/bin/sandboxd", "--vsock-port", vsock_control_port, NULL};
@@ -294,7 +359,7 @@ int main(void) {
     execv(argv[0], argv);
   }
 
-  log_line("[init] sandboxd exec failed: %s", strerror(errno));
+  log_failure("exec", "/usr/bin/sandboxd", errno);
   char *sh[] = {"/bin/sh", NULL};
   execv(sh[0], sh);
   for (;;) pause();

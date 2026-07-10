@@ -131,6 +131,24 @@ export class VfkitController extends EventEmitter {
       }
     });
 
+    const child = this.child;
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        child.off("spawn", onSpawn);
+        child.off("error", onError);
+      };
+      const onSpawn = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      child.once("spawn", onSpawn);
+      child.once("error", onError);
+    });
+
     this.setState("running");
     this.emitStartupTiming("instance_started");
   }
@@ -282,11 +300,16 @@ function validateVfkitRuntimePreconditions(config: VfkitConfig): void {
 }
 
 function validateSocketParents(socketPaths: string[]): void {
+  const checked = new Set<string>();
   for (const socketPath of socketPaths) {
     const parent = path.dirname(socketPath);
+    if (checked.has(parent)) continue;
     if (!fs.existsSync(parent)) {
-      throw new Error(`vfkit socket parent directory does not exist: ${parent}`);
+      throw new Error(
+        `vfkit socket parent directory does not exist: ${parent}`,
+      );
     }
+    checked.add(parent);
   }
 }
 

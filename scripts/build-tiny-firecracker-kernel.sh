@@ -16,7 +16,7 @@ need() {
   }
 }
 
-for cmd in bc bison curl flex gcc make openssl tar xz; do
+for cmd in bc bison curl flex gcc make openssl strip tar xz; do
   need "$cmd"
 done
 
@@ -71,6 +71,9 @@ make -s -C "$src_dir" O="$build_dir" olddefconfig
 make -s -C "$src_dir" O="$build_dir" -j"$jobs" vmlinux
 
 cp "$build_dir/vmlinux" "$out_dir/firecracker-kernel"
+# Firecracker only needs the ELF load segments; symbol/string tables add about
+# 9% to the uncompressed kernel and are not mapped into the guest.
+strip --strip-all "$out_dir/firecracker-kernel"
 cp "$build_dir/.config" "$out_dir/firecracker-kernel.config"
 
 printf 'wrote %s/firecracker-kernel\n' "$out_dir"

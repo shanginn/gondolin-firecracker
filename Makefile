@@ -44,10 +44,9 @@ typecheck:
 		"host:typecheck" "$(MAKE) -C host typecheck"
 
 check:
-	@$(RUN_PARALLEL) -j 4 \
+	@$(RUN_PARALLEL) -j 3 \
 		"guest:lint" "$(MAKE) -C guest lint" \
 		"guest:typecheck" "$(MAKE) -C guest typecheck" \
-		"host:lint" "$(MAKE) -C host lint" \
 		"host:typecheck" "$(MAKE) -C host typecheck"
 
 test:

@@ -45,6 +45,8 @@ export interface AlpineBuildOptions {
   rootfsLabel: string;
   /** fixed rootfs image size in `mb` (auto when undefined) */
   rootfsSizeMb?: number;
+  /** emit a minimal raw rootfs placeholder */
+  rootfsPlaceholder?: boolean;
   /** rootfs init script content (built-in when undefined) */
   rootfsInit?: string;
   /** rootfs init binary path copied to `/init` */

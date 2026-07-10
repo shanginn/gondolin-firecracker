@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { findGuestDirFrom } from "../src/build/shared.ts";
 
 const GUEST_PAYLOAD = ["build.zig", "build.zig.zon", "src", "LICENSE"];
+const VENDORED_NODE_VFS_PAYLOAD = ["lib", "package.json", "LICENSE"];
 
 function copyVendoredNodeVfs(pkgRoot) {
   const vendoredSource = path.join(
@@ -28,8 +29,14 @@ function copyVendoredNodeVfs(pkgRoot) {
   }
 
   fs.rmSync(vendoredDest, { recursive: true, force: true });
-  fs.mkdirSync(path.dirname(vendoredDest), { recursive: true });
-  fs.cpSync(vendoredSource, vendoredDest, { recursive: true });
+  fs.mkdirSync(vendoredDest, { recursive: true });
+  for (const entry of VENDORED_NODE_VFS_PAYLOAD) {
+    const src = path.join(vendoredSource, entry);
+    if (!fs.existsSync(src)) {
+      throw new Error(`missing vendored node-vfs payload entry: ${src}`);
+    }
+    fs.cpSync(src, path.join(vendoredDest, entry), { recursive: true });
+  }
 }
 
 export function findGuestSourceRoot(
@@ -78,10 +85,7 @@ function rewriteDeclarationsInDir(dirPath) {
 
     const source = fs.readFileSync(fullPath, "utf8");
     const rewritten = source
-      .replace(
-        /(from\s+["'])(\.{1,2}\/[^"']+)\.ts(["'])/g,
-        "$1$2.js$3",
-      )
+      .replace(/(from\s+["'])(\.{1,2}\/[^"']+)\.ts(["'])/g, "$1$2.js$3")
       .replace(
         /(import\(\s*["'])(\.{1,2}\/[^"']+)\.ts(["']\s*\))/g,
         "$1$2.js$3",

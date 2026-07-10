@@ -120,6 +120,17 @@ test("virtio-protocol: encodeFrame encodes Buffers as byte strings", () => {
   assert.deepEqual(decoded, msg);
 });
 
+test("virtio-protocol: encodeFrame owns encoded Buffer bytes", () => {
+  const data = Buffer.from("stable");
+  const msg = buildStdinData(1, data, true);
+  const framed = encodeFrame(msg);
+
+  data.fill(0);
+
+  const decoded = decodeMessage(framed.subarray(4)) as any;
+  assert.equal(decoded.p.data.toString(), "stable");
+});
+
 test("virtio-protocol: buildExecRequest drops undefined optional fields", () => {
   const req = buildExecRequest(5, {
     cmd: "sh",

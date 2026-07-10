@@ -92,6 +92,8 @@ export interface RootfsConfig {
   label?: string;
   /** size in `mb` (auto when undefined) */
   sizeMb?: number;
+  /** minimal raw placeholder for an initramfs-root image */
+  placeholder?: boolean;
 }
 
 /**
@@ -363,6 +365,12 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
     if (!isOptionalNumber(rootfs.sizeMb)) {
       return false;
     }
+    if (!isOptionalBoolean(rootfs.placeholder)) {
+      return false;
+    }
+    if (rootfs.placeholder === true && rootfs.sizeMb !== undefined) {
+      return false;
+    }
   }
 
   if (cfg.init !== undefined) {
@@ -385,6 +393,14 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
     if (!isOptionalString(init.rootfsInitExtra)) {
       return false;
     }
+  }
+
+  if (
+    isRecord(cfg.rootfs) &&
+    cfg.rootfs.placeholder === true &&
+    (!isRecord(cfg.init) || cfg.init.initramfsRoot !== true)
+  ) {
+    return false;
   }
 
   if (cfg.postBuild !== undefined) {
@@ -418,10 +434,7 @@ export function validateBuildConfig(config: unknown): config is BuildConfig {
       return false;
     }
     const release = cfg.release as Record<string, unknown>;
-    if (
-      release.arches !== undefined &&
-      !isArchitectureArray(release.arches)
-    ) {
+    if (release.arches !== undefined && !isArchitectureArray(release.arches)) {
       return false;
     }
   }

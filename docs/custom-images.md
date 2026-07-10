@@ -104,16 +104,19 @@ path: mounts, optional DHCP, `sandboxfs`, and `sandboxd`.
 
 `images/alpine-initramfs-firecracker.json` boots the same static init directly
 from `initramfs.cpio.lz4`. It copies `sandboxd`, `sandboxfs`, bash, and
-certificates into initramfs, so it can skip the rootfs mount path. Gondolin still
-emits `rootfs.ext4` because the asset manifest format expects one. The
-initramfs-root profile passed `20/20` smoke boots at `50M`; `49M` failed on the
-same host.
+certificates into initramfs, so it can skip the rootfs mount path. Its
+`rootfs.placeholder` setting emits only a `512`-byte raw compatibility disk.
+Firecracker-only profiles hard-link the generic kernel name to the custom
+kernel so image archives store the ELF once. The initramfs-root profile passed
+`20/20` smoke boots at `50M`; `49M` failed on the same host.
 
 Build config knobs:
 
 - `init.rootfsInitBinary`: copy this executable to `/init`
 - `init.initramfsRoot`: copy the root init path into initramfs `/init` instead
   of using the default `switch_root` initramfs script
+- `rootfs.placeholder`: emit a minimal raw compatibility disk; valid only with
+  `init.initramfsRoot` and incompatible with runtime `rootfs.size`
 - `vfkitKernelPath`: use this uncompressed arm64 kernel for vfkit instead of
   extracting one from the Alpine kernel package
 

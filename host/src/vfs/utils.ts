@@ -40,6 +40,9 @@ export function isWriteFlag(flags: string): boolean {
  * - Removes trailing '/' except for the root
  */
 export function normalizeVfsPath(inputPath: string) {
+  if (isCanonicalAbsolutePath(inputPath)) {
+    return inputPath;
+  }
   let normalized = path.posix.normalize(inputPath);
   if (!normalized.startsWith("/")) {
     normalized = `/${normalized}`;
@@ -48,6 +51,31 @@ export function normalizeVfsPath(inputPath: string) {
     normalized = normalized.slice(0, -1);
   }
   return normalized;
+}
+
+function isCanonicalAbsolutePath(inputPath: string) {
+  if (inputPath.charCodeAt(0) !== 47) return false;
+  if (inputPath.length === 1) return true;
+  if (inputPath.charCodeAt(inputPath.length - 1) === 47) return false;
+
+  let segmentStart = 1;
+  for (let index = 1; index <= inputPath.length; index += 1) {
+    if (index < inputPath.length && inputPath.charCodeAt(index) !== 47) {
+      continue;
+    }
+
+    const segmentLength = index - segmentStart;
+    if (segmentLength === 0) return false;
+    if (
+      inputPath.charCodeAt(segmentStart) === 46 &&
+      (segmentLength === 1 ||
+        (segmentLength === 2 && inputPath.charCodeAt(segmentStart + 1) === 46))
+    ) {
+      return false;
+    }
+    segmentStart = index + 1;
+  }
+  return true;
 }
 
 export class VirtualDirent {

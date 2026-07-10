@@ -599,10 +599,12 @@ export function buildFileDeleteRequest(
 }
 
 export function encodeFrame(message: object): Buffer {
-  const payload = Buffer.from(
-    encode(message, { rejectUndefined: true, types: cborEncoderTypes }),
-  );
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(payload.length, 0);
-  return Buffer.concat([header, payload]);
+  const payload = encode(message, {
+    rejectUndefined: true,
+    types: cborEncoderTypes,
+  });
+  const frame = Buffer.allocUnsafe(4 + payload.byteLength);
+  frame.writeUInt32BE(payload.byteLength, 0);
+  frame.set(payload, 4);
+  return frame;
 }

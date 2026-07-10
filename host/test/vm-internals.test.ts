@@ -54,7 +54,11 @@ function makeTempResolvedServerOptions() {
   };
 }
 
-function writeAssetManifest(dir: string, rootfsMode?: RootfsMode) {
+function writeAssetManifest(
+  dir: string,
+  rootfsMode?: RootfsMode,
+  rootfsPlaceholder = false,
+) {
   fs.writeFileSync(
     path.join(dir, "manifest.json"),
     JSON.stringify(
@@ -64,6 +68,7 @@ function writeAssetManifest(dir: string, rootfsMode?: RootfsMode) {
           arch: "aarch64",
           distro: "alpine",
           alpine: { version: "3.23.0" },
+          rootfs: rootfsPlaceholder ? { placeholder: true } : undefined,
         },
         runtimeDefaults: rootfsMode ? { rootfsMode } : undefined,
         buildTime: new Date().toISOString(),
@@ -149,6 +154,31 @@ test("vm internals: exposes startup timings", () => {
     assert.equal(timings[0].name, "probe");
     assert.equal(typeof timings[0].atMs, "number");
   } finally {
+    cleanup();
+  }
+});
+
+test("vm internals: validates all VFS mounts in one guest exec", async () => {
+  const { vm, cleanup } = makeVm({ autoStart: false });
+  const commands: unknown[] = [];
+
+  (vm as any).execInternalNoVfsWait = async (command: unknown) => {
+    commands.push(command);
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+
+  try {
+    await (vm as any).waitForVfsReadyInternal();
+    assert.equal(commands.length, 1);
+
+    const command = commands[0] as string[];
+    assert.deepEqual(command.slice(0, 2), ["/bin/sh", "-c"]);
+    assert.equal(command[4], "/data");
+    assert.ok(command.includes("/etc/gondolin"));
+    assert.match(command[2]!, /fuse\.sandboxfs/);
+    assert.match(command[2]!, /mount --bind/);
+  } finally {
+    await vm.close();
     cleanup();
   }
 });
@@ -264,6 +294,28 @@ test("vm internals: rootfs option overrides manifest default", async () => {
     assert.equal(rootDisk.readOnly, false);
   } finally {
     await vm.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: rootfs size rejects placeholder images", () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  writeAssetManifest(dir, undefined, true);
+
+  try {
+    assert.throws(
+      () =>
+        new VM(
+          {
+            autoStart: false,
+            vfs: null,
+            rootfs: { mode: "cow", size: "64M" },
+          },
+          resolved as any,
+        ),
+      /rootfs\.size is not supported by images with rootfs\.placeholder/,
+    );
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

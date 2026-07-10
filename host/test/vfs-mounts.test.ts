@@ -37,6 +37,10 @@ test("normalizeMountPath validates and normalizes", () => {
   assert.throws(() => normalizeMountPath("relative"), /must be absolute/);
   assert.throws(() => normalizeMountPath("/bad\0path"), /null bytes/);
   assert.equal(normalizeMountPath("/data/"), "/data");
+  assert.equal(normalizeMountPath("/data/./nested"), "/data/nested");
+  assert.equal(normalizeMountPath("/data/child/../nested"), "/data/nested");
+  assert.equal(normalizeMountPath("//data///nested"), "/data/nested");
+  assert.equal(normalizeMountPath("/.config/cache"), "/.config/cache");
 });
 
 test("normalizeMountMap rejects invalid providers and duplicates", () => {

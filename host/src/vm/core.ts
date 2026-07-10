@@ -316,7 +316,6 @@ export class VM {
   private vfsReadyPromise: Promise<void> | null = null;
   private rootfsGuestResizePending = false;
   private rootfsGuestResizeDone = false;
-  private vmmChecked = false;
   private debugLog: DebugLogFn | null = null;
   private debugListener:
     | ((component: DebugComponent, message: string) => void)
@@ -490,6 +489,13 @@ export class VM {
       sandboxOptions.rootDiskDeleteOnClose !== undefined;
 
     const manifestRootfsMode = resolveManifestRootfsMode(resolved);
+    const manifestRootfsPlaceholder =
+      resolveManifestRootfsPlaceholder(resolved);
+    if (rootfsSizeBytes !== null && manifestRootfsPlaceholder) {
+      throw new Error(
+        "rootfs.size is not supported by images with rootfs.placeholder",
+      );
+    }
     const needsWritableRoot = needsWritableRootForVfsBinds(this.fuseBinds);
     const defaultRootfsMode = needsWritableRoot
       ? "cow"
@@ -1204,19 +1210,6 @@ fi
     }
   }
 
-  private ensureVmmAvailable() {
-    if (this.vmmChecked) return;
-
-    const server = this.server;
-    if (!server) {
-      throw new Error("sandbox server is not available");
-    }
-
-    const vmmPath = server.getVmmPath();
-    execFileSync(vmmPath, ["--version"], { stdio: "ignore" });
-    this.vmmChecked = true;
-  }
-
   private beginStartupGeneration() {
     this.startupGeneration += 1;
     return this.startupGeneration;
@@ -1254,7 +1247,6 @@ fi
     await this.withStartTimeout(
       async () => {
         this.ensureStartupGeneration(startupGeneration);
-        this.ensureVmmAvailable();
 
         if (this.server) await this.server.start();
 
@@ -1700,70 +1692,47 @@ fi
   }
 
   private async waitForVfsReadyInternal() {
-    await this.waitForMount(this.fuseMount, "fuse.sandboxfs");
-    for (const mountPoint of this.fuseBinds) {
-      await this.waitForBindMount(mountPoint);
-    }
-  }
+    const script = [
+      "fuse_mount=$1",
+      "shift",
+      `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do`,
+      '  if ! grep -Fq " $fuse_mount fuse.sandboxfs " /proc/mounts; then',
+      `    sleep ${VFS_READY_SLEEP_SECONDS}`,
+      "    continue",
+      "  fi",
+      "  ready=1",
+      '  for mount_point in "$@"; do',
+      '    [ "$mount_point" = "$fuse_mount" ] && continue',
+      '    if [ "$fuse_mount" = "/" ]; then',
+      '      [ -e "$mount_point" ] || ready=0',
+      "      continue",
+      "    fi",
+      '    if ! grep -Fq " $mount_point " /proc/mounts; then',
+      '      mkdir -p "$mount_point"',
+      '      mount --bind "${fuse_mount}${mount_point}" "$mount_point" > /dev/null 2>&1 || true',
+      '      grep -Fq " $mount_point " /proc/mounts || ready=0',
+      "    fi",
+      "  done",
+      '  [ "$ready" -eq 1 ] && exit 0',
+      `  sleep ${VFS_READY_SLEEP_SECONDS}`,
+      "done",
+      "exit 1",
+    ].join("\n");
 
-  private async waitForMount(mountPoint: string, fsType?: string) {
-    const mountCheck = fsType
-      ? `grep -q " $1 ${fsType} " /proc/mounts`
-      : `grep -q " $1 " /proc/mounts`;
-    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do ${mountCheck} && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
-
-    // Use internal exec that bypasses VFS check
+    // A single guest round trip validates the FUSE mount and all bind mounts.
+    // The previous per-mount exec loop added a full warm-exec latency for every
+    // bind, even though init normally prepares all of them before sandboxd.
     const result = await this.execInternalNoVfsWait([
       "/bin/sh",
       "-c",
       script,
       "sh",
-      mountPoint,
+      this.fuseMount,
+      ...this.fuseBinds,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(
-        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`,
-      );
-    }
-  }
-
-  private async waitForBindMount(mountPoint: string) {
-    if (mountPoint === this.fuseMount) return;
-    if (this.fuseMount === "/") {
-      await this.waitForPath(mountPoint);
-      return;
-    }
-
-    const source = `${this.fuseMount}${mountPoint}`;
-    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do if grep -q " $1 " /proc/mounts; then exit 0; fi; mkdir -p "$1"; mount --bind "$2" "$1" > /dev/null 2>&1 || true; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
-
-    const result = await this.execInternalNoVfsWait([
-      "/bin/sh",
-      "-c",
-      script,
-      "sh",
-      mountPoint,
-      source,
-    ]);
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`,
-      );
-    }
-  }
-
-  private async waitForPath(entryPath: string) {
-    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do [ -e "$1" ] && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
-    const result = await this.execInternalNoVfsWait([
-      "/bin/sh",
-      "-c",
-      script,
-      "sh",
-      entryPath,
-    ]);
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `vfs path ${entryPath} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`,
+        `vfs mounts not ready (exit ${result.exitCode}): ${result.stderr.trim()}`,
       );
     }
   }
@@ -2238,11 +2207,23 @@ function resolveManifestRootfsMode(
   return isRootfsMode(mode) ? mode : undefined;
 }
 
+function resolveManifestRootfsPlaceholder(
+  resolved: ResolvedSandboxServerOptions,
+): boolean {
+  const kernelDir = path.dirname(resolved.kernelPath);
+  const initrdDir = path.dirname(resolved.initrdPath);
+  const rootfsDir = path.dirname(resolved.rootfsPath);
+  if (kernelDir !== initrdDir || kernelDir !== rootfsDir) {
+    return false;
+  }
+
+  return loadAssetManifest(kernelDir)?.config?.rootfs?.placeholder === true;
+}
+
 function needsWritableRootForVfsBinds(fuseBinds: string[]): boolean {
   return fuseBinds.some(
     (mountPath) =>
-      mountPath !== "/etc/gondolin" &&
-      !mountPath.startsWith("/etc/gondolin/"),
+      mountPath !== "/etc/gondolin" && !mountPath.startsWith("/etc/gondolin/"),
   );
 }
 

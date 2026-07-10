@@ -1,6 +1,7 @@
 import { EventEmitter } from "events";
 import child_process from "child_process";
 import type { ChildProcess } from "child_process";
+import crypto from "crypto";
 import fs from "fs";
 import http from "http";
 import net from "net";
@@ -91,6 +92,8 @@ type FirecrackerJson =
 
 export class FirecrackerController extends EventEmitter {
   private child: ChildProcess | null = null;
+  private apiAgent: http.Agent | null = null;
+  private bootConfigPath: string | null = null;
   private state: SandboxState = "stopped";
   private restartTimer: NodeJS.Timeout | null = null;
   private manualStop = false;
@@ -118,9 +121,13 @@ export class FirecrackerController extends EventEmitter {
       throw new Error("Firecracker snapshot requires a running VM");
     }
 
-    await firecrackerRequest(this.config.apiSocketPath, "PATCH", "/vm", {
-      state: "Paused",
-    });
+    await firecrackerRequest(
+      this.config.apiSocketPath,
+      "PATCH",
+      "/vm",
+      { state: "Paused" },
+      this.apiAgent ?? undefined,
+    );
     try {
       await firecrackerRequest(
         this.config.apiSocketPath,
@@ -131,11 +138,16 @@ export class FirecrackerController extends EventEmitter {
           snapshot_path: snapshotPath,
           mem_file_path: memPath,
         },
+        this.apiAgent ?? undefined,
       );
     } finally {
-      await firecrackerRequest(this.config.apiSocketPath, "PATCH", "/vm", {
-        state: "Resumed",
-      }).catch(() => {});
+      await firecrackerRequest(
+        this.config.apiSocketPath,
+        "PATCH",
+        "/vm",
+        { state: "Resumed" },
+        this.apiAgent ?? undefined,
+      ).catch(() => {});
     }
   }
 
@@ -147,19 +159,37 @@ export class FirecrackerController extends EventEmitter {
     this.manualStop = false;
     this.setState("starting");
     this.emitStartupTiming("firecracker_start");
-    this.cleanupSockets();
+    const launchArgs = ["--api-sock", this.config.apiSocketPath];
+    try {
+      this.cleanupSockets();
+      await waitForSocketPaths(
+        firecrackerVsockChannelPaths(this.config.vsockPath),
+      );
+      this.emitStartupTiming("host_vsock_paths_ready");
 
-    this.child = child_process.spawn(
-      this.config.firecrackerPath,
-      ["--api-sock", this.config.apiSocketPath],
-      {
-        stdio: [
-          "ignore",
-          this.config.console === "stdio" ? "pipe" : "ignore",
-          "pipe",
-        ],
-      },
-    );
+      if (!this.config.snapshotLoad) {
+        this.bootConfigPath = writeFirecrackerBootConfigFile(
+          this.config.apiSocketPath,
+          buildFirecrackerBootConfig(this.config),
+        );
+        launchArgs.push("--config-file", this.bootConfigPath);
+        this.emitStartupTiming("firecracker_config_written");
+      }
+    } catch (err) {
+      await this.close();
+      throw err;
+    }
+
+    this.destroyApiAgent();
+    this.apiAgent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+
+    this.child = child_process.spawn(this.config.firecrackerPath, launchArgs, {
+      stdio: [
+        "ignore",
+        this.config.console === "stdio" ? "pipe" : "ignore",
+        "pipe",
+      ],
+    });
     this.emitStartupTiming("firecracker_spawned");
     trackChild(this.child);
 
@@ -173,6 +203,7 @@ export class FirecrackerController extends EventEmitter {
 
     this.child.on("error", (err) => {
       this.cleanupSockets();
+      this.destroyApiAgent();
       this.child = null;
       this.setState("stopped");
       this.emit("exit", { code: null, signal: null, error: err });
@@ -180,6 +211,7 @@ export class FirecrackerController extends EventEmitter {
 
     this.child.on("exit", (code, signal) => {
       this.cleanupSockets();
+      this.destroyApiAgent();
       this.child = null;
       this.setState("stopped");
       this.emit("exit", { code, signal });
@@ -219,40 +251,32 @@ export class FirecrackerController extends EventEmitter {
     try {
       try {
         await Promise.race([
-          waitForApiSocket(this.config.apiSocketPath),
+          (async () => {
+            await waitForApiSocket(this.config.apiSocketPath);
+            this.emitStartupTiming("firecracker_api_ready");
+
+            if (this.config.snapshotLoad) {
+              await loadFirecrackerSnapshot(
+                this.config,
+                this.apiAgent ?? undefined,
+              );
+              this.emitStartupTiming("snapshot_loaded");
+            } else {
+              await waitForFirecrackerRunning(
+                this.config.apiSocketPath,
+                this.apiAgent ?? undefined,
+              );
+              this.cleanupBootConfig();
+              this.emitStartupTiming("instance_started");
+            }
+
+            this.setState("running");
+          })(),
           startupFailure,
         ]);
       } finally {
         cleanupStartupFailure();
       }
-      this.emitStartupTiming("firecracker_api_ready");
-
-      if (this.config.snapshotLoad) {
-        this.setState("running");
-        await waitForSocketPaths(
-          firecrackerVsockChannelPaths(this.config.vsockPath),
-        );
-        this.emitStartupTiming("host_vsock_paths_ready");
-        await loadFirecrackerSnapshot(this.config);
-        this.emitStartupTiming("snapshot_loaded");
-        return;
-      }
-
-      await configureFirecracker(this.config);
-      this.emitStartupTiming("firecracker_configured");
-
-      // Let SandboxServer create the host Unix listeners that Firecracker will
-      // target for guest-initiated vsock connections before the guest boots.
-      this.setState("running");
-      await waitForSocketPaths(
-        firecrackerVsockChannelPaths(this.config.vsockPath),
-      );
-      this.emitStartupTiming("host_vsock_paths_ready");
-
-      await firecrackerRequest(this.config.apiSocketPath, "PUT", "/actions", {
-        action_type: "InstanceStart",
-      });
-      this.emitStartupTiming("instance_started");
     } catch (err) {
       await this.close();
       throw err;
@@ -261,6 +285,7 @@ export class FirecrackerController extends EventEmitter {
 
   async close() {
     if (!this.child) {
+      this.destroyApiAgent();
       this.cleanupSockets();
       this.setState("stopped");
       return;
@@ -297,6 +322,7 @@ export class FirecrackerController extends EventEmitter {
     }
 
     this.cleanupSockets();
+    this.destroyApiAgent();
     this.setState("stopped");
   }
 
@@ -324,6 +350,23 @@ export class FirecrackerController extends EventEmitter {
         // ignore
       }
     }
+    this.cleanupBootConfig();
+  }
+
+  private cleanupBootConfig() {
+    if (!this.bootConfigPath) return;
+    const configPath = this.bootConfigPath;
+    this.bootConfigPath = null;
+    try {
+      fs.rmSync(configPath, { force: true });
+    } catch {
+      // ignore
+    }
+  }
+
+  private destroyApiAgent() {
+    this.apiAgent?.destroy();
+    this.apiAgent = null;
   }
 
   private setState(state: SandboxState) {
@@ -422,39 +465,50 @@ function validateFirecrackerRuntimePreconditions(
   }
 
   validateKvmDevice();
-  validateLinuxUnixSocketPath(
-    config.apiSocketPath,
-    "sandbox.firecrackerApiSocketPath",
-  );
-  validateLinuxUnixSocketPath(config.vsockPath, "sandbox.firecrackerVsockPath");
-  validateSocketParent(
-    config.apiSocketPath,
-    "sandbox.firecrackerApiSocketPath",
-  );
-  validateSocketParent(config.vsockPath, "sandbox.firecrackerVsockPath");
+  const socketFields: Array<[socketPath: string, fieldName: string]> = [
+    [config.apiSocketPath, "sandbox.firecrackerApiSocketPath"],
+    [config.vsockPath, "sandbox.firecrackerVsockPath"],
+    ...firecrackerVsockChannelPaths(config.vsockPath).map(
+      (socketPath, idx): [string, string] => [
+        socketPath,
+        `sandbox.firecrackerVsockPath channel ${1024 + idx}`,
+      ],
+    ),
+  ];
 
-  for (const [idx, socketPath] of firecrackerVsockChannelPaths(
-    config.vsockPath,
-  ).entries()) {
-    const port = 1024 + idx;
-    validateLinuxUnixSocketPath(
-      socketPath,
-      `sandbox.firecrackerVsockPath channel ${port}`,
-    );
-    validateSocketParent(
-      socketPath,
-      `sandbox.firecrackerVsockPath channel ${port}`,
-    );
+  const validatedParents = new Set<string>();
+  for (const [socketPath, fieldName] of socketFields) {
+    validateLinuxUnixSocketPath(socketPath, fieldName);
+    const parent = path.dirname(socketPath);
+    if (validatedParents.has(parent)) continue;
+    validateSocketParent(socketPath, fieldName);
+    validatedParents.add(parent);
   }
 }
 
-async function configureFirecracker(config: FirecrackerConfig): Promise<void> {
-  validateCpuCount(config.cpus);
-  await firecrackerRequest(config.apiSocketPath, "PUT", "/machine-config", {
-    vcpu_count: config.cpus,
-    mem_size_mib: parseMemoryToMiB(config.memory),
-  });
+function writeFirecrackerBootConfigFile(
+  apiSocketPath: string,
+  config: Record<string, FirecrackerJson>,
+): string {
+  const contents = JSON.stringify(config);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const suffix = crypto.randomBytes(8).toString("hex");
+    const configPath = `${apiSocketPath}.config.${process.pid}.${suffix}.json`;
+    try {
+      fs.writeFileSync(configPath, contents, { mode: 0o600, flag: "wx" });
+      return configPath;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw err;
+    }
+  }
+  throw new Error("Failed to create a unique Firecracker boot config file");
+}
 
+function buildFirecrackerBootConfig(
+  config: FirecrackerConfig,
+): Record<string, FirecrackerJson> {
+  validateCpuCount(config.cpus);
   const bootSource: Record<string, FirecrackerJson> = {
     kernel_image_path: config.kernelPath,
     boot_args: config.append,
@@ -462,65 +516,74 @@ async function configureFirecracker(config: FirecrackerConfig): Promise<void> {
   if (config.initrdPath && fs.existsSync(config.initrdPath)) {
     bootSource.initrd_path = config.initrdPath;
   }
-  await firecrackerRequest(
-    config.apiSocketPath,
-    "PUT",
-    "/boot-source",
-    bootSource,
-  );
+
+  const result: Record<string, FirecrackerJson> = {
+    "boot-source": bootSource,
+    "machine-config": {
+      vcpu_count: config.cpus,
+      mem_size_mib: parseMemoryToMiB(config.memory),
+    },
+    vsock: {
+      guest_cid: config.guestCid,
+      uds_path: config.vsockPath,
+    },
+  };
 
   if (config.rootDiskPath) {
-    await firecrackerRequest(config.apiSocketPath, "PUT", "/drives/rootfs", {
-      drive_id: "rootfs",
-      path_on_host: config.rootDiskPath,
-      is_root_device: true,
-      is_read_only: config.rootDiskReadOnly ?? false,
-    });
+    result.drives = [
+      {
+        drive_id: "rootfs",
+        path_on_host: config.rootDiskPath,
+        is_root_device: true,
+        is_read_only: config.rootDiskReadOnly ?? false,
+      },
+    ];
   }
 
-  await firecrackerRequest(config.apiSocketPath, "PUT", "/vsock", {
-    guest_cid: config.guestCid,
-    uds_path: config.vsockPath,
-  });
-
   if (config.netTapName) {
-    await firecrackerRequest(
-      config.apiSocketPath,
-      "PUT",
-      "/network-interfaces/net1",
+    result["network-interfaces"] = [
       {
         iface_id: "net1",
         host_dev_name: config.netTapName,
         guest_mac: config.netMac ?? "02:00:00:00:00:01",
       },
-    );
+    ];
   }
+
+  return result;
 }
 
 async function loadFirecrackerSnapshot(
   config: FirecrackerConfig,
+  agent?: http.Agent,
 ): Promise<void> {
   const snapshot = config.snapshotLoad;
   if (!snapshot) return;
 
-  await firecrackerRequest(config.apiSocketPath, "PUT", "/snapshot/load", {
-    snapshot_path: snapshot.snapshotPath,
-    mem_file_path: snapshot.memPath,
-    resume_vm: true,
-    vsock_override: {
-      uds_path: config.vsockPath,
+  await firecrackerRequest(
+    config.apiSocketPath,
+    "PUT",
+    "/snapshot/load",
+    {
+      snapshot_path: snapshot.snapshotPath,
+      mem_file_path: snapshot.memPath,
+      resume_vm: true,
+      vsock_override: {
+        uds_path: config.vsockPath,
+      },
+      ...(config.netTapName
+        ? {
+            network_overrides: [
+              {
+                iface_id: "net1",
+                host_dev_name: config.netTapName,
+              },
+            ],
+          }
+        : {}),
     },
-    ...(config.netTapName
-      ? {
-          network_overrides: [
-            {
-              iface_id: "net1",
-              host_dev_name: config.netTapName,
-            },
-          ],
-        }
-      : {}),
-  });
+    agent,
+  );
 }
 
 function validateCpuCount(value: number): void {
@@ -534,12 +597,14 @@ async function waitForSocketPaths(
   timeoutMs = 5000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let retryDelayMs = 1;
 
   while (Date.now() <= deadline) {
     if (socketPaths.every((socketPath) => fs.existsSync(socketPath))) {
       return;
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+    retryDelayMs = Math.min(10, retryDelayMs * 2);
   }
 
   const missing = socketPaths.filter(
@@ -576,12 +641,45 @@ function parseMemoryToMiB(value: string): number {
   return mib;
 }
 
+async function waitForFirecrackerRunning(
+  socketPath: string,
+  agent?: http.Agent,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastDetail = "instance state unavailable";
+  let retryDelayMs = 1;
+
+  while (Date.now() <= deadline) {
+    try {
+      const body = await firecrackerRequest(
+        socketPath,
+        "GET",
+        "/",
+        undefined,
+        agent,
+      );
+      const state = (JSON.parse(body) as { state?: unknown }).state;
+      if (state === "Running") return;
+      lastDetail = `instance state is ${String(state)}`;
+    } catch (err) {
+      lastDetail = err instanceof Error ? err.message : String(err);
+    }
+
+    await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+    retryDelayMs = Math.min(10, retryDelayMs * 2);
+  }
+
+  throw new Error(`timed out waiting for Firecracker to run: ${lastDetail}`);
+}
+
 async function waitForApiSocket(
   socketPath: string,
   timeoutMs = 5000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown = null;
+  let retryDelayMs = 1;
 
   while (Date.now() <= deadline) {
     try {
@@ -589,7 +687,8 @@ async function waitForApiSocket(
       return;
     } catch (err) {
       lastError = err;
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+      retryDelayMs = Math.min(25, retryDelayMs * 2);
     }
   }
 
@@ -616,9 +715,10 @@ export function firecrackerRequest(
   method: "PUT" | "GET" | "PATCH",
   apiPath: string,
   body?: FirecrackerJson,
+  agent?: http.Agent,
 ): Promise<string> {
   const payload =
-    body === undefined ? undefined : JSON.stringify(body, null, 2) + "\n";
+    body === undefined ? undefined : Buffer.from(JSON.stringify(body) + "\n");
 
   return new Promise<string>((resolve, reject) => {
     const req = http.request(
@@ -626,12 +726,12 @@ export function firecrackerRequest(
         socketPath,
         method,
         path: apiPath,
-        agent: false,
+        agent: agent ?? false,
         timeout: 5000,
         headers: {
           Accept: "application/json",
-          Connection: "close",
-          "Content-Length": Buffer.byteLength(payload ?? ""),
+          Connection: agent ? "keep-alive" : "close",
+          "Content-Length": payload?.length ?? 0,
           ...(payload === undefined
             ? {}
             : { "Content-Type": "application/json" }),
@@ -639,9 +739,16 @@ export function firecrackerRequest(
       },
       (res) => {
         const chunks: Buffer[] = [];
-        res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        res.on("data", (chunk) =>
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
+        );
         res.on("end", () => {
-          const responseBody = Buffer.concat(chunks).toString("utf8");
+          const responseBody =
+            chunks.length === 0
+              ? ""
+              : chunks.length === 1
+                ? chunks[0]!.toString("utf8")
+                : Buffer.concat(chunks).toString("utf8");
           const status = res.statusCode ?? 0;
           if (status >= 200 && status < 300) {
             resolve(responseBody);
@@ -697,3 +804,9 @@ function waitForChildExit(
     child.once("exit", onExit);
   });
 }
+
+/** @internal */
+export const __test = {
+  buildFirecrackerBootConfig,
+  writeFirecrackerBootConfigFile,
+};

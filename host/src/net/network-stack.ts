@@ -277,17 +277,35 @@ export class NetworkStack extends EventEmitter {
 
   // Called when network writes data to the network interface
   writeToNetwork(data: Buffer) {
-    this.rxBuffer = Buffer.concat([this.rxBuffer, data]);
+    if (this.rxBuffer.length === 0) {
+      const consumed = this.consumeFramedNetworkData(data);
+      if (consumed === data.length) return;
 
-    while (this.rxBuffer.length >= 4) {
-      const frameLen = this.rxBuffer.readUInt32BE(0);
-      if (this.rxBuffer.length < 4 + frameLen) break;
-
-      const frame = this.rxBuffer.subarray(4, 4 + frameLen);
-      this.receive(frame);
-
-      this.rxBuffer = this.rxBuffer.subarray(4 + frameLen);
+      // Preserve the old ownership semantics for an incomplete trailing frame:
+      // callers may reuse or mutate their input buffer after this method returns.
+      this.rxBuffer = Buffer.from(data.subarray(consumed));
+      return;
     }
+
+    const buffered = Buffer.concat([this.rxBuffer, data]);
+    const consumed = this.consumeFramedNetworkData(buffered);
+    this.rxBuffer =
+      consumed === buffered.length
+        ? Buffer.alloc(0)
+        : buffered.subarray(consumed);
+  }
+
+  private consumeFramedNetworkData(data: Buffer) {
+    let offset = 0;
+    while (data.length - offset >= 4) {
+      const frameLen = data.readUInt32BE(offset);
+      if (data.length - offset < 4 + frameLen) break;
+
+      const frame = data.subarray(offset + 4, offset + 4 + frameLen);
+      this.receive(frame);
+      offset += 4 + frameLen;
+    }
+    return offset;
   }
 
   writeFrameToNetwork(frame: Buffer) {
@@ -376,15 +394,13 @@ export class NetworkStack extends EventEmitter {
   send(payload: Buffer, proto: number) {
     if (!this.vmMac) return;
 
-    const frame = Buffer.alloc(14 + payload.length);
-    this.vmMac.copy(frame, 0);
-    this.gatewayMac.copy(frame, 6);
-    frame.writeUInt16BE(proto, 12);
-    payload.copy(frame, 14);
-
-    const packet = Buffer.alloc(4 + frame.length);
-    packet.writeUInt32BE(frame.length, 0);
-    frame.copy(packet, 4);
+    const frameLength = 14 + payload.length;
+    const packet = Buffer.alloc(4 + frameLength);
+    packet.writeUInt32BE(frameLength, 0);
+    this.vmMac.copy(packet, 4);
+    this.gatewayMac.copy(packet, 10);
+    packet.writeUInt16BE(proto, 16);
+    payload.copy(packet, 18);
 
     const queued = this.enqueueTx(
       packet,
@@ -396,17 +412,13 @@ export class NetworkStack extends EventEmitter {
   }
 
   sendBroadcast(payload: Buffer, proto: number) {
-    const broadcastMac = Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
-
-    const frame = Buffer.alloc(14 + payload.length);
-    broadcastMac.copy(frame, 0);
-    this.gatewayMac.copy(frame, 6);
-    frame.writeUInt16BE(proto, 12);
-    payload.copy(frame, 14);
-
-    const packet = Buffer.alloc(4 + frame.length);
-    packet.writeUInt32BE(frame.length, 0);
-    frame.copy(packet, 4);
+    const frameLength = 14 + payload.length;
+    const packet = Buffer.alloc(4 + frameLength);
+    packet.writeUInt32BE(frameLength, 0);
+    packet.fill(0xff, 4, 10);
+    this.gatewayMac.copy(packet, 10);
+    packet.writeUInt16BE(proto, 16);
+    payload.copy(packet, 18);
 
     this.enqueueTx(packet, this.classifyTxPriority(proto, payload));
   }

@@ -1,4 +1,4 @@
-.PHONY: build build-bins build-inner test test-inner clean run assets lint typecheck format fuzz fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean
+.PHONY: build build-bins build-inner test test-inner clean run assets lint typecheck check-fast-init format fuzz fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean
 
 RUN_PARALLEL ?= ../scripts/run-parallel
 
@@ -91,7 +91,13 @@ format:
 lint:
 	$(ZIG) fmt --check $(ZIG_SOURCES)
 
-typecheck: build-bins
+typecheck: build-bins check-fast-init
+
+check-fast-init:
+	@mkdir -p zig-cache/fastinit-check
+	$(ZIG) cc -target x86_64-linux-musl -c \
+		-o zig-cache/fastinit-check/gondolin-init.o \
+		-Wall -Wextra -Werror fastinit/gondolin-init.c
 
 
 test:

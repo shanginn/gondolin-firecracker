@@ -7,6 +7,7 @@ import test, { afterEach } from "node:test";
 
 import { computeAssetBuildId } from "../src/assets.ts";
 import {
+  __test,
   ensureImageSelector,
   importImageFromDirectory,
   listImageRefs,
@@ -149,6 +150,51 @@ test("images: import and resolve by build id", () => {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });
   }
+});
+
+test("images: import preserves hard-linked image assets", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+  const kernel = path.join(assets.dir, "vmlinuz-virt");
+  const firecrackerKernel = path.join(assets.dir, "firecracker-kernel");
+  fs.rmSync(firecrackerKernel);
+  fs.linkSync(kernel, firecrackerKernel);
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    const importedKernel = fs.statSync(
+      path.join(imported.assetDir, "vmlinuz-virt"),
+    );
+    const importedFirecrackerKernel = fs.statSync(
+      path.join(imported.assetDir, "firecracker-kernel"),
+    );
+
+    assert.equal(importedKernel.dev, importedFirecrackerKernel.dev);
+    assert.equal(importedKernel.ino, importedFirecrackerKernel.ino);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: inode identity remains exact above Number.MAX_SAFE_INTEGER", () => {
+  const inode = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+  assert.equal(Number(inode), Number(inode + 1n));
+  assert.equal(
+    __test.sameFileIdentity(
+      { dev: 1n, ino: inode },
+      { dev: 1n, ino: inode + 1n },
+    ),
+    false,
+  );
+  assert.equal(
+    __test.sameFileIdentity({ dev: 1n, ino: inode }, { dev: 1n, ino: inode }),
+    true,
+  );
 });
 
 test("images: import preserves optional Firecracker initrd from manifest", () => {

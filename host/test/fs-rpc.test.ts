@@ -184,6 +184,54 @@ test("fs rpc readdir offsets", async () => {
   await service.close();
 });
 
+test("fs rpc readdir skips dot entries without breaking pagination", async () => {
+  const base = new MemoryProvider();
+  for (const name of ["a.txt", "b.txt"]) {
+    const handle = await base.open(`/${name}`, "w+");
+    await handle.close();
+  }
+  const provider = new Proxy(base as any, {
+    get(target, prop, receiver) {
+      if (prop === "readdir") {
+        return async () => [".", "..", "a.txt", "b.txt"];
+      }
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value === "function") return value.bind(target);
+      return value;
+    },
+  });
+  const service = new FsRpcService(provider);
+
+  const first = await send(service, "readdir", {
+    ino: 1,
+    offset: 0,
+    max_entries: 1,
+  });
+  assert.equal(first.p.err, 0);
+  assert.deepEqual(
+    (first.p.res?.entries as Array<{ name: string }>).map(({ name }) => name),
+    ["a.txt"],
+  );
+  assert.equal(first.p.res?.next_offset, 3);
+
+  const second = await send(service, "readdir", {
+    ino: 1,
+    offset: first.p.res?.next_offset,
+    max_entries: 1,
+  });
+  assert.equal(second.p.err, 0);
+  assert.deepEqual(
+    (second.p.res?.entries as Array<{ name: string }>).map(({ name }) => name),
+    ["b.txt"],
+  );
+  assert.equal(second.p.res?.next_offset, 0);
+
+  const inodePaths = (service as any).pathToIno as Map<string, number>;
+  assert.equal(inodePaths.has("/."), false);
+  assert.equal(inodePaths.has("/.."), false);
+  await service.close();
+});
+
 test("fs rpc readdir caches paginated listings and invalidates on mutations", async () => {
   const base = new MemoryProvider();
   let readdirCalls = 0;
@@ -520,6 +568,14 @@ test("fs rpc validates names and payload size", async () => {
     mode: 0o755,
   });
   assert.equal(invalidName.p.err, ERRNO.EINVAL);
+
+  for (const name of [".", ".."]) {
+    const invalidDotName = await send(service, "lookup", {
+      parent_ino: 1,
+      name,
+    });
+    assert.equal(invalidDotName.p.err, ERRNO.EINVAL);
+  }
 
   const create = await send(service, "create", {
     parent_ino: 1,

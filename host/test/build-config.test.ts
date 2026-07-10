@@ -176,6 +176,41 @@ test("build-config: accepts fast init options", () => {
   assert.equal(parsed.init?.initramfsRoot, true);
 });
 
+test("build-config: accepts an initramfs-root placeholder disk", () => {
+  const cfg = {
+    arch: "x86_64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+    init: { initramfsRoot: true },
+    rootfs: { placeholder: true },
+  };
+
+  assert.equal(validateBuildConfig(cfg), true);
+  const parsed = parseBuildConfig(JSON.stringify(cfg));
+  assert.equal(parsed.rootfs?.placeholder, true);
+});
+
+test("build-config: rejects placeholder disks outside initramfs-root builds", () => {
+  const base = {
+    arch: "x86_64",
+    distro: "alpine",
+    alpine: { version: "3.23.0" },
+  };
+
+  assert.equal(
+    validateBuildConfig({ ...base, rootfs: { placeholder: true } }),
+    false,
+  );
+  assert.equal(
+    validateBuildConfig({
+      ...base,
+      init: { initramfsRoot: true },
+      rootfs: { placeholder: true, sizeMb: 16 },
+    }),
+    false,
+  );
+});
+
 test("build-config: rejects invalid custom Firecracker boot assets", () => {
   const invalid = {
     arch: "x86_64",

@@ -87,20 +87,22 @@ class HookedHandle implements VirtualFileHandle {
     length: number,
     position?: number | null,
   ) {
-    await this.runBefore({
+    const before = this.runBefore({
       op: "read",
       path: this.path,
       offset: position ?? undefined,
       length,
     });
+    if (isPromiseLike(before)) await before;
     const result = await this.inner.read(buffer, offset, length, position);
-    await this.runAfter({
+    const after = this.runAfter({
       op: "read",
       path: this.path,
       offset: position ?? undefined,
       length,
       result,
     });
+    if (isPromiseLike(after)) await after;
     return result;
   }
 
@@ -133,20 +135,22 @@ class HookedHandle implements VirtualFileHandle {
     length: number,
     position?: number | null,
   ) {
-    await this.runBefore({
+    const before = this.runBefore({
       op: "write",
       path: this.path,
       offset: position ?? undefined,
       length,
     });
+    if (isPromiseLike(before)) await before;
     const result = await this.inner.write(buffer, offset, length, position);
-    await this.runAfter({
+    const after = this.runAfter({
       op: "write",
       path: this.path,
       offset: position ?? undefined,
       length,
       result,
     });
+    if (isPromiseLike(after)) await after;
     return result;
   }
 
@@ -174,9 +178,11 @@ class HookedHandle implements VirtualFileHandle {
   }
 
   async readFile(options?: { encoding?: BufferEncoding } | BufferEncoding) {
-    await this.runBefore({ op: "readFile", path: this.path });
+    const before = this.runBefore({ op: "readFile", path: this.path });
+    if (isPromiseLike(before)) await before;
     const result = await this.inner.readFile(options);
-    await this.runAfter({ op: "readFile", path: this.path, result });
+    const after = this.runAfter({ op: "readFile", path: this.path, result });
+    if (isPromiseLike(after)) await after;
     return result;
   }
 
@@ -191,13 +197,15 @@ class HookedHandle implements VirtualFileHandle {
     data: Buffer | string,
     options?: { encoding?: BufferEncoding },
   ) {
-    await this.runBefore({
+    const before = this.runBefore({
       op: "writeFile",
       path: this.path,
       data: Buffer.isBuffer(data) ? data : Buffer.from(data),
     });
+    if (isPromiseLike(before)) await before;
     await this.inner.writeFile(data, options);
-    await this.runAfter({ op: "writeFile", path: this.path });
+    const after = this.runAfter({ op: "writeFile", path: this.path });
+    if (isPromiseLike(after)) await after;
   }
 
   writeFileSync(
@@ -214,9 +222,11 @@ class HookedHandle implements VirtualFileHandle {
   }
 
   async stat(options?: object) {
-    await this.runBefore({ op: "stat", path: this.path });
+    const before = this.runBefore({ op: "stat", path: this.path });
+    if (isPromiseLike(before)) await before;
     const result = await this.inner.stat(options);
-    await this.runAfter({ op: "stat", path: this.path, result });
+    const after = this.runAfter({ op: "stat", path: this.path, result });
+    if (isPromiseLike(after)) await after;
     return result;
   }
 
@@ -228,9 +238,19 @@ class HookedHandle implements VirtualFileHandle {
   }
 
   async truncate(len?: number) {
-    await this.runBefore({ op: "truncate", path: this.path, size: len });
+    const before = this.runBefore({
+      op: "truncate",
+      path: this.path,
+      size: len,
+    });
+    if (isPromiseLike(before)) await before;
     await this.inner.truncate(len);
-    await this.runAfter({ op: "truncate", path: this.path, size: len });
+    const after = this.runAfter({
+      op: "truncate",
+      path: this.path,
+      size: len,
+    });
+    if (isPromiseLike(after)) await after;
   }
 
   truncateSync(len?: number) {
@@ -240,9 +260,11 @@ class HookedHandle implements VirtualFileHandle {
   }
 
   async close() {
-    await this.runBefore({ op: "release", path: this.path });
+    const before = this.runBefore({ op: "release", path: this.path });
+    if (isPromiseLike(before)) await before;
     await this.inner.close();
-    await this.runAfter({ op: "release", path: this.path });
+    const after = this.runAfter({ op: "release", path: this.path });
+    if (isPromiseLike(after)) await after;
   }
 
   closeSync() {
@@ -251,16 +273,12 @@ class HookedHandle implements VirtualFileHandle {
     this.runAfterSync({ op: "release", path: this.path });
   }
 
-  private async runBefore(context: VfsHookContext) {
-    if (this.hooks.before) {
-      await this.hooks.before(context);
-    }
+  private runBefore(context: VfsHookContext) {
+    return this.hooks.before?.(context);
   }
 
-  private async runAfter(context: VfsHookContext) {
-    if (this.hooks.after) {
-      await this.hooks.after(context);
-    }
+  private runAfter(context: VfsHookContext) {
+    return this.hooks.after?.(context);
   }
 
   private runBeforeSync(context: VfsHookContext) {
@@ -295,6 +313,10 @@ export class SandboxVfsProvider
     this.hooks = hooks;
   }
 
+  private get hasHooks() {
+    return Boolean(this.hooks.before || this.hooks.after);
+  }
+
   get readonly() {
     return this.backend.readonly;
   }
@@ -307,17 +329,39 @@ export class SandboxVfsProvider
     return this.backend.supportsWatch;
   }
 
-  async open(path: string, flags: string, mode?: number) {
-    await this.runBefore({ op: "open", path, flags, mode });
+  open(path: string, flags: string, mode?: number) {
+    if (this.hasHooks) {
+      return this.openWithHooks(path, flags, mode);
+    }
+    try {
+      return this.backend.open(path, flags, mode);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  private async openWithHooks(path: string, flags: string, mode?: number) {
+    const before = this.runBefore({ op: "open", path, flags, mode });
+    if (isPromiseLike(before)) await before;
     const handle = this.wrapHandle(
       path,
       await this.backend.open(path, flags, mode),
     );
-    await this.runAfter({ op: "open", path, flags, mode, result: handle });
+    const after = this.runAfter({
+      op: "open",
+      path,
+      flags,
+      mode,
+      result: handle,
+    });
+    if (isPromiseLike(after)) await after;
     return handle;
   }
 
   openSync(path: string, flags: string, mode?: number) {
+    if (!this.hasHooks) {
+      return this.backend.openSync(path, flags, mode);
+    }
     this.runBeforeSync({ op: "open", path, flags, mode });
     const handle = this.wrapHandle(
       path,
@@ -327,42 +371,90 @@ export class SandboxVfsProvider
     return handle;
   }
 
-  async stat(path: string, options?: object) {
-    await this.runBefore({ op: "stat", path });
+  stat(path: string, options?: object) {
+    if (this.hasHooks) {
+      return this.statWithHooks(path, options);
+    }
+    try {
+      return this.backend.stat(path, options);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  private async statWithHooks(path: string, options?: object) {
+    const before = this.runBefore({ op: "stat", path });
+    if (isPromiseLike(before)) await before;
     const stats = await this.backend.stat(path, options);
-    await this.runAfter({ op: "stat", path, result: stats });
+    const after = this.runAfter({ op: "stat", path, result: stats });
+    if (isPromiseLike(after)) await after;
     return stats;
   }
 
   statSync(path: string, options?: object) {
+    if (!this.hasHooks) {
+      return this.backend.statSync(path, options);
+    }
     this.runBeforeSync({ op: "stat", path });
     const stats = this.backend.statSync(path, options);
     this.runAfterSync({ op: "stat", path, result: stats });
     return stats;
   }
 
-  async lstat(path: string, options?: object) {
-    await this.runBefore({ op: "lstat", path });
+  lstat(path: string, options?: object) {
+    if (this.hasHooks) {
+      return this.lstatWithHooks(path, options);
+    }
+    try {
+      return this.backend.lstat(path, options);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  private async lstatWithHooks(path: string, options?: object) {
+    const before = this.runBefore({ op: "lstat", path });
+    if (isPromiseLike(before)) await before;
     const stats = await this.backend.lstat(path, options);
-    await this.runAfter({ op: "lstat", path, result: stats });
+    const after = this.runAfter({ op: "lstat", path, result: stats });
+    if (isPromiseLike(after)) await after;
     return stats;
   }
 
   lstatSync(path: string, options?: object) {
+    if (!this.hasHooks) {
+      return this.backend.lstatSync(path, options);
+    }
     this.runBeforeSync({ op: "lstat", path });
     const stats = this.backend.lstatSync(path, options);
     this.runAfterSync({ op: "lstat", path, result: stats });
     return stats;
   }
 
-  async readdir(path: string, options?: object) {
-    await this.runBefore({ op: "readdir", path });
+  readdir(path: string, options?: object) {
+    if (this.hasHooks) {
+      return this.readdirWithHooks(path, options);
+    }
+    try {
+      return this.backend.readdir(path, options);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  private async readdirWithHooks(path: string, options?: object) {
+    const before = this.runBefore({ op: "readdir", path });
+    if (isPromiseLike(before)) await before;
     const entries = await this.backend.readdir(path, options);
-    await this.runAfter({ op: "readdir", path, result: entries });
+    const after = this.runAfter({ op: "readdir", path, result: entries });
+    if (isPromiseLike(after)) await after;
     return entries;
   }
 
   readdirSync(path: string, options?: object) {
+    if (!this.hasHooks) {
+      return this.backend.readdirSync(path, options);
+    }
     this.runBeforeSync({ op: "readdir", path });
     const entries = this.backend.readdirSync(path, options);
     this.runAfterSync({ op: "readdir", path, result: entries });
@@ -373,19 +465,27 @@ export class SandboxVfsProvider
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "mkdir", path);
     }
-    await this.runBefore({
+    if (!this.hasHooks) {
+      return this.backend.mkdir(path, options);
+    }
+    const before = this.runBefore({
       op: "mkdir",
       path,
       mode: (options as { mode?: number })?.mode,
     });
+    if (isPromiseLike(before)) await before;
     const result = await this.backend.mkdir(path, options);
-    await this.runAfter({ op: "mkdir", path, result });
+    const after = this.runAfter({ op: "mkdir", path, result });
+    if (isPromiseLike(after)) await after;
     return result;
   }
 
   mkdirSync(path: string, options?: object) {
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "mkdir", path);
+    }
+    if (!this.hasHooks) {
+      return this.backend.mkdirSync(path, options);
     }
     this.runBeforeSync({
       op: "mkdir",
@@ -401,14 +501,22 @@ export class SandboxVfsProvider
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "rmdir", path);
     }
-    await this.runBefore({ op: "rmdir", path });
+    if (!this.hasHooks) {
+      return this.backend.rmdir(path);
+    }
+    const before = this.runBefore({ op: "rmdir", path });
+    if (isPromiseLike(before)) await before;
     await this.backend.rmdir(path);
-    await this.runAfter({ op: "rmdir", path });
+    const after = this.runAfter({ op: "rmdir", path });
+    if (isPromiseLike(after)) await after;
   }
 
   rmdirSync(path: string) {
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "rmdir", path);
+    }
+    if (!this.hasHooks) {
+      return this.backend.rmdirSync(path);
     }
     this.runBeforeSync({ op: "rmdir", path });
     this.backend.rmdirSync(path);
@@ -419,14 +527,22 @@ export class SandboxVfsProvider
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "unlink", path);
     }
-    await this.runBefore({ op: "unlink", path });
+    if (!this.hasHooks) {
+      return this.backend.unlink(path);
+    }
+    const before = this.runBefore({ op: "unlink", path });
+    if (isPromiseLike(before)) await before;
     await this.backend.unlink(path);
-    await this.runAfter({ op: "unlink", path });
+    const after = this.runAfter({ op: "unlink", path });
+    if (isPromiseLike(after)) await after;
   }
 
   unlinkSync(path: string) {
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "unlink", path);
+    }
+    if (!this.hasHooks) {
+      return this.backend.unlinkSync(path);
     }
     this.runBeforeSync({ op: "unlink", path });
     this.backend.unlinkSync(path);
@@ -437,14 +553,22 @@ export class SandboxVfsProvider
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "rename", oldPath);
     }
-    await this.runBefore({ op: "rename", oldPath, newPath });
+    if (!this.hasHooks) {
+      return this.backend.rename(oldPath, newPath);
+    }
+    const before = this.runBefore({ op: "rename", oldPath, newPath });
+    if (isPromiseLike(before)) await before;
     await this.backend.rename(oldPath, newPath);
-    await this.runAfter({ op: "rename", oldPath, newPath });
+    const after = this.runAfter({ op: "rename", oldPath, newPath });
+    if (isPromiseLike(after)) await after;
   }
 
   renameSync(oldPath: string, newPath: string) {
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "rename", oldPath);
+    }
+    if (!this.hasHooks) {
+      return this.backend.renameSync(oldPath, newPath);
     }
     this.runBeforeSync({ op: "rename", oldPath, newPath });
     this.backend.renameSync(oldPath, newPath);
@@ -455,10 +579,15 @@ export class SandboxVfsProvider
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "link", newPath);
     }
-    await this.runBefore({ op: "link", oldPath, newPath });
+    if (!this.hasHooks && this.backend.link) {
+      return this.backend.link(oldPath, newPath);
+    }
+    const before = this.runBefore({ op: "link", oldPath, newPath });
+    if (isPromiseLike(before)) await before;
     if (this.backend.link) {
       await this.backend.link(oldPath, newPath);
-      await this.runAfter({ op: "link", oldPath, newPath });
+      const after = this.runAfter({ op: "link", oldPath, newPath });
+      if (isPromiseLike(after)) await after;
       return;
     }
     throw createErrnoError(ERRNO.ENOSYS, "link", oldPath);
@@ -467,6 +596,9 @@ export class SandboxVfsProvider
   linkSync(oldPath: string, newPath: string) {
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "link", newPath);
+    }
+    if (!this.hasHooks && this.backend.linkSync) {
+      return this.backend.linkSync(oldPath, newPath);
     }
     this.runBeforeSync({ op: "link", oldPath, newPath });
     if (this.backend.linkSync) {
@@ -573,48 +705,38 @@ export class SandboxVfsProvider
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "truncate", path);
     }
-    await this.runBefore({ op: "truncate", path, size: length });
-    const backendWithTruncate = this.backend as unknown as {
-      truncate?: (entryPath: string, length: number) => Promise<void>;
-    };
-    if (typeof backendWithTruncate.truncate === "function") {
-      await backendWithTruncate.truncate(path, length);
-    } else {
-      const handle = await this.backend.open(path, "r+");
-      try {
-        await handle.truncate(length);
-      } finally {
-        await handle.close();
-      }
+    if (!this.hasHooks) {
+      return this.truncateBackend(path, length);
     }
-    await this.runAfter({ op: "truncate", path, size: length });
+    const before = this.runBefore({ op: "truncate", path, size: length });
+    if (isPromiseLike(before)) await before;
+    await this.truncateBackend(path, length);
+    const after = this.runAfter({ op: "truncate", path, size: length });
+    if (isPromiseLike(after)) await after;
   }
 
   truncateSync(path: string, length: number) {
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "truncate", path);
     }
-    this.runBeforeSync({ op: "truncate", path, size: length });
-    const backendWithTruncate = this.backend as unknown as {
-      truncateSync?: (entryPath: string, length: number) => void;
-    };
-    if (typeof backendWithTruncate.truncateSync === "function") {
-      backendWithTruncate.truncateSync(path, length);
-    } else {
-      const handle = this.backend.openSync(path, "r+");
-      try {
-        handle.truncateSync(length);
-      } finally {
-        handle.closeSync();
-      }
+    if (!this.hasHooks) {
+      this.truncateBackendSync(path, length);
+      return;
     }
+    this.runBeforeSync({ op: "truncate", path, size: length });
+    this.truncateBackendSync(path, length);
     this.runAfterSync({ op: "truncate", path, size: length });
   }
 
   async statfs(path: string): Promise<VfsStatfs> {
-    await this.runBefore({ op: "statfs", path });
+    if (!this.hasHooks) {
+      return delegateStatfsOrEnosys(this.backend, path);
+    }
+    const before = this.runBefore({ op: "statfs", path });
+    if (isPromiseLike(before)) await before;
     const result = await delegateStatfsOrEnosys(this.backend, path);
-    await this.runAfter({ op: "statfs", path, result });
+    const after = this.runAfter({ op: "statfs", path, result });
+    if (isPromiseLike(after)) await after;
     return result;
   }
 
@@ -626,22 +748,52 @@ export class SandboxVfsProvider
   }
 
   private wrapHandle(path: string, handle: VirtualFileHandle) {
-    if (!this.hooks.before && !this.hooks.after) {
+    // Handle wrapping snapshots hook presence at open time; later hook changes
+    // apply to provider operations and handles opened after the change.
+    if (!this.hasHooks) {
       return handle;
     }
     return new HookedHandle(handle, this.hooks, path);
   }
 
-  private async runBefore(context: VfsHookContext) {
-    if (this.hooks.before) {
-      await this.hooks.before(context);
+  private async truncateBackend(path: string, length: number) {
+    const backendWithTruncate = this.backend as unknown as {
+      truncate?: (entryPath: string, length: number) => Promise<void>;
+    };
+    if (typeof backendWithTruncate.truncate === "function") {
+      await backendWithTruncate.truncate(path, length);
+      return;
+    }
+    const handle = await this.backend.open(path, "r+");
+    try {
+      await handle.truncate(length);
+    } finally {
+      await handle.close();
     }
   }
 
-  private async runAfter(context: VfsHookContext) {
-    if (this.hooks.after) {
-      await this.hooks.after(context);
+  private truncateBackendSync(path: string, length: number) {
+    const backendWithTruncate = this.backend as unknown as {
+      truncateSync?: (entryPath: string, length: number) => void;
+    };
+    if (typeof backendWithTruncate.truncateSync === "function") {
+      backendWithTruncate.truncateSync(path, length);
+      return;
     }
+    const handle = this.backend.openSync(path, "r+");
+    try {
+      handle.truncateSync(length);
+    } finally {
+      handle.closeSync();
+    }
+  }
+
+  private runBefore(context: VfsHookContext) {
+    return this.hooks.before?.(context);
+  }
+
+  private runAfter(context: VfsHookContext) {
+    return this.hooks.after?.(context);
   }
 
   private runBeforeSync(context: VfsHookContext) {

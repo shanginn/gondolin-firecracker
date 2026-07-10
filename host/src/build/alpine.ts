@@ -61,6 +61,7 @@ export async function buildAlpineImages(
     sandboxingressBin,
     rootfsLabel,
     rootfsSizeMb,
+    rootfsPlaceholder = false,
     workDir,
     cacheDir,
     log,
@@ -71,7 +72,7 @@ export async function buildAlpineImages(
   const rootfsImage = path.join(workDir, "rootfs.ext4");
   const initramfsOut = path.join(workDir, "initramfs.cpio.lz4");
 
-  const mkfsCmd = findMke2fs();
+  const mkfsCmd = rootfsPlaceholder ? null : findMke2fs();
 
   fs.mkdirSync(cacheDir, { recursive: true });
   fs.mkdirSync(workDir, { recursive: true });
@@ -245,15 +246,20 @@ export async function buildAlpineImages(
 
   fs.rmSync(path.join(rootfsDir, "boot"), { recursive: true, force: true });
 
-  log("Creating rootfs ext4 image...");
-  createRootfsImage(
-    mkfsCmd,
-    rootfsImage,
-    rootfsDir,
-    rootfsLabel,
-    rootfsSizeMb,
-    ociOwnershipEntries,
-  );
+  if (rootfsPlaceholder) {
+    log("Creating minimal rootfs placeholder...");
+    fs.writeFileSync(rootfsImage, Buffer.alloc(512));
+  } else {
+    log("Creating rootfs ext4 image...");
+    createRootfsImage(
+      mkfsCmd!,
+      rootfsImage,
+      rootfsDir,
+      rootfsLabel,
+      rootfsSizeMb,
+      ociOwnershipEntries,
+    );
+  }
 
   log("Creating initramfs...");
   createInitramfs(initramfsDir, initramfsOut);

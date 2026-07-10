@@ -10,6 +10,8 @@ pub fn build(b: *std.Build) void {
     const mod = b.addModule("sandboxd", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .strip = if (optimize == .ReleaseSmall) true else null,
+        .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
         .link_libc = true,
     });
 
@@ -19,6 +21,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sandboxd/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = if (optimize == .ReleaseSmall) true else null,
+            .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
             .link_libc = true,
             .imports = &.{
                 .{ .name = "sandboxd", .module = mod },
@@ -34,6 +38,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sandboxfs/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = if (optimize == .ReleaseSmall) true else null,
+            .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
             .link_libc = true,
             .imports = &.{
                 .{ .name = "sandboxd", .module = mod },
@@ -48,6 +54,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sandboxssh/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = if (optimize == .ReleaseSmall) true else null,
+            .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
             .link_libc = true,
             .imports = &.{
                 .{ .name = "sandboxd", .module = mod },
@@ -62,6 +70,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sandboxingress/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = if (optimize == .ReleaseSmall) true else null,
+            .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
             .link_libc = true,
             .imports = &.{
                 .{ .name = "sandboxd", .module = mod },

@@ -154,6 +154,7 @@ export type ServerMessage =
 export type OutputStream = "stdout" | "stderr";
 
 const OUTPUT_HEADER_BYTES = 5;
+const OUTPUT_SINGLE_ALLOCATION_MAX_BYTES = 1024;
 
 export function encodeOutputFrame(
   id: number,
@@ -163,10 +164,20 @@ export function encodeOutputFrame(
   if (!Number.isInteger(id) || id < 0 || id > 0xffffffff) {
     throw new RangeError("id must be a uint32");
   }
-  const header = Buffer.alloc(OUTPUT_HEADER_BYTES);
-  header.writeUInt8(stream === "stdout" ? 1 : 2, 0);
-  header.writeUInt32BE(id, 1);
-  return Buffer.concat([header, data]);
+  // A single JS-side copy is faster for small output chunks; for larger chunks
+  // Node's native Buffer.concat path has better throughput.
+  if (data.length > OUTPUT_SINGLE_ALLOCATION_MAX_BYTES) {
+    const header = Buffer.alloc(OUTPUT_HEADER_BYTES);
+    header[0] = stream === "stdout" ? 1 : 2;
+    header.writeUInt32BE(id, 1);
+    return Buffer.concat([header, data]);
+  }
+
+  const frame = Buffer.allocUnsafe(OUTPUT_HEADER_BYTES + data.length);
+  frame[0] = stream === "stdout" ? 1 : 2;
+  frame.writeUInt32BE(id, 1);
+  frame.set(data, OUTPUT_HEADER_BYTES);
+  return frame;
 }
 
 export function decodeOutputFrame(frame: Buffer): {

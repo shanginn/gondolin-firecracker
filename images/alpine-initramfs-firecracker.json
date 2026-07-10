@@ -15,6 +15,7 @@
   },
   "firecrackerKernelPath": "../tmp/firecracker-tiny-kernel/firecracker-kernel",
   "rootfs": {
-    "label": "gondolin-root"
+    "label": "gondolin-root",
+    "placeholder": true
   }
 }
