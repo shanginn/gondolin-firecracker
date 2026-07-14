@@ -172,7 +172,9 @@ test("detector runner maps exit codes without exposing secret output", async () 
 test("detector runner kills scans that exceed the parent timeout", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-detector-test-"));
   const scriptPath = path.join(dir, "trufflehog-timeout.sh");
-  fs.writeFileSync(scriptPath, "#!/bin/sh\nsleep 5\n", { mode: 0o700 });
+  fs.writeFileSync(scriptPath, "#!/bin/sh\nwhile :; do :; done\n", {
+    mode: 0o700,
+  });
   try {
     await assert.rejects(
       __test.runTrufflehogDetector({
