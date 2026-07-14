@@ -19,7 +19,9 @@ RUN pnpm --filter @earendil-works/gondolin-multitenant-sim build
 
 FROM node:24-bookworm-slim
 
-ARG FIRECRACKER_VERSION=v1.16.0
+ARG FIRECRACKER_VERSION=v1.16.1
+ARG FIRECRACKER_SHA256_X86_64=382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6
+ARG FIRECRACKER_SHA256_AARCH64=8d0e69f6d6f9a1724551f607f18504052c16c1828ee3d4d7b6e6c73380871e0e
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -34,12 +36,13 @@ RUN apt-get update \
 RUN set -eux; \
   arch="$(dpkg --print-architecture)"; \
   case "$arch" in \
-    amd64) fc_arch="x86_64" ;; \
-    arm64) fc_arch="aarch64" ;; \
+    amd64) fc_arch="x86_64"; fc_sha256="$FIRECRACKER_SHA256_X86_64" ;; \
+    arm64) fc_arch="aarch64"; fc_sha256="$FIRECRACKER_SHA256_AARCH64" ;; \
     *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
   esac; \
   url="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${fc_arch}.tgz"; \
   curl -fsSL "$url" -o /tmp/firecracker.tgz; \
+  echo "$fc_sha256  /tmp/firecracker.tgz" | sha256sum -c -; \
   tar -xzf /tmp/firecracker.tgz -C /tmp; \
   install -m 0755 "$(find /tmp -type f -name "firecracker-${FIRECRACKER_VERSION}-${fc_arch}" | head -n 1)" /usr/local/bin/firecracker; \
   rm -rf /tmp/firecracker.tgz /tmp/release-"${FIRECRACKER_VERSION}"-"${fc_arch}"

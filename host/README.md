@@ -42,6 +42,24 @@ console.log(result.stdout);
 await vm.close();
 ```
 
+## Secrets
+
+Use `createHttpHooks()` to give the guest placeholders while keeping real
+secret values in the host process. By default (`secretPlaceholderMode:
+"shared"`), generated placeholders look like
+`<random-marker>.<normalized_secret_name>` and share one random marker.
+`secretPlaceholderMode: "unique"` instead gives each secret a fully random
+placeholder such as `GONDOLIN_SECRET_<random>`.
+
+The host substitutes placeholders only in allowed outbound HTTP requests,
+including `Authorization: Basic …`. See
+[Secrets](../docs/secrets.md) for host scoping, custom placeholders, and CLI
+host discovery.
+
+CLI discovery currently recognizes GitHub token shapes and offers only
+`api.github.com`; it requires explicit numbered selection. Keep values in host
+environment variables, and use `NAME@HOST[,HOST...]` for other services.
+
 ## Runtime Defaults
 
 - Firecracker by default; experimental vfkit backend on macOS

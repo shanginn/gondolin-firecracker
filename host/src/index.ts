@@ -93,6 +93,7 @@ export {
   type SecretDefinition,
   type SecretManager,
   type SecretManagerEntry,
+  type SecretPlaceholderMode,
   type UpdateSecretOptions,
 } from "./http/hooks.ts";
 
@@ -114,6 +115,11 @@ export type {
 } from "./net/ssh.ts";
 export type { TcpOptions } from "./net/tcp.ts";
 export { HttpRequestBlockedError } from "./http/utils.ts";
+export {
+  suggestHostsForSecret,
+  type SecretHostSuggestion,
+  type SuggestSecretHostsOptions,
+} from "./secret-host-suggestions.ts";
 
 // SSH helpers
 export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh/exec.ts";

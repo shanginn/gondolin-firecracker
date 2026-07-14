@@ -185,6 +185,7 @@ function usage() {
     "  build        Build custom guest assets (kernel, initramfs, rootfs)",
   );
   console.log("  image        Manage local image refs and objects");
+  console.log("  tools        Inspect/download managed helper tools");
   console.log("  help         Show this help");
   console.log("\nRun gondolin <command> --help for command-specific flags.");
 }
@@ -236,8 +237,9 @@ function bashUsage() {
   console.log(
     "  --allow-host HOST                Allow HTTP(S) egress to host pattern (can repeat)",
   );
+  console.log("  --host-secret NAME[=VALUE] | NAME@HOST[,HOST...][=VALUE]");
   console.log(
-    "  --host-secret SPEC              Inject secret for allowed HTTP hosts",
+    "                                  Add secret with explicit hosts or discover suggestions",
   );
   console.log(
     "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
@@ -373,8 +375,9 @@ function execUsage() {
   console.log(
     "  --allow-host HOST                Allow HTTP(S) egress to host pattern (can repeat)",
   );
+  console.log("  --host-secret NAME[=VALUE] | NAME@HOST[,HOST...][=VALUE]");
   console.log(
-    "  --host-secret SPEC              Inject secret for allowed HTTP hosts",
+    "                                  Add secret with explicit hosts or discover suggestions",
   );
   console.log(
     "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
@@ -525,16 +528,33 @@ function parseMount(spec: string): MountSpec {
 }
 
 function parseHostSecret(spec: string): SecretSpec {
+  // Formats:
+  //   NAME
+  //   NAME=VALUE
+  //   NAME@HOST[,HOST...]
+  //   NAME@HOST[,HOST...]=VALUE
   const atIndex = spec.indexOf("@");
+
   if (atIndex === -1) {
-    throw new Error(
-      `Invalid host-secret format: ${spec} (expected NAME@HOST[,HOST...][=VALUE])`,
-    );
+    const eqIndex = spec.indexOf("=");
+    const name = (eqIndex === -1 ? spec : spec.slice(0, eqIndex)).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(
+        `Invalid host-secret format: expected an environment name`,
+      );
+    }
+
+    const value = eqIndex === -1 ? process.env[name] : spec.slice(eqIndex + 1);
+    if (value === undefined) {
+      throw new Error(`Environment variable ${name} not set for host-secret`);
+    }
+
+    return { name, value, hosts: [] };
   }
 
   const name = spec.slice(0, atIndex);
-  if (!name) {
-    throw new Error(`Invalid host-secret format: ${spec} (empty name)`);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(`Invalid host-secret format: expected an environment name`);
   }
 
   const afterAt = spec.slice(atIndex + 1);
@@ -557,10 +577,118 @@ function parseHostSecret(spec: string): SecretSpec {
 
   const hosts = hostsStr.split(",").filter(Boolean);
   if (hosts.length === 0) {
-    throw new Error(`Invalid host-secret format: ${spec} (no hosts specified)`);
+    throw new Error(`Invalid host-secret format: no hosts specified`);
   }
 
   return { name, value, hosts };
+}
+
+async function promptForSuggestedSecretHosts(
+  secret: SecretSpec,
+  suggestions: Array<{
+    host: string;
+    file: string;
+    line: number;
+    snippet: string;
+    count: number;
+  }>,
+): Promise<string[]> {
+  assertInteractiveSecretHostDiscovery(secret.name);
+
+  process.stderr.write(`Suggested hosts for ${secret.name}:\n`);
+  suggestions.forEach((suggestion, index) => {
+    process.stderr.write(
+      `  [${index + 1}] ${suggestion.host}  (${suggestion.file}:${suggestion.line}, hits=${suggestion.count})\n`,
+    );
+  });
+
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stderr,
+  });
+  try {
+    const answer = await rl.question(
+      "Select host numbers (comma-separated; blank cancels): ",
+    );
+    return selectSuggestedSecretHosts(answer, suggestions);
+  } finally {
+    rl.close();
+  }
+}
+
+function assertInteractiveSecretHostDiscovery(
+  secretName: string,
+  stdinIsTTY: boolean = Boolean(process.stdin.isTTY),
+  stderrIsTTY: boolean = Boolean(process.stderr.isTTY),
+): void {
+  if (stdinIsTTY && stderrIsTTY) return;
+  throw new Error(
+    `Host discovery for ${secretName} requires an interactive TTY. Re-run with --host-secret ${secretName}@HOST[,HOST...]`,
+  );
+}
+
+function selectSuggestedSecretHosts(
+  answer: string,
+  suggestions: Array<{ host: string }>,
+): string[] {
+  const trimmed = answer.trim();
+  if (!/^\d+(?:\s*,\s*\d+)*$/.test(trimmed)) return [];
+
+  const selected = new Set<string>();
+  for (const part of trimmed.split(",")) {
+    const suggestion = suggestions[Number(part.trim()) - 1];
+    if (!suggestion) return [];
+    selected.add(suggestion.host);
+  }
+  return [...selected];
+}
+
+async function resolveSecretHosts(
+  secrets: SecretSpec[],
+): Promise<SecretSpec[]> {
+  const resolved: SecretSpec[] = [];
+
+  for (const secret of secrets) {
+    if (secret.hosts.length > 0) {
+      resolved.push(secret);
+      continue;
+    }
+
+    assertInteractiveSecretHostDiscovery(secret.name);
+
+    process.stderr.write(
+      `Discovering suggested hosts for secret ${secret.name} with trufflehog...\n`,
+    );
+    const { suggestHostsForSecret } =
+      await import("../src/secret-host-suggestions.ts");
+    const suggestions = await suggestHostsForSecret({
+      secretValue: secret.value,
+    });
+
+    if (suggestions.length === 0) {
+      throw new Error(
+        `No suggested hosts were found for secret ${secret.name}. Provide hosts explicitly with --host-secret ${secret.name}@HOST[,HOST...]`,
+      );
+    }
+
+    const acceptedHosts = await promptForSuggestedSecretHosts(
+      secret,
+      suggestions,
+    );
+    if (acceptedHosts.length === 0) {
+      throw new Error(
+        `No hosts were accepted for secret ${secret.name}. Re-run with --host-secret ${secret.name}@HOST[,HOST...]`,
+      );
+    }
+
+    resolved.push({
+      ...secret,
+      hosts: acceptedHosts,
+    });
+  }
+
+  return resolved;
 }
 
 function parseSshCredential(spec: string): SshCredentialSpec {
@@ -1360,6 +1488,8 @@ async function runExec(argv: string[] = process.argv.slice(2)) {
     // Socket mode (direct virtio connection)
     await runExecSocket(args);
   } else {
+    args.common.secrets = await resolveSecretHosts(args.common.secrets);
+
     // VM mode (in-process server)
     await runExecVm(args);
   }
@@ -1680,6 +1810,7 @@ function parseBashArgs(argv: string[]): BashArgs {
 
 async function runBash(argv: string[]) {
   const args = parseBashArgs(argv);
+  args.secrets = await resolveSecretHosts(args.secrets);
   const [{ VM }, { attachTty }, vmOptions] = await Promise.all([
     import("../src/vm/core.ts"),
     import("../src/utils/tty-attach.ts"),
@@ -2614,6 +2745,102 @@ async function runBuild(argv: string[]) {
   }
 }
 
+function toolsUsage() {
+  console.log("Usage: gondolin tools <command> [options]");
+  console.log();
+  console.log("Inspect and manage Gondolin helper tools.");
+  console.log();
+  console.log("Commands:");
+  console.log("  trufflehog [--install] [--json]");
+  console.log("      Show managed trufflehog helper status");
+  console.log("      --install downloads it if missing");
+}
+
+async function runTools(argv: string[]) {
+  const [subcommand, ...rest] = argv;
+
+  if (
+    !subcommand ||
+    subcommand === "--help" ||
+    subcommand === "-h" ||
+    subcommand === "help"
+  ) {
+    toolsUsage();
+    process.exit(subcommand ? 0 : 1);
+  }
+
+  switch (subcommand) {
+    case "trufflehog": {
+      let install = false;
+      let asJson = false;
+
+      for (const arg of rest) {
+        if (arg === "--help" || arg === "-h") {
+          toolsUsage();
+          return;
+        }
+        if (arg === "--install") {
+          install = true;
+          continue;
+        }
+        if (arg === "--json") {
+          asJson = true;
+          continue;
+        }
+        throw new Error(`unexpected argument for tools trufflehog: ${arg}`);
+      }
+
+      const { ensureTrufflehogBinary, getTrufflehogStatus } =
+        await import("../src/build/trufflehog.ts");
+
+      if (install) {
+        await ensureTrufflehogBinary({
+          log: (msg) => process.stderr.write(`${msg}\n`),
+        });
+      }
+
+      const status = await getTrufflehogStatus();
+      const source = status.installed ? "managed" : "downloadable";
+
+      if (asJson) {
+        console.log(
+          JSON.stringify(
+            {
+              tool: "trufflehog",
+              version: status.version,
+              platform: status.platform,
+              source,
+              installed: status.installed,
+              managedPath: status.managedPath,
+              resolvedPath: status.managedPath,
+              downloadUrl: status.downloadUrl,
+              ref: status.ref,
+              buildId: status.buildId,
+            },
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+
+      console.log("tool: trufflehog");
+      console.log(`ref: ${status.ref}`);
+      console.log(`build id: ${status.buildId}`);
+      console.log(`version: ${status.version}`);
+      console.log(`platform: ${status.platform}`);
+      console.log(`source: ${source}`);
+      console.log(`installed: ${status.installed ? "yes" : "no"}`);
+      console.log(`resolved path: ${status.managedPath}`);
+      console.log(`managed path: ${status.managedPath}`);
+      console.log(`download url: ${status.downloadUrl}`);
+      return;
+    }
+    default:
+      throw new Error(`unknown tools command: ${subcommand}`);
+  }
+}
+
 function imageUsage() {
   console.log("Usage: gondolin image <command> [options]");
   console.log();
@@ -2919,6 +3146,9 @@ async function main() {
     case "image":
       await runImage(args);
       return;
+    case "tools":
+      await runTools(args);
+      return;
     default:
       console.error(`Unknown command: ${command}`);
       usage();
@@ -2939,6 +3169,9 @@ function isMainModule(moduleUrl: string): boolean {
 
 export const __test = {
   buildVmOptions,
+  parseHostSecret,
+  assertInteractiveSecretHostDiscovery,
+  selectSuggestedSecretHosts,
 };
 
 if (isMainModule(import.meta.url)) {

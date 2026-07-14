@@ -7,6 +7,12 @@
 - vfkit backend: macOS with `vfkit` on `PATH` or `GONDOLIN_VFKIT`
 - Node.js `>=23.6`
 
+Run without a global install with:
+
+```bash
+npx @earendil-works/gondolin bash
+```
+
 ## Shell
 
 ```bash
@@ -23,8 +29,9 @@ Common options:
 - `--mount-memfs PATH` - mount an in-memory provider
 - `--listen [HOST:PORT]` - expose guest HTTP services on the host
 - `--ssh` - enable host-to-guest SSH access
-- `--allow-host HOST` - allow HTTP(S) egress to host pattern
-- `--host-secret NAME@HOST[,HOST...][=VALUE]` - inject an HTTP secret
+- `--allow-host HOST` - allow HTTP(S) egress to a host pattern
+- `--host-secret NAME[=VALUE]` - discover and confirm hosts for an HTTP secret
+- `--host-secret NAME@HOST[,HOST...][=VALUE]` - scope an HTTP secret explicitly
 - `--dns MODE` - choose `synthetic`, `trusted`, or `open` DNS mode
 - `--tcp-map GUEST=UPSTREAM` - map guest TCP egress to a host target
 - `--ssh-allow-host HOST[:PORT]` - allow outbound SSH proxying
@@ -54,6 +61,27 @@ gondolin exec --sock PATH -- COMMAND [ARGS...]
 Without `--sock`, `exec` creates a VM, runs the command, and closes it. With
 `--sock`, it connects to an existing session transport.
 
+## Secret Host Discovery
+
+An unscoped `--host-secret NAME[=VALUE]` resolves the value from `=VALUE` or
+the host environment, downloads the managed TruffleHog helper when needed,
+checks reviewed detector mappings, and requires explicit numbered selection in
+an interactive TTY. The current reviewed mapping recognizes GitHub token shapes
+and offers only `api.github.com`; other secrets require the explicit
+`NAME@HOST[,HOST...]` form. Blank or malformed selection cancels discovery.
+
+Prefer `--host-secret NAME` or `--host-secret NAME@HOST` with the value in the
+host environment. Inline `=VALUE` forms can be retained in shell history and
+visible in process arguments.
+
+Inspect or preinstall the managed helper with:
+
+```bash
+gondolin tools trufflehog
+gondolin tools trufflehog --install
+gondolin tools trufflehog --json
+```
+
 ## Sessions
 
 ```bash
@@ -75,7 +103,7 @@ Default snapshots are stored under
 ## Images
 
 ```bash
-gondolin image list
+gondolin image ls
 gondolin image inspect alpine-base:latest
 gondolin build --config images/alpine-base.json --output ./guest/image/out
 gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --tag alpine-vfkit:local
@@ -89,6 +117,7 @@ gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --
 - `GONDOLIN_GUEST_DIR` - local guest asset directory
 - `GONDOLIN_DEFAULT_IMAGE` - default image selector
 - `GONDOLIN_IMAGE_REGISTRY_URL` - builtin image registry URL override
+- `GONDOLIN_TRUFFLEHOG_REGISTRY_URL` - managed TruffleHog registry override
 - `GONDOLIN_CHECKPOINT_DIR` - snapshot cache directory
 - `GONDOLIN_DEBUG` - comma-separated debug components
 

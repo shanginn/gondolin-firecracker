@@ -1,8 +1,8 @@
 import fs from "fs";
-import os from "os";
 import path from "path";
 
 import { buildAlpineImages } from "./alpine.ts";
+import { gondolinCacheDir } from "../cache.ts";
 import type { Architecture, BuildConfig } from "./config.ts";
 import { parseApkIndex } from "../alpine/packages.ts";
 import { decompressTarGz, parseTar } from "../alpine/tar.ts";
@@ -88,7 +88,7 @@ export async function buildNative(
     warnOnKernelPackageMismatch(alpineConfig.rootfsPackages, kernelPackage);
   }
 
-  const cacheDir = path.join(os.homedir(), ".cache", "gondolin", "build");
+  const cacheDir = gondolinCacheDir("build");
 
   let rootfsInit: string | undefined;
   let rootfsInitBinary: string | undefined;

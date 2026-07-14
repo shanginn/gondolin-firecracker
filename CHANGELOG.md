@@ -4,6 +4,12 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
+- Add managed TruffleHog host suggestions for unscoped CLI secrets, shared
+  secret markers, and the `gondolin tools trufflehog` helper workflow; update
+  the managed helper to `3.95.9` with compiled archive/executable checksums,
+  reviewed GitHub endpoint mapping, fail-closed selection, and no source cache.
+- Update CI and the multitenant simulator to Firecracker `1.16.1`, including
+  archive checksum verification.
 - Cut Firecracker cold-start overhead with native config-file launch, adaptive
   API readiness polling, persistent API connections, correct running-state
   readiness, and coalesced guest mount validation.

@@ -169,7 +169,8 @@ jobs:
     needs: [check, build-guest]
     runs-on: ubuntu-latest
     env:
-      FIRECRACKER_VERSION: "1.16.0"
+      FIRECRACKER_VERSION: "1.16.1"
+      FIRECRACKER_SHA256: "382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6"
     steps:
       - uses: actions/checkout@v4
 
@@ -206,6 +207,7 @@ jobs:
           curl -fsSL \
             "https://github.com/firecracker-microvm/firecracker/releases/download/v${FIRECRACKER_VERSION}/firecracker-v${FIRECRACKER_VERSION}-x86_64.tgz" \
             -o /tmp/firecracker.tgz
+          echo "${FIRECRACKER_SHA256}  /tmp/firecracker.tgz" | sha256sum -c -
           tar -xzf /tmp/firecracker.tgz -C /tmp
           sudo install -m 0755 \
             "/tmp/release-v${FIRECRACKER_VERSION}-x86_64/firecracker-v${FIRECRACKER_VERSION}-x86_64" \

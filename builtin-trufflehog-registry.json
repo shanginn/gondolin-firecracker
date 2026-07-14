@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "refs": {
+    "trufflehog:3.95.9": {
+      "darwin-arm64": "trufflehog-3.95.9-darwin-arm64",
+      "darwin-x64": "trufflehog-3.95.9-darwin-x64",
+      "linux-arm64": "trufflehog-3.95.9-linux-arm64",
+      "linux-x64": "trufflehog-3.95.9-linux-x64"
+    }
+  },
+  "builds": {
+    "trufflehog-3.95.9-darwin-arm64": {
+      "version": "3.95.9",
+      "platform": "darwin-arm64",
+      "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.95.9/trufflehog_3.95.9_darwin_arm64.tar.gz",
+      "sha256": "944c6ea3a2993a9f808d08107b40e03ba92bc75972876a1ee47d567bfd6fa1b5",
+      "binarySha256": "8c6110728eca539ac188a149d8a1e0510e5e59e4d3e3f1ce9daa41fa4961814f"
+    },
+    "trufflehog-3.95.9-darwin-x64": {
+      "version": "3.95.9",
+      "platform": "darwin-x64",
+      "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.95.9/trufflehog_3.95.9_darwin_amd64.tar.gz",
+      "sha256": "4306a58d25b85aad7b5fb6f5732df77c50a9161db2746b56e196649072218691",
+      "binarySha256": "aa50735703b18bbe849349f3169b6c8a72871f5a7ab38593f1a70df7cd1b1c81"
+    },
+    "trufflehog-3.95.9-linux-arm64": {
+      "version": "3.95.9",
+      "platform": "linux-arm64",
+      "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.95.9/trufflehog_3.95.9_linux_arm64.tar.gz",
+      "sha256": "9d9c2ec4ea36a089a9c5aaafe1969d176013ddf9f44d68e8cd75291aed8c83ed",
+      "binarySha256": "6ee7f027fdbe0a2a65df30634aa4244db689614058e4409cdc4b2f5763ef84f2"
+    },
+    "trufflehog-3.95.9-linux-x64": {
+      "version": "3.95.9",
+      "platform": "linux-x64",
+      "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.95.9/trufflehog_3.95.9_linux_amd64.tar.gz",
+      "sha256": "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e",
+      "binarySha256": "0f81bfd017e0501c0b2517c9c9cc5c1d26c4d3e8a2dfc2ae495da8a7b03acc77"
+    }
+  }
+}

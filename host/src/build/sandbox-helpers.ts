@@ -5,6 +5,13 @@ import path from "path";
 
 import { extractTarGz } from "../alpine/tar.ts";
 import type { Architecture } from "./config.ts";
+import {
+  cacheBaseDir,
+  computeFileHash,
+  downloadToBuffer,
+  fetchCachedJsonRegistry,
+  normalizeSha256,
+} from "./helpers.ts";
 
 const SANDBOX_HELPER_REGISTRY_SCHEMA = 1 as const;
 const SANDBOX_HELPER_MANIFEST_SCHEMA = 1 as const;
@@ -17,7 +24,6 @@ const HELPER_BUILD_ID_PATTERN =
 const HELPER_REF_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const HELPER_REF_NAME_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const HELPER_REF_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
-const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 
 export const SANDBOX_HELPER_BINARY_NAMES = [
   "sandboxd",
@@ -131,19 +137,6 @@ type BuiltinSandboxHelperRegistry = {
   builds: Record<string, RegistrySandboxHelperSource>;
 };
 
-type RegistryCache = {
-  /** source registry URL */
-  url: string;
-  /** HTTP etag from the last successful fetch */
-  etag?: string;
-  /** cached registry payload */
-  registry: BuiltinSandboxHelperRegistry;
-};
-
-function cacheBaseDir(): string {
-  return process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
-}
-
 export function getSandboxHelperStoreDirectory(): string {
   return (
     process.env.GONDOLIN_SANDBOX_HELPER_STORE ??
@@ -159,19 +152,20 @@ function sandboxHelperRegistryUrl(value?: string): string {
   return DEFAULT_SANDBOX_HELPER_REGISTRY_URL;
 }
 
-function registryCachePath(storeDir: string): string {
-  return path.join(storeDir, "builtin-sandbox-helper-registry-cache.json");
-}
-
 function helperObjectRootDir(storeDir: string): string {
   return path.join(storeDir, "objects");
 }
 
 function helperObjectDir(storeDir: string, buildId: string): string {
-  return path.join(helperObjectRootDir(storeDir), normalizeHelperBuildId(buildId));
+  return path.join(
+    helperObjectRootDir(storeDir),
+    normalizeHelperBuildId(buildId),
+  );
 }
 
-function normalizeArchitecture(value: string | undefined | null): Architecture | null {
+function normalizeArchitecture(
+  value: string | undefined | null,
+): Architecture | null {
   if (!value) return null;
   const lower = value.toLowerCase();
   if (lower === "aarch64" || lower === "arm64") return "aarch64";
@@ -179,13 +173,6 @@ function normalizeArchitecture(value: string | undefined | null): Architecture |
     return "x86_64";
   }
   return null;
-}
-
-function normalizeSha256(value: unknown, label: string): string {
-  if (typeof value !== "string" || !SHA256_PATTERN.test(value)) {
-    throw new Error(`invalid ${label}: expected sha256 hex string`);
-  }
-  return value.toLowerCase();
 }
 
 function normalizeHelperBuildId(value: string): string {
@@ -220,23 +207,6 @@ export function computeSandboxHelperBuildId(
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   return bytesToUuid(bytes);
-}
-
-function computeFileHash(filePath: string): string {
-  const hash = createHash("sha256");
-  const fd = fs.openSync(filePath, "r");
-  const buffer = Buffer.allocUnsafe(1024 * 1024);
-
-  try {
-    let bytesRead = 0;
-    while ((bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
-      hash.update(buffer.subarray(0, bytesRead));
-    }
-  } finally {
-    fs.closeSync(fd);
-  }
-
-  return hash.digest("hex");
 }
 
 function hasValidRefNameSegments(name: string): boolean {
@@ -386,7 +356,9 @@ function parseBuiltinSandboxHelperRegistry(
     typeof rec.builds !== "object" ||
     Array.isArray(rec.builds)
   ) {
-    throw new Error("invalid builtin sandbox helper registry: builds must be an object");
+    throw new Error(
+      "invalid builtin sandbox helper registry: builds must be an object",
+    );
   }
 
   const builds: Record<string, RegistrySandboxHelperSource> = {};
@@ -402,7 +374,9 @@ function parseBuiltinSandboxHelperRegistry(
   }
 
   if (!rec.refs || typeof rec.refs !== "object" || Array.isArray(rec.refs)) {
-    throw new Error("invalid builtin sandbox helper registry: refs must be an object");
+    throw new Error(
+      "invalid builtin sandbox helper registry: refs must be an object",
+    );
   }
 
   const refs: Record<string, Partial<Record<Architecture, string>>> = {};
@@ -411,7 +385,9 @@ function parseBuiltinSandboxHelperRegistry(
   )) {
     const parsedRef = parseSandboxHelperRef(reference);
     if (parsedRef.canonical !== reference) {
-      throw new Error(`invalid builtin sandbox helper registry ref key: ${reference}`);
+      throw new Error(
+        `invalid builtin sandbox helper registry ref key: ${reference}`,
+      );
     }
 
     if (!archMap || typeof archMap !== "object" || Array.isArray(archMap)) {
@@ -424,7 +400,9 @@ function parseBuiltinSandboxHelperRegistry(
     )) {
       const arch = normalizeArchitecture(archKey);
       if (!arch) {
-        throw new Error(`invalid registry ref '${reference}' arch key: ${archKey}`);
+        throw new Error(
+          `invalid registry ref '${reference}' arch key: ${archKey}`,
+        );
       }
       if (typeof value !== "string") {
         throw new Error(
@@ -458,91 +436,19 @@ function parseBuiltinSandboxHelperRegistry(
   };
 }
 
-function loadRegistryCache(url: string, storeDir: string): RegistryCache | null {
-  const cachePath = registryCachePath(storeDir);
-  if (!fs.existsSync(cachePath)) return null;
-
-  try {
-    const parsed = JSON.parse(fs.readFileSync(cachePath, "utf8")) as RegistryCache;
-    if (!parsed || typeof parsed !== "object") return null;
-    if (parsed.url !== url) return null;
-    const registry = parseBuiltinSandboxHelperRegistry(
-      parsed.registry as unknown,
-      url,
-    );
-    return {
-      url,
-      etag: typeof parsed.etag === "string" ? parsed.etag : undefined,
-      registry,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function saveRegistryCache(cache: RegistryCache, storeDir: string): void {
-  fs.mkdirSync(storeDir, { recursive: true });
-  const cachePath = registryCachePath(storeDir);
-  const tmpPath = `${cachePath}.tmp-${randomUUID().slice(0, 8)}`;
-  fs.writeFileSync(tmpPath, JSON.stringify(cache, null, 2));
-  fs.renameSync(tmpPath, cachePath);
-}
-
 async function fetchBuiltinSandboxHelperRegistry(
   options: Pick<ResolveSandboxHelperOptions, "registryUrl" | "storeDir">,
 ): Promise<BuiltinSandboxHelperRegistry> {
   const storeDir = options.storeDir ?? getSandboxHelperStoreDirectory();
   const url = sandboxHelperRegistryUrl(options.registryUrl);
-  const cached = loadRegistryCache(url, storeDir);
-
-  const headers: Record<string, string> = {
-    "User-Agent": "gondolin-sandbox-helper-registry",
-  };
-  if (cached?.etag) {
-    headers["If-None-Match"] = cached.etag;
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(url, { headers });
-  } catch (error) {
-    if (cached) return cached.registry;
-    throw new Error(
-      `failed to fetch builtin sandbox helper registry from ${url}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  if (response.status === 304 && cached) {
-    return cached.registry;
-  }
-
-  if (!response.ok) {
-    if (cached) return cached.registry;
-    throw new Error(
-      `failed to fetch builtin sandbox helper registry: ${response.status} ${response.statusText} (${url})`,
-    );
-  }
-
-  const text = await response.text();
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (error) {
-    throw new Error(
-      `failed to parse builtin sandbox helper registry json from ${url}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  const registry = parseBuiltinSandboxHelperRegistry(raw, url);
-  saveRegistryCache(
-    {
-      url,
-      etag: response.headers.get("etag") ?? undefined,
-      registry,
-    },
+  return await fetchCachedJsonRegistry({
+    url,
     storeDir,
-  );
-  return registry;
+    cacheFileName: "builtin-sandbox-helper-registry-cache.json",
+    userAgent: "gondolin-sandbox-helper-registry",
+    parse: parseBuiltinSandboxHelperRegistry,
+    label: "builtin sandbox helper registry",
+  });
 }
 
 function resolveRegistrySourceForRef(
@@ -588,7 +494,9 @@ function parseSandboxHelperManifest(raw: unknown): SandboxHelperManifest {
     );
   }
   if (rec.kind !== SANDBOX_HELPER_KIND) {
-    throw new Error(`invalid sandbox helper manifest kind: ${String(rec.kind)}`);
+    throw new Error(
+      `invalid sandbox helper manifest kind: ${String(rec.kind)}`,
+    );
   }
   if (typeof rec.gondolinVersion !== "string" || !rec.gondolinVersion) {
     throw new Error("invalid sandbox helper manifest gondolinVersion");
@@ -600,7 +508,11 @@ function parseSandboxHelperManifest(raw: unknown): SandboxHelperManifest {
   if (!arch) {
     throw new Error(`invalid sandbox helper manifest arch: ${rec.arch}`);
   }
-  if (!rec.checksums || typeof rec.checksums !== "object" || Array.isArray(rec.checksums)) {
+  if (
+    !rec.checksums ||
+    typeof rec.checksums !== "object" ||
+    Array.isArray(rec.checksums)
+  ) {
     throw new Error("invalid sandbox helper manifest checksums");
   }
 
@@ -696,12 +608,16 @@ function assertExecutableFiles(paths: SandboxHelperBinaryPaths): void {
       throw new Error(`sandbox helper binary not found: ${filePath}`);
     }
     if (!stat.isFile()) {
-      throw new Error(`sandbox helper binary is not a regular file: ${filePath}`);
+      throw new Error(
+        `sandbox helper binary is not a regular file: ${filePath}`,
+      );
     }
   }
 }
 
-function computeHelperChecksums(paths: SandboxHelperBinaryPaths): SandboxHelperChecksums {
+function computeHelperChecksums(
+  paths: SandboxHelperBinaryPaths,
+): SandboxHelperChecksums {
   const checksums = {} as SandboxHelperChecksums;
   for (const name of SANDBOX_HELPER_BINARY_NAMES) {
     checksums[name] = computeFileHash(pathForHelperName(paths, name));
@@ -775,35 +691,6 @@ function resolveSandboxHelperDirectory(
   };
 }
 
-async function downloadHelperArchive(
-  source: RegistrySandboxHelperSource,
-  archivePath: string,
-): Promise<void> {
-  const response = await fetch(source.url, {
-    headers: {
-      "User-Agent": "gondolin-sandbox-helper-fetch",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `failed to download sandbox helper archive: ${response.status} ${response.statusText} (${source.url})`,
-    );
-  }
-
-  const data = Buffer.from(await response.arrayBuffer());
-  if (source.sha256) {
-    const got = createHash("sha256").update(data).digest("hex");
-    if (got !== source.sha256) {
-      throw new Error(
-        `downloaded sandbox helper checksum mismatch for ${source.url}\n  expected: ${source.sha256}\n  got:      ${got}`,
-      );
-    }
-  }
-
-  fs.writeFileSync(archivePath, data);
-}
-
 async function importSandboxHelpersFromSource(
   source: RegistrySandboxHelperSource,
   expectedBuildId: string,
@@ -816,7 +703,18 @@ async function importSandboxHelpersFromSource(
   const extractDir = path.join(tmpRoot, "extract");
 
   try {
-    await downloadHelperArchive(source, archivePath);
+    fs.writeFileSync(
+      archivePath,
+      await downloadToBuffer(
+        source.url,
+        source.sha256,
+        "gondolin-sandbox-helper-fetch",
+        {
+          downloadLabel: "sandbox helper archive",
+          checksumLabel: "downloaded sandbox helper",
+        },
+      ),
+    );
     fs.mkdirSync(extractDir, { recursive: true });
     await extractTarGz(archivePath, extractDir);
 
@@ -826,7 +724,9 @@ async function importSandboxHelpersFromSource(
       source: "cache",
     });
     if (!extracted.manifest) {
-      throw new Error("downloaded sandbox helper archive is missing manifest.json");
+      throw new Error(
+        "downloaded sandbox helper archive is missing manifest.json",
+      );
     }
     if (extracted.buildId !== expectedBuildId) {
       throw new Error(
@@ -876,7 +776,8 @@ async function importSandboxHelpersFromSource(
 export async function ensureSandboxHelperBinaries(
   options: ResolveSandboxHelperOptions,
 ): Promise<ResolvedSandboxHelpers> {
-  const gondolinVersion = options.gondolinVersion ?? resolveHostPackageVersion();
+  const gondolinVersion =
+    options.gondolinVersion ?? resolveHostPackageVersion();
   const explicitHelpersDir =
     options.helpersDir ?? process.env.GONDOLIN_SANDBOX_HELPERS_DIR;
 
