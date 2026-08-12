@@ -22,6 +22,8 @@ Env:
     RUN_PARALLEL_NO_CAPTURE=1  Stream task output immediately (disables status UI)
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import os
