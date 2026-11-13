@@ -99,6 +99,9 @@ function patchManifestAssets(
     rootfs?: string;
     krunKernel?: string;
     krunInitrd?: string;
+    firecrackerKernel?: string;
+    firecrackerInitrd?: string | null;
+    vfkitKernel?: string;
   },
 ): void {
   patchManifest(dir, (manifest) => {
@@ -173,6 +176,39 @@ test("images: import preserves optional krun assets from manifest", () => {
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: import preserves Firecracker/vfkit assets and null initrd", (t) => {
+  for (const initrd of [null, "fc-initrd"]) {
+    const store = fs.mkdtempSync(
+      path.join(os.tmpdir(), "gondolin-import-fork-"),
+    );
+    const assets = createFakeAssets("aarch64");
+    t.after(() => {
+      fs.rmSync(store, { recursive: true, force: true });
+      fs.rmSync(assets.dir, { recursive: true, force: true });
+    });
+    process.env.GONDOLIN_IMAGE_STORE = store;
+    for (const file of ["fc-kernel", "vf-kernel", ...(initrd ? [initrd] : [])])
+      fs.writeFileSync(path.join(assets.dir, file), file);
+    patchManifestAssets(assets.dir, {
+      firecrackerKernel: "fc-kernel",
+      vfkitKernel: "vf-kernel",
+      firecrackerInitrd: initrd,
+    });
+    const imported = importImageFromDirectory(assets.dir);
+    for (const file of ["fc-kernel", "vf-kernel", ...(initrd ? [initrd] : [])])
+      assert.equal(
+        fs.readFileSync(path.join(imported.assetDir, file), "utf8"),
+        file,
+      );
+    assert.equal(
+      JSON.parse(
+        fs.readFileSync(path.join(imported.assetDir, "manifest.json"), "utf8"),
+      ).assets.firecrackerInitrd,
+      initrd,
+    );
   }
 });
 

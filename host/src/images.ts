@@ -415,6 +415,24 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         fs.copyFileSync(safeKrunInitrdPath, targetKrunInitrdPath);
       }
 
+      for (const field of [
+        "firecrackerKernel",
+        "firecrackerInitrd",
+        "vfkitKernel",
+      ] as const) {
+        const name = manifest.assets?.[field];
+        if (name === undefined || name === null) continue;
+        const label = `manifest.assets.${field}`;
+        const source = ensureSafeImportSourcePath(
+          resolvedDir,
+          resolveContainedAssetPath(resolvedDir, name, label),
+          label,
+        );
+        const target = resolveContainedAssetPath(tmpDir, name, label);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(source, target);
+      }
+
       fs.mkdirSync(imageObjectRootDir(), { recursive: true });
 
       try {

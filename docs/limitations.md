@@ -3,19 +3,23 @@
 This page tracks the current limitations of Gondolin. If you are evaluating
 Gondolin for a production workflow, treat this as a "known gaps" checklist.
 
-## No Full VM Save/Restore (Memory Snapshots)
+## Restricted VM-state Save/Restore
 
-Gondolin does not provide full VM save/restore (capturing in-VM process state +
-RAM) today.
+This fork supports same-host Firecracker KVM snapshots of guest RAM, VM state
+and native VFS memory/inode state. Capture requires an idle VM without open
+forwards or VFS handles, networking disabled and no jailer. The caller must
+preserve external files/provider state and the original root disk. These are
+not portable backups; QEMU, krun, vfkit and Nitro have no VM-state snapshot API.
 
-However, Gondolin _does_ support **disk-only checkpoints** (qcow2-backed) via
+All four backends also support **disk-only checkpoints** (qcow2 on QEMU/krun,
+raw on Firecracker/vfkit) via
 `vm.checkpoint(<absolute qcow2 path>)` and `checkpoint.resume()`, or
 `gondolin snapshot` and `gondolin bash --resume` on the CLI. Resuming boots a
 fresh VM from the captured disk.
 
 See also: [Persistence and Snapshots](./snapshots.md).
 
-Tracking issue: [#8](https://github.com/earendil-works/gondolin/issues/8).
+The old Node-engine VM-state format cannot be restored by the native engine.
 
 **Note:** Some guest paths are tmpfs-backed by default (eg. `/root`, `/tmp`,
 `/var/tmp`, `/var/cache`, `/var/log`). Writes under those paths are not part of

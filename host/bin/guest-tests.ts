@@ -126,6 +126,7 @@ async function runTest(vm: VM, label: string, payload: Buffer) {
       `if [ "$actual_size" != "${expectedSize}" ]; then echo "short write to ${guestPath}: expected ${expectedSize} bytes, got $actual_size" 1>&2; exit 111; fi`,
       `if command -v sha256sum >/dev/null 2>&1; then echo "${expectedSha256}  ${guestPath}" | sha256sum -c -; fi`,
       `chmod +x ${guestPath}`,
+      `cd /tmp`,
       `${guestPath}`,
     ].join(" && "),
   ];
