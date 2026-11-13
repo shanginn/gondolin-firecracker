@@ -97,7 +97,14 @@ test("native Firecracker snapshot restores guest RAM and native VFS inodes", {
   );
   assert.equal(fs.statSync(snapshot.memPath).mode & 0o777, 0o600);
   t.diagnostic("checking the source resumed after capture");
-  assert.equal((await vm.exec("cat /tmp/ram-state")).stdout, "ram");
+  assert.equal(
+    (await vm.exec("cat /tmp/ram-state /data/scratch/link")).stdout,
+    "ramvfs",
+  );
+  assert.equal(
+    (await vm.exec("printf changed >/tmp/ram-state; printf changed >/data/scratch/file")).exitCode,
+    0,
+  );
   await vm.close();
   t.diagnostic("restoring into a new host session");
   const restored = await VM.restoreFirecrackerSnapshot(snapshot, options);

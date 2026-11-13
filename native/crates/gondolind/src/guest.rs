@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
 struct OutboxState {
@@ -147,6 +147,8 @@ pub struct GuestPort {
     pub name: &'static str,
     pub path: PathBuf,
     pub outbox: Arc<Outbox>,
+    /// Monotonic accepted-connection generation, independent of the session actor
+    connection: watch::Receiver<u64>,
     accept_task: JoinHandle<()>,
 }
 
@@ -161,6 +163,7 @@ impl GuestPort {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
         let task_outbox = outbox.clone();
+        let (connection_tx, connection) = watch::channel(0u64);
         let accept_task = tokio::spawn(async move {
             // aborted with the accept task (dropping a JoinHandle would detach it)
             let mut current: Option<AbortOnDrop> = None;
@@ -181,9 +184,27 @@ impl GuestPort {
                     task_outbox.clone(),
                     handler.clone(),
                 ))));
+                connection_tx.send_modify(|epoch| *epoch += 1);
             }
         });
-        Ok(GuestPort { name, path: path.to_path_buf(), outbox, accept_task })
+        Ok(GuestPort { name, path: path.to_path_buf(), outbox, connection, accept_task })
+    }
+
+    pub fn connection_epoch(&self) -> u64 {
+        *self.connection.borrow()
+    }
+
+    /// Waits for a replacement connection before admitting post-snapshot work
+    pub async fn wait_reconnected(&self, previous: u64) -> Result<(), String> {
+        let mut connection = self.connection.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while *connection.borrow_and_update() <= previous {
+                connection.changed().await.map_err(|_| format!("{} channel closed", self.name))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| format!("{} channel did not reconnect after snapshot", self.name))?
     }
 
     /// Stops listening and drops the connection and queued frames.
@@ -336,6 +357,9 @@ mod tests {
             let mut buf = [0u8; 9];
             tokio::io::AsyncReadExt::read_exact(&mut a, &mut buf).await.unwrap();
             assert_eq!(&buf[4..], b"early");
+            port.wait_reconnected(0).await.unwrap();
+            let epoch = port.connection_epoch();
+            assert_eq!(epoch, 1);
 
             a.write_all(&gondolin_wire::frame(b"hi").unwrap()).await.unwrap();
             assert_eq!(&rx.recv().await.unwrap().unwrap()[..], b"hi");
@@ -349,6 +373,8 @@ mod tests {
 
             // a new connection takes over
             let mut b = UnixStream::connect(&path).await.unwrap();
+            port.wait_reconnected(epoch).await.unwrap();
+            assert_eq!(port.connection_epoch(), epoch + 1);
             assert!(outbox.send_frame(gondolin_wire::frame(b"later").unwrap()));
             let mut buf = [0u8; 9];
             tokio::io::AsyncReadExt::read_exact(&mut b, &mut buf).await.unwrap();

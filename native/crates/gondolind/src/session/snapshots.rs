@@ -86,7 +86,14 @@ impl Session {
         let snapshot_path = dir.join("vm.fc");
         let mem_path = dir.join("vm.mem");
         let api = rt.dir.0.join("firecracker-api.sock");
+        let connections: Vec<_> = rt
+            .ports
+            .iter()
+            .map(|port| (port, port.connection_epoch()))
+            .filter(|(_, epoch)| *epoch != 0)
+            .collect();
         request(&api, "PATCH", "/vm", &object([("state", Value::from("Paused"))])).await?;
+        let mut snapshot_created = false;
         let captured = async {
             let saved = Saved {
                 version: 1,
@@ -114,6 +121,7 @@ impl Session {
                 ]),
             )
             .await?;
+            snapshot_created = true;
             for path in [&snapshot_path, &mem_path] {
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                     .map_err(|e| e.to_string())?;
@@ -126,6 +134,15 @@ impl Session {
         let resumed =
             request(&api, "PATCH", "/vm", &object([("state", Value::from("Resumed"))])).await;
         resumed?;
+        if snapshot_created {
+            // Firecracker resets vsock streams while saving. Returning now
+            // would let the next exec/fs operation disappear into an old
+            // stream before the guest detects the reset and reconnects.
+            for (port, epoch) in connections {
+                port.wait_reconnected(epoch).await?;
+            }
+            crate::timing::mark("snapshot channels reconnected");
+        }
         captured?;
         Ok(vec![(Value::from("state_path"), Value::from(state_path.display().to_string()))])
     }

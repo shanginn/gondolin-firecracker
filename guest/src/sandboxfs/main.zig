@@ -232,6 +232,23 @@ const Fs = struct {
         defer self.gpa.free(buf);
 
         while (true) {
+            // A snapshot resets vsock while FUSE may be completely idle.
+            // Reconnect before accepting another operation, never by retrying
+            // an RPC whose non-idempotent outcome might be unknown.
+            if (self.rpc) |*rpc| {
+                if (shared.virtio_port.transport() == .vsock) {
+                    var fds = [_]sys.pollfd{
+                        .{ .fd = self.fuse_fd, .events = sys.POLL.IN, .revents = 0 },
+                        .{ .fd = rpc.fd, .events = 0, .revents = 0 },
+                    };
+                    _ = try sys.poll(&fds, -1);
+                    if (fds[1].revents & (sys.POLL.HUP | sys.POLL.ERR) != 0) {
+                        reconnectRpc(rpc);
+                        sys.sleepMs(100);
+                        continue;
+                    }
+                }
+            }
             const n = while (true) {
                 const rc = linux.read(self.fuse_fd, buf.ptr, buf.len);
                 switch (linux.errno(rc)) {
