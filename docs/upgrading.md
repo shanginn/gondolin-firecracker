@@ -7,7 +7,7 @@ list of changes is in the
 ## Firecracker Fork Migration
 
 This checkout fully adopts the Rust engine from upstream main `761ebfe` plus
-the native Firecracker work at `7171f8e`. Build `make native` before running
+the native Firecracker work at `b999cb8`. Build `make native` before running
 the SDK from source. All guest helpers now require Zig 0.17.0; rebuild custom
 images, including fast-init/initramfs profiles, instead of mixing old helpers
 with the new engine.

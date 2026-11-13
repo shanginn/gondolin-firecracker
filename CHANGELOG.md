@@ -4,7 +4,8 @@ All notable changes to Gondolin are documented here.
 
 ## Unreleased
 
-- Fork: migrate fully to upstream's Rust engine (main `761ebfe`, native Firecracker `7171f8e`), including the 0.14 fixes and subsequent native runtime/security updates. No new package release is declared.
+- Fork: migrate fully to upstream's Rust engine (main `761ebfe`, native Firecracker `b999cb8`), including the 0.14 fixes and subsequent native runtime/security updates. No new package release is declared.
+- Include upstream's guest TCP segmentation-size bounds and serialized network-session replacement on VM restart.
 - Port vfkit, Linux Firecracker low-resource/network-off defaults, startup timing records, raw disk checkpoints, and same-host Firecracker VM-state snapshots with native VFS memory/inode state. Reject legacy Node-engine VM-state snapshots.
 - Preserve tiny/fast/initramfs/vfkit image profiles, custom boot assets, hardened host-secret scanning and the multitenant simulator; update the simulator container for the native runtime and Firecracker 1.18.
 - Fix vfkit quiet boots and pipe-based console logging, and image-reference deletion on macOS. Add native snapshot/state tests and raw disk checkpoint round-trip coverage.

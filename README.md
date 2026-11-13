@@ -13,7 +13,7 @@ customized via JavaScript.
 ## Fork Status
 
 The runtime is now upstream's Rust engine, integrating upstream main through
-`761ebfe` and the native Firecracker branch through `7171f8e`. The TypeScript
+`761ebfe` and the native Firecracker branch through `b999cb8`. The TypeScript
 SDK remains, but the former Node engine is removed. This is an unreleased
 checkout migration, not a new npm release.
 
