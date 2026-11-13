@@ -23,7 +23,10 @@ From the SDK:
 import path from "node:path";
 import { VM } from "@earendil-works/gondolin";
 
-const base = await VM.create();
+const base = await VM.create({
+  rootfs: { mode: "cow" },
+  sandbox: { netEnabled: true },
+});
 await base.exec("apk add git");
 
 // stops and consumes `base`; the path must be absolute
@@ -58,8 +61,8 @@ around disposable VMs.
 | Mode | Behavior |
 |---|---|
 | `readonly` | the root disk is read-only (`EROFS` on writes); scratch paths (`/tmp`, `/root`, `/var/tmp`, ...) stay writable tmpfs, and mounts need a mount point that exists in the image or lies below a writable path |
-| `memory` | writable, thrown away on close; on `qemu` this uses QEMU's snapshot mode, on `krun` a temporary qcow2 overlay on disk (not RAM-backed), deleted on close |
-| `cow` | writable qcow2 copy-on-write overlay (default); deleted on close and never written back into the image, but it can be [checkpointed](#disk-checkpoints) |
+| `memory` | writable, thrown away on close; QEMU uses snapshot mode, krun a temporary qcow2 overlay, and Firecracker/vfkit a guest tmpfs overlay |
+| `cow` | writable private disk: qcow2 copy-on-write on QEMU/krun, a raw copy on Firecracker/vfkit; deleted on close and never written back into the image, but it can be [checkpointed](#disk-checkpoints) |
 
 ```ts
 const vm = await VM.create({
@@ -69,7 +72,8 @@ const vm = await VM.create({
 
 When `rootfs.mode` is not set, the image's `manifest.json` default
 (`runtimeDefaults.rootfsMode`, set at [build time](./custom-images.md#runtime-defaults))
-applies, else `cow`. The CLI always uses this default.
+applies, else `readonly` on Firecracker/vfkit and `cow` on QEMU/krun. The CLI
+uses the same defaults.
 
 The Gondolin daemon prepares the root disk when the VM starts, with its own
 qcow2 implementation (no `qemu-img` needed): it creates overlays in its
@@ -110,9 +114,9 @@ Current `alpine-base` images include it; custom images should add it to
 A checkpoint captures the VM's writable root disk in one file: qcow2 for
 QEMU/krun, raw for Firecracker/vfkit. Raw resumes get a private copy, with the
 metadata trailer removed from that copy; the source stays unchanged.
-Resuming is cheap: each resumed VM gets its own temporary qcow2 overlay backed
-by the checkpoint file, so one checkpoint can be resumed many times, in
-parallel. Checkpoints work with all four
+On QEMU/krun, each resumed VM gets a temporary qcow2 overlay backed by the
+checkpoint file. On Firecracker/vfkit, it gets a private raw copy. One
+checkpoint can be resumed many times, in parallel. Checkpoints work with all four
 [backends](./backends.md).
 
 The TypeScript API calls them **checkpoints** to avoid confusion with QEMU's
