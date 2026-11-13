@@ -6,10 +6,10 @@
   },
   "distro": "alpine",
   "alpine": {
-    "version": "3.23.0",
+    "version": "3.23.7",
     "kernelPackage": "linux-virt",
     "kernelImage": "vmlinuz-virt",
-    "rootfsPackages": ["linux-virt", "rng-tools", "bash", "ca-certificates", "curl"],
+    "rootfsPackages": ["linux-virt", "bash", "ca-certificates", "curl"],
     "initramfsPackages": []
   },
   "rootfs": {

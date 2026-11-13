@@ -1,0 +1,10 @@
+.git
+**/node_modules
+**/dist
+native/target
+guest/.zig-cache
+guest/zig-out
+guest/image/out*
+.cache
+tmp
+site

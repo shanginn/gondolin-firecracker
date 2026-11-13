@@ -2,12 +2,16 @@
  * Asset builder for custom Linux kernel and rootfs images.
  */
 
-import fs from "fs";
-import os from "os";
-import path from "path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { loadAssetManifest } from "../assets.ts";
-import type { BuildConfig } from "./config.ts";
+import {
+  type BuildConfig,
+  hasOciRootfs,
+  hasPostBuildCommands,
+} from "./config.ts";
 import { detectHostArchitectureSync } from "../host/arch.ts";
 import { buildInContainer } from "./container.ts";
 import {
@@ -18,14 +22,6 @@ import {
 import { buildNative } from "./native.ts";
 
 export type { BuildOptions, BuildResult } from "./shared.ts";
-
-function hasPostBuildCommands(config: BuildConfig): boolean {
-  return (config.postBuild?.commands?.length ?? 0) > 0;
-}
-
-function hasOciRootfs(config: BuildConfig): boolean {
-  return config.oci !== undefined;
-}
 
 /** Determine if we need to use a container for the build */
 function shouldUseContainer(config: BuildConfig): boolean {
@@ -140,36 +136,25 @@ export function verifyAssets(assetDir: string): boolean {
     },
   ];
 
-  if (manifest.assets.firecrackerKernel) {
-    if (!manifest.checksums.firecrackerKernel) {
+  if (manifest.assets.krunKernel) {
+    if (!manifest.checksums.krunKernel) {
       return false;
     }
     assets.push({
-      name: "firecrackerKernel",
-      file: manifest.assets.firecrackerKernel,
-      expected: manifest.checksums.firecrackerKernel,
+      name: "krunKernel",
+      file: manifest.assets.krunKernel,
+      expected: manifest.checksums.krunKernel,
     });
   }
 
-  if (manifest.assets.firecrackerInitrd) {
-    if (!manifest.checksums.firecrackerInitrd) {
+  if (manifest.assets.krunInitrd) {
+    if (!manifest.checksums.krunInitrd) {
       return false;
     }
     assets.push({
-      name: "firecrackerInitrd",
-      file: manifest.assets.firecrackerInitrd,
-      expected: manifest.checksums.firecrackerInitrd,
-    });
-  }
-
-  if (manifest.assets.vfkitKernel) {
-    if (!manifest.checksums.vfkitKernel) {
-      return false;
-    }
-    assets.push({
-      name: "vfkitKernel",
-      file: manifest.assets.vfkitKernel,
-      expected: manifest.checksums.vfkitKernel,
+      name: "krunInitrd",
+      file: manifest.assets.krunInitrd,
+      expected: manifest.checksums.krunInitrd,
     });
   }
 

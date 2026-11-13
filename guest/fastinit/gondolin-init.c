@@ -321,8 +321,6 @@ static bool spawn_sandboxfs(void) {
       "/usr/bin/sandboxfs",
       "--mount",
       sandboxfs_mount,
-      "--rpc-vsock-port",
-      vsock_fs_port,
       NULL};
   if (spawn_console(argv) < 0) {
     write_file("/run/sandboxfs.failed", "sandboxfs spawn failed\n", 0644);
@@ -352,7 +350,7 @@ int main(void) {
   log_debug("[init] starting sandboxd");
   if (strcmp(gondolin_transport, "vsock") == 0) {
     char *argv[] = {
-        "/usr/bin/sandboxd", "--vsock-port", vsock_control_port, NULL};
+        "/usr/bin/sandboxd", NULL};
     execv(argv[0], argv);
   } else {
     char *argv[] = {"/usr/bin/sandboxd", NULL};

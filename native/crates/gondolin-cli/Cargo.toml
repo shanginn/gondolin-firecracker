@@ -1,0 +1,31 @@
+[package]
+name = "gondolin-cli"
+description = "The static gondolin CLI: an in-process controller on top of gondolind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gondolin"
+path = "src/main.rs"
+
+[features]
+default = ["djs-hooks"]
+# tier-2 hooks (`--hooks-script`, `configure.net.djs_hooks`) on djs
+djs-hooks = ["gondolind/djs-hooks"]
+
+[dependencies]
+gondolind = { path = "../gondolind", default-features = false }
+gondolin-wire.workspace = true
+gondolin-proto.workspace = true
+gondolin-assets.workspace = true
+gondolin-egress.workspace = true
+tokio.workspace = true
+libc = "0.2"
+ring = "0.17"
+gondolin-http.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }
+tempfile = "3"

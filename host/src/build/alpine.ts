@@ -2,8 +2,8 @@
  * Alpine Linux image builder orchestration.
  */
 
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   copyExecutable,
@@ -20,6 +20,7 @@ import {
   assertSafeWritePath,
   ensureRootfsShell,
   hardenExtractedRootfs,
+  pathEntryExists,
 } from "../alpine/rootfs.ts";
 import { exportOciRootfs } from "../alpine/oci.ts";
 import { installPackages, runPostBuildCommands } from "../alpine/packages.ts";
@@ -53,6 +54,7 @@ export async function buildAlpineImages(
     alpineBranch,
     rootfsPackages,
     initramfsPackages,
+    kernelImage,
     postBuildCopy = [],
     postBuildCommands = [],
     sandboxdBin,
@@ -69,6 +71,7 @@ export async function buildAlpineImages(
 
   const rootfsDir = path.join(workDir, "rootfs");
   const initramfsDir = path.join(workDir, "initramfs-root");
+  const kernelOut = path.join(workDir, "vmlinuz-virt");
   const rootfsImage = path.join(workDir, "rootfs.ext4");
   const initramfsOut = path.join(workDir, "initramfs.cpio.lz4");
 
@@ -161,6 +164,19 @@ export async function buildAlpineImages(
     path.join(rootfsDir, "usr/bin/sandboxingress"),
     rootfsDir,
   );
+  if (opts.initramfsRoot) {
+    for (const [name, binary] of Object.entries({
+      sandboxd: sandboxdBin,
+      sandboxfs: sandboxfsBin,
+      sandboxssh: sandboxsshBin,
+      sandboxingress: sandboxingressBin,
+    }))
+      copyExecutable(
+        binary,
+        path.join(initramfsDir, "usr/bin", name),
+        initramfsDir,
+      );
+  }
 
   let rootfsInitContent = opts.rootfsInit ?? ROOTFS_INIT_SCRIPT;
 
@@ -214,13 +230,6 @@ export async function buildAlpineImages(
     writeExecutable(path.join(initramfsDir, "init"), initramfsInitContent);
   }
 
-  const resolvConf = path.join(rootfsDir, "etc/resolv.conf");
-  assertSafeWritePath(resolvConf, rootfsDir);
-  fs.mkdirSync(path.dirname(resolvConf), { recursive: true });
-  fs.writeFileSync(resolvConf, "nameserver 192.168.127.1\n", {
-    mode: 0o644,
-  });
-
   const python3 = path.join(rootfsDir, "usr/bin/python3");
   const python = path.join(rootfsDir, "usr/bin/python");
   if (fs.existsSync(python3) && !fs.existsSync(python)) {
@@ -231,20 +240,28 @@ export async function buildAlpineImages(
   ensureRuntimeDirs(rootfsDir);
   ensureDefaultSandboxMountDirs(rootfsDir);
   ensureRuntimeDirs(initramfsDir);
-  if (opts.initramfsRoot) {
-    ensureDefaultSandboxMountDirs(initramfsDir);
-    copyExecutable(sandboxdBin, path.join(initramfsDir, "usr/bin/sandboxd"));
-    copyExecutable(sandboxfsBin, path.join(initramfsDir, "usr/bin/sandboxfs"));
-  }
+  if (opts.initramfsRoot) ensureDefaultSandboxMountDirs(initramfsDir);
+  ensureGuestMountPoints(rootfsDir);
 
   syncKernelModules(rootfsDir, initramfsDir, log, {
     copyRootfsToInitramfs: !opts.ociRootfs,
   });
   if (initramfsPackages.length === 0 && !opts.initramfsInit) {
-    pruneDefaultInitramfs(initramfsDir);
+    if (!opts.initramfsRoot) pruneDefaultInitramfs(initramfsDir);
   }
 
+  if (!opts.skipKernel)
+    stageInstalledKernel(
+      rootfsDir,
+      initramfsDir,
+      Boolean(opts.ociRootfs),
+      kernelImage,
+      kernelOut,
+    );
+
+  // The kernel is shipped as a separate asset; drop /boot from both images.
   fs.rmSync(path.join(rootfsDir, "boot"), { recursive: true, force: true });
+  fs.rmSync(path.join(initramfsDir, "boot"), { recursive: true, force: true });
 
   if (rootfsPlaceholder) {
     log("Creating minimal rootfs placeholder...");
@@ -268,10 +285,28 @@ export async function buildAlpineImages(
   log(`Initramfs written to ${initramfsOut}`);
 
   return {
+    kernel: kernelOut,
     rootfsImage,
     initramfs: initramfsOut,
     ociSource,
   };
+}
+
+function stageInstalledKernel(
+  rootfsDir: string,
+  initramfsDir: string,
+  hasOciRootfs: boolean,
+  kernelImage: string,
+  outputPath: string,
+): void {
+  const packageRoot = hasOciRootfs ? initramfsDir : rootfsDir;
+  const sourcePath = path.join(packageRoot, "boot", kernelImage);
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(
+      `Kernel image '${kernelImage}' was not installed in the filesystem containing its modules: ${sourcePath}`,
+    );
+  }
+  fs.copyFileSync(sourcePath, outputPath);
 }
 
 function ensureRuntimeDirs(rootDir: string): void {
@@ -281,6 +316,53 @@ function ensureRuntimeDirs(rootDir: string): void {
     fs.mkdirSync(targetDir, { recursive: true });
   }
 }
+
+/**
+ * Mount points the guest's init uses (the VFS mount, the default binds and
+ * scratch tmpfs paths) and a resolver configuration on /run: with
+ * `rootfs.mode: "readonly"` the guest cannot create them itself.
+ */
+function ensureGuestMountPoints(rootfsDir: string): void {
+  for (const sub of [
+    "data",
+    "etc/gondolin/mitm",
+    "home",
+    "root",
+    "tmp",
+    "var/cache",
+    "var/log",
+    "var/tmp",
+  ]) {
+    const target = path.join(rootfsDir, sub);
+    if (pathEntryExists(target)) continue;
+    assertSafeWritePath(target, rootfsDir);
+    fs.mkdirSync(target, { recursive: true });
+  }
+  // DHCP and the init write it; /run is a tmpfs in every rootfs mode
+  const resolv = path.join(rootfsDir, "etc/resolv.conf");
+  if (pathEntryExists(resolv)) return;
+  assertSafeWritePath(resolv, rootfsDir);
+  fs.symlinkSync("/run/resolv.conf", resolv);
+  // Alpine's udhcpc script writes a temporary file beside RESOLV_CONF and
+  // renames it, which a read-only /etc refuses: point it at /run (its
+  // config file is sourced after the default is set)
+  if (fs.existsSync(path.join(rootfsDir, "usr/share/udhcpc/default.script"))) {
+    const conf = path.join(rootfsDir, "etc/udhcpc/udhcpc.conf");
+    assertSafeWritePath(conf, rootfsDir);
+    const current = fs.existsSync(conf) ? fs.readFileSync(conf, "utf8") : "";
+    if (!/^RESOLV_CONF=/m.test(current)) {
+      fs.mkdirSync(path.dirname(conf), { recursive: true });
+      fs.writeFileSync(
+        conf,
+        `${current}${current && !current.endsWith("\n") ? "\n" : ""}` +
+          "# gondolin: /etc/resolv.conf links here (the root may be read-only)\n" +
+          'RESOLV_CONF="/run/resolv.conf"\n',
+      );
+    }
+  }
+}
+
+/** @internal */
 
 function ensureDefaultSandboxMountDirs(rootDir: string): void {
   for (const sub of ["data", path.join("etc", "gondolin")]) {
@@ -326,3 +408,5 @@ function pruneDefaultInitramfs(initramfsDir: string): void {
     }
   }
 }
+
+export const __test = { stageInstalledKernel, ensureGuestMountPoints };

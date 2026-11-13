@@ -1,9 +1,13 @@
-import fs from "fs";
-import path from "path";
-
-import { assertRawDiskImage, createTempRawCopy } from "./disk/image.ts";
+import fs from "node:fs";
 
 import {
+  resolveNativeEngineOptions,
+  resolveVmEngine,
+} from "./native/config.ts";
+import path from "node:path";
+
+import {
+  findCommonAssetDir,
   loadAssetManifest,
   loadGuestAssets,
   type GuestAssets,
@@ -18,11 +22,14 @@ import type { VMOptions } from "./vm/types.ts";
 
 const CHECKPOINT_SCHEMA_VERSION = 1 as const;
 
-// Trailer format (appended to the end of the disk file):
+// Trailer format (appended to the end of the qcow2 file):
 //   [utf8 json bytes][8-byte magic][u64be json length]
 //
-// Firecracker ignores trailing bytes in the raw block device image. We use that
-// to store the checkpoint metadata in the same file.
+// qcow2 readers (QEMU, libkrun, gondolind) ignore bytes after the image
+// data. We use that to store the checkpoint metadata in the same file;
+// gondolind never allocates into a file that ends in this trailer.
+//
+// Note: The magic is a file-format marker for "qcow2 + JSON trailer".
 // It is intentionally *not* tied to the JSON schema version.
 const TRAILER_MAGIC = Buffer.from("GONDCPT1"); // 8 bytes
 const TRAILER_SIZE = 16;
@@ -54,7 +61,7 @@ export type VmCheckpointData = {
   /** creation timestamp (`iso 8601`) */
   createdAt: string;
 
-  /** disk filename (`basename` of checkpoint file path) */
+  /** qcow2 disk filename (`basename` of checkpoint file path) */
   diskFile: string;
 
   /** deterministic guest asset build identifier (uuid) */
@@ -62,9 +69,8 @@ export type VmCheckpointData = {
 
   /** checkpoint payload kind */
   snapshotKind?: "disk";
-
-  /** checkpoint disk format */
-  diskFormat?: "raw";
+  /** On-disk payload format (absent on legacy qcow2 checkpoints) */
+  diskFormat?: "raw" | "qcow2";
 
   /** backend used when the checkpoint was created */
   createdWithVmm?: SandboxVmm;
@@ -76,43 +82,79 @@ export type VmCheckpointData = {
 function normalizeSandboxVmm(value: unknown): SandboxVmm | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "firecracker" || normalized === "vfkit") {
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "vfkit" ||
+    normalized === "firecracker"
+  ) {
     return normalized;
   }
   return null;
 }
 
-function resolveCheckpointCompatibleVmm(data: VmCheckpointData): SandboxVmm[] {
-  if (Array.isArray(data.compatibleVmm)) {
-    const compatible: SandboxVmm[] = [];
-    for (const entry of data.compatibleVmm) {
-      const normalized = normalizeSandboxVmm(entry);
-      if (normalized && !compatible.includes(normalized)) {
-        compatible.push(normalized);
-      }
+/** The backend requested for a resume, or `null` for the default selection */
+function resolveRequestedResumeVmm(options: VMOptions): SandboxVmm | null {
+  const explicitRaw = options.sandbox?.vmm;
+  if (explicitRaw !== undefined) {
+    const explicit = normalizeSandboxVmm(explicitRaw);
+    if (!explicit) {
+      throw new Error(
+        `invalid sandbox vmm backend: ${String(explicitRaw)} (expected "qemu", "krun" or "firecracker")`,
+      );
     }
-    if (compatible.length > 0) {
-      return compatible;
-    }
+    return explicit;
   }
 
-  const createdWithVmm = normalizeSandboxVmm(data.createdWithVmm);
-  if (createdWithVmm) {
-    return [createdWithVmm];
-  }
-
-  return [];
+  return normalizeSandboxVmm(process.env.GONDOLIN_VMM);
 }
 
-function formatSandboxVmm(value: SandboxVmm): string {
-  return value === "firecracker" ? "Firecracker" : "vfkit";
+function resolveCheckpointCompatibleVmm(data: VmCheckpointData): SandboxVmm[] {
+  if (
+    data.diskFormat === "raw" ||
+    data.createdWithVmm === "firecracker" ||
+    data.createdWithVmm === "vfkit"
+  ) {
+    const allowed = data.compatibleVmm?.filter(
+      (v) => v === "firecracker" || v === "vfkit",
+    );
+    return allowed?.length
+      ? allowed
+      : [data.createdWithVmm === "vfkit" ? "vfkit" : "firecracker"];
+  }
+  let qemu = false;
+  let krun = false;
+
+  if (Array.isArray(data.compatibleVmm)) {
+    for (const entry of data.compatibleVmm) {
+      const normalized = normalizeSandboxVmm(entry);
+      if (normalized === "qemu") qemu = true;
+      if (normalized === "krun") krun = true;
+    }
+  }
+
+  if (!qemu && !krun) {
+    const createdWith = normalizeSandboxVmm(data.createdWithVmm);
+    if (createdWith === "qemu") qemu = true;
+    if (createdWith === "krun") krun = true;
+  }
+
+  // Legacy checkpoints were qemu-only.
+  if (!qemu && !krun) {
+    qemu = true;
+  }
+
+  const compatible: SandboxVmm[] = [];
+  if (qemu) compatible.push("qemu");
+  if (krun) compatible.push("krun");
+  return compatible;
 }
 
 function writeCheckpointTrailer(
   diskPath: string,
   data: VmCheckpointData,
 ): void {
-  const json = Buffer.from(JSON.stringify(data, null, 2) + "\n", "utf8");
+  const json = Buffer.from(`${JSON.stringify(data, null, 2)}\n`, "utf8");
   const footer = Buffer.alloc(TRAILER_SIZE);
   TRAILER_MAGIC.copy(footer, 0);
   footer.writeBigUInt64BE(BigInt(json.length), 8);
@@ -169,14 +211,6 @@ function validateGuestAssetsExist(assets: GuestAssets): boolean {
     fs.existsSync(assets.initrdPath) &&
     fs.existsSync(assets.rootfsPath)
   );
-}
-
-function findCommonAssetDir(assets: GuestAssets): string | null {
-  const kernelDir = path.dirname(assets.kernelPath);
-  const initrdDir = path.dirname(assets.initrdPath);
-  const rootfsDir = path.dirname(assets.rootfsPath);
-  if (kernelDir !== initrdDir || kernelDir !== rootfsDir) return null;
-  return kernelDir;
 }
 
 function devGuestOutDirs(): string[] {
@@ -326,7 +360,7 @@ async function resolveGuestAssetsForResume(
 }
 
 /**
- * Disk-only checkpoint that can be resumed using a temporary raw copy.
+ * Disk-only checkpoint that can be resumed using qcow2 backing files.
  */
 export class VmCheckpoint {
   private readonly checkpointPath: string;
@@ -348,7 +382,7 @@ export class VmCheckpoint {
     return this.data.name;
   }
 
-  /** absolute path to the checkpoint disk file */
+  /** absolute path to the checkpoint qcow2 file */
   get path(): string {
     return this.checkpointPath;
   }
@@ -358,7 +392,7 @@ export class VmCheckpoint {
     return path.dirname(this.checkpointPath);
   }
 
-  /** absolute path to the disk file */
+  /** absolute path to the qcow2 disk file */
   get diskPath(): string {
     return this.checkpointPath;
   }
@@ -375,7 +409,8 @@ export class VmCheckpoint {
   /**
    * Resume the checkpoint into a new VM.
    *
-   * The resumed VM uses a temporary raw copy of the checkpoint disk.
+   * The resumed VM is implemented as a fresh qcow2 overlay backed by this
+   * checkpoint's qcow2 disk image.
    */
   async resume<TVm = any>(options: VMOptions = {}): Promise<TVm> {
     const createVm = getVmCreate();
@@ -390,53 +425,62 @@ export class VmCheckpoint {
       },
     };
 
+    const requestedVmm = resolveRequestedResumeVmm(mergedForResume);
     const compatibleVmm = resolveCheckpointCompatibleVmm(this.data);
-    const requestedVmm = normalizeSandboxVmm(
-      mergedForResume.sandbox?.vmm ?? "firecracker",
-    );
-    if (!requestedVmm) {
+    if (requestedVmm === null) {
+      // the default selection may only pick krun when the checkpoint allows it
+      if (!compatibleVmm.includes("krun")) {
+        mergedForResume.sandbox = {
+          ...mergedForResume.sandbox,
+          vmm: compatibleVmm[0]!,
+        };
+      }
+    } else if (!compatibleVmm.includes(requestedVmm)) {
       throw new Error(
-        `checkpoint resume requested unsupported backend: ${String(mergedForResume.sandbox?.vmm)}`,
-      );
-    }
-    if (!compatibleVmm.includes(requestedVmm)) {
-      throw new Error(
-        `checkpoint is not compatible with ${formatSandboxVmm(requestedVmm)} (compatible backends: ${compatibleVmm.join(", ")})`,
+        `checkpoint is not compatible with vmm=${requestedVmm} (compatible backends: ${compatibleVmm.join(", ")})`,
       );
     }
 
-    const checkpointDisk = this.diskPath;
-    if (!fs.existsSync(checkpointDisk)) {
-      throw new Error(`checkpoint disk not found: ${checkpointDisk}`);
+    if (!fs.existsSync(this.diskPath)) {
+      throw new Error(`checkpoint disk not found: ${this.diskPath}`);
+    }
+    // The daemon boots the checkpoint below a fresh overlay after pointing
+    // its backing file at the image's rootfs (`root_disk.mode =
+    // "checkpoint"`): a remote daemon gets an upload and resolves the image
+    // by build id, a local one uses the file in place.
+    const native = resolveNativeEngineOptions(mergedForResume.native);
+    resolveVmEngine(mergedForResume.engine, native);
+    if (native.remote) {
+      const imagePath = mergedForResume.sandbox?.imagePath;
+      return (await createVm({
+        ...mergedForResume,
+        native: {
+          ...native,
+          image:
+            native.image ??
+            (typeof imagePath === "string"
+              ? imagePath
+              : this.data.guestAssetBuildId),
+          checkpoint: this.diskPath,
+        },
+      })) as TVm;
     }
 
     const resolved = await resolveGuestAssetsForResume(
       this.data.guestAssetBuildId,
       mergedForResume,
     );
-
-    if ((this.data.diskFormat ?? "raw") !== "raw") {
-      throw new Error(
-        "checkpoint disk format is not supported by this runtime",
-      );
-    }
-    assertRawDiskImage(checkpointDisk);
-
-    const diskPath = createTempRawCopy(checkpointDisk);
-
-    const merged: VMOptions = {
+    // the checkpoint replaces any root disk of the resume options
+    const sandbox = { ...mergedForResume.sandbox };
+    delete sandbox.rootDiskPath;
+    delete sandbox.rootDiskFormat;
+    delete sandbox.rootDiskReadOnly;
+    delete sandbox.rootDiskDeleteOnClose;
+    return (await createVm({
       ...mergedForResume,
-      sandbox: {
-        ...(mergedForResume.sandbox ?? {}),
-        imagePath: resolved.imagePath,
-        rootDiskPath: diskPath,
-        rootDiskFormat: "raw",
-        rootDiskReadOnly: false,
-        rootDiskDeleteOnClose: true,
-      },
-    };
-
-    return (await createVm(merged)) as TVm;
+      sandbox: { ...sandbox, imagePath: resolved.imagePath },
+      native: { ...native, checkpoint: this.diskPath },
+    })) as TVm;
   }
 
   /** @deprecated Use {@link resume} */
@@ -444,14 +488,14 @@ export class VmCheckpoint {
     return await this.resume<TVm>(options);
   }
 
-  /** Load a checkpoint file with a metadata trailer. */
+  /** Load a checkpoint from a qcow2 file with a metadata trailer. */
   static load(checkpointPath: string): VmCheckpoint {
     const resolved = path.resolve(checkpointPath);
     const stat = fs.statSync(resolved);
 
     if (stat.isDirectory()) {
       throw new Error(
-        `checkpoint path must be a disk file, got directory: ${resolved}`,
+        `checkpoint path must be a .qcow2 file, got directory: ${resolved}`,
       );
     }
 
@@ -470,7 +514,7 @@ export class VmCheckpoint {
     fs.rmSync(this.checkpointPath, { force: true });
   }
 
-  /** Create a checkpoint metadata trailer and append it to a disk file. */
+  /** Create a checkpoint metadata trailer and append it to a qcow2 file. */
   static writeTrailer(diskPath: string, data: VmCheckpointData): void {
     writeCheckpointTrailer(diskPath, data);
   }
@@ -479,6 +523,7 @@ export class VmCheckpoint {
 /** @internal */
 export const __test = {
   normalizeSandboxVmm,
+  resolveRequestedResumeVmm,
   resolveCheckpointCompatibleVmm,
   resolveAssetDirByBuildId,
 };

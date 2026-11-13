@@ -1,0 +1,34 @@
+[package]
+name = "gondolin-netstack"
+description = "Userspace Ethernet/IPv4/TCP/UDP stack terminating guest traffic for gondolind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+gondolin-log.workspace = true
+gondolin-wire.workspace = true
+tokio.workspace = true
+smoltcp = { version = "0.14", default-features = false, features = [
+    "std",
+    "alloc",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+    "async",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }
+# The test "guest" is a second smoltcp stack speaking Ethernet over the netdev pipe.
+smoltcp = { version = "0.14", default-features = false, features = [
+    "std",
+    "alloc",
+    "medium-ethernet",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+    "async",
+] }

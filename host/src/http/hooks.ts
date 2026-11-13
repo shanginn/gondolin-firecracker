@@ -1,9 +1,8 @@
-import crypto from "crypto";
-import net from "net";
+import crypto from "node:crypto";
 
-import { ON_REQUEST_EARLY_POLICY_SAFE, type HttpHooks } from "./contracts.ts";
+import { ON_REQUEST_EARLY_POLICY_SAFE, type HttpHooks } from "../net/types.ts";
 import { HttpRequestBlockedError } from "./utils.ts";
-import { extractIPv4Mapped, parseIPv6Hextets } from "../utils/ip.ts";
+import { isInternalIpAddress } from "../utils/ip.ts";
 import { matchesAnyHost, normalizeHostnamePattern } from "../host/patterns.ts";
 
 export type SecretDefinition = {
@@ -44,6 +43,54 @@ export const BASE64URL_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 export type SecretPlaceholderMode = "shared" | "unique";
+
+/**
+ * Hidden property on `createHttpHooks().httpHooks` describing its declarative
+ * options, so the native engine can evaluate them without calling back into
+ * JavaScript. Non-enumerable: spreading the hooks object drops it, and the
+ * native engine then treats every hook as an opaque callback.
+ */
+export const NATIVE_HTTP_POLICY = Symbol.for("gondolin.http.nativePolicy");
+
+/** Declarative rules in the `configure.net.policy.rules` wire shape */
+export type NativeHttpRules = {
+  /** normalized allowed host patterns merged with internal hosts */
+  allowed_hosts: string[];
+  /** normalized host patterns allowed to resolve to internal ranges */
+  allowed_internal_hosts: string[];
+  block_internal_ranges: boolean;
+  secrets: Array<{
+    name: string;
+    identifier: string;
+    placeholder: string;
+    value: string;
+    revoked_values: string[];
+    hosts: string[];
+    deleted: boolean;
+  }>;
+  replace_secrets_in_query: boolean;
+  placeholder_mode: SecretPlaceholderMode;
+  /** random marker of shared placeholders (absent in unique mode) */
+  marker?: string;
+};
+
+/** Value stored under {@link NATIVE_HTTP_POLICY} */
+export type NativeHttpPolicyDescriptor = {
+  /** current rules (reflects SecretManager changes) */
+  rules(): NativeHttpRules;
+  /** user callbacks passed to createHttpHooks (evaluated as tier-3 hooks) */
+  user: Pick<
+    CreateHttpHooksOptions,
+    "isRequestAllowed" | "isIpAllowed" | "onRequest" | "onResponse"
+  >;
+  /** the generated hook functions (to detect replaced methods) */
+  generated: Required<
+    Pick<HttpHooks, "isRequestAllowed" | "isIpAllowed" | "onRequest">
+  > &
+    Pick<HttpHooks, "onResponse">;
+  /** subscribe to rule changes; returns an unsubscribe function */
+  subscribe(listener: () => void): () => void;
+};
 
 export type CreateHttpHooksOptions = {
   /** allowed host patterns (omitted = allow all, explicit empty = deny all) */
@@ -202,6 +249,17 @@ export function createHttpHooks(
   const getSecretEntries = (): SecretEntry[] =>
     Array.from(secretEntries.values());
 
+  const ruleListeners = new Set<() => void>();
+  const notifyRuleChange = () => {
+    for (const listener of ruleListeners) {
+      try {
+        listener();
+      } catch {
+        // listeners must not break secret management
+      }
+    }
+  };
+
   const getSecretEntry = (name: string): SecretEntry => {
     const entry = secretEntries.get(name);
     if (!entry) {
@@ -237,6 +295,7 @@ export function createHttpHooks(
           (value) => value !== entry.value,
         );
       }
+      notifyRuleChange();
     },
     deleteSecret(name) {
       const entry = getSecretEntry(name);
@@ -244,6 +303,7 @@ export function createHttpHooks(
         return;
       }
       entry.deleted = true;
+      notifyRuleChange();
     },
   };
 
@@ -335,7 +395,7 @@ export function createHttpHooks(
 
       if (
         blockInternalRanges &&
-        isInternalAddress(info.ip) &&
+        isInternalIpAddress(info.ip) &&
         !matchesAnyHost(info.hostname, allowedInternalHosts)
       ) {
         return false;
@@ -349,6 +409,48 @@ export function createHttpHooks(
     onRequest,
     onResponse: options.onResponse,
   };
+
+  const descriptor: NativeHttpPolicyDescriptor = {
+    rules: () => ({
+      allowed_hosts: [...allowedHosts],
+      allowed_internal_hosts: [...allowedInternalHosts],
+      block_internal_ranges: blockInternalRanges,
+      secrets: getSecretEntries().map((entry) => ({
+        name: entry.name,
+        identifier: entry.identifier,
+        placeholder: entry.placeholder,
+        value: entry.value,
+        revoked_values: [...entry.revokedValues],
+        hosts: [...entry.hosts],
+        deleted: entry.deleted,
+      })),
+      replace_secrets_in_query: options.replaceSecretsInQuery ?? false,
+      placeholder_mode: secretPlaceholderMode,
+      ...(secretMarker ? { marker: secretMarker } : {}),
+    }),
+    user: {
+      isRequestAllowed: options.isRequestAllowed,
+      isIpAllowed: options.isIpAllowed,
+      onRequest: options.onRequest,
+      onResponse: options.onResponse,
+    },
+    generated: {
+      isRequestAllowed: httpHooks.isRequestAllowed!,
+      isIpAllowed: httpHooks.isIpAllowed!,
+      onRequest: httpHooks.onRequest!,
+      onResponse: httpHooks.onResponse,
+    },
+    subscribe(listener) {
+      ruleListeners.add(listener);
+      return () => {
+        ruleListeners.delete(listener);
+      };
+    },
+  };
+  Object.defineProperty(httpHooks, NATIVE_HTTP_POLICY, {
+    value: descriptor,
+    enumerable: false,
+  });
 
   return { httpHooks, env, allowedHosts, secretManager };
 }
@@ -628,7 +730,7 @@ function requestContainsSecretValuesInHeaders(
       // Basic auth uses base64 encoding
       if (/^(authorization|proxy-authorization)$/i.test(headerName)) {
         const decoded = decodeBasicAuth(headerValue);
-        if (decoded && decoded.includes(value)) {
+        if (decoded?.includes(value)) {
           return true;
         }
       }
@@ -1103,49 +1205,6 @@ function assertSecretAllowedForHost(
   throw new HttpRequestBlockedError(
     `secret ${entry.name} not allowed for host: ${hostname || "unknown"}`,
   );
-}
-
-function isInternalAddress(ip: string): boolean {
-  const family = net.isIP(ip);
-  if (family === 4) return isPrivateIPv4(ip);
-  if (family === 6) return isPrivateIPv6(ip);
-  return false;
-}
-
-function isPrivateIPv4(ip: string): boolean {
-  const octets = ip.split(".").map((part) => Number(part));
-  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part))) {
-    return false;
-  }
-
-  const [a, b] = octets;
-  if (a === 0) return true;
-  if (a === 10) return true;
-  if (a === 127) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  if (a === 255) return true;
-  return false;
-}
-
-function isPrivateIPv6(ip: string): boolean {
-  const hextets = parseIPv6Hextets(ip);
-  if (!hextets) return false;
-
-  const isAllZero = hextets.every((value) => value === 0);
-  const isLoopback =
-    hextets.slice(0, 7).every((value) => value === 0) && hextets[7] === 1;
-  if (isAllZero || isLoopback) return true;
-
-  if ((hextets[0] & 0xfe00) === 0xfc00) return true;
-  if ((hextets[0] & 0xffc0) === 0xfe80) return true;
-
-  const mapped = extractIPv4Mapped(hextets);
-  if (mapped && isPrivateIPv4(mapped)) return true;
-
-  return false;
 }
 
 function stripBase64Padding(value: string): string {

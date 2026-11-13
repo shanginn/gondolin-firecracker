@@ -21,7 +21,7 @@ export interface OciRootfsOptions {
 export interface AlpineBuildOptions {
   /** target architecture */
   arch: Architecture;
-  /** alpine version (e.g. "3.23.0") */
+  /** alpine version (e.g. "3.23.7") */
   alpineVersion: string;
   /** alpine branch (e.g. "v3.23") */
   alpineBranch: string;
@@ -33,6 +33,8 @@ export interface AlpineBuildOptions {
   rootfsPackages: string[];
   /** packages to install in the initramfs */
   initramfsPackages: string[];
+  /** kernel image filename installed by the kernel package */
+  kernelImage: string;
   /** path to the sandboxd binary */
   sandboxdBin: string;
   /** path to the sandboxfs binary */
@@ -45,16 +47,18 @@ export interface AlpineBuildOptions {
   rootfsLabel: string;
   /** fixed rootfs image size in `mb` (auto when undefined) */
   rootfsSizeMb?: number;
-  /** emit a minimal raw rootfs placeholder */
+  /** Minimal raw placeholder for initramfs-only guests */
   rootfsPlaceholder?: boolean;
+  /** Skip staging the distribution kernel for a custom-kernel image */
+  skipKernel?: boolean;
+  /** Static executable installed as `/init` */
+  rootfsInitBinary?: string;
+  /** Boot the complete root environment from initramfs */
+  initramfsRoot?: boolean;
   /** rootfs init script content (built-in when undefined) */
   rootfsInit?: string;
-  /** rootfs init binary path copied to `/init` */
-  rootfsInitBinary?: string;
   /** initramfs init script content (built-in when undefined) */
   initramfsInit?: string;
-  /** use initramfs as the boot root instead of switch_root to ext4 */
-  initramfsRoot?: boolean;
   /** extra shell script content appended to rootfs init before sandboxd starts */
   rootfsInitExtra?: string;
   /** host files or directories copied into rootfs before post-build commands */
@@ -89,6 +93,8 @@ export interface OciResolvedSource {
 
 /** Result produced by the Alpine image build pipeline */
 export interface AlpineBuildResult {
+  /** kernel image path */
+  kernel: string;
   /** rootfs ext4 image path */
   rootfsImage: string;
   /** compressed initramfs path */

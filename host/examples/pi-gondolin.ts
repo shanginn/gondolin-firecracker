@@ -10,7 +10,7 @@
  * How to run:
  *   1. Install dependencies for this repo (so imports resolve):
  *        pnpm install
- *   2. Ensure Firecracker and KVM are available (see the gondolin README)
+ *   2. Ensure QEMU is installed (see the gondolin README "Quick Start")
  *   3. Start pi in the project you want to sandbox:
  *        cd /path/to/your/project
  *        pi -e /absolute/path/to/gondolin/host/examples/pi-gondolin.ts
@@ -18,7 +18,6 @@
  * Notes:
  *   - The VM is started on `session_start` (and lazily if a tool is used before that)
  *   - User `!` commands are also executed inside the VM
- *   - Bash env forwarding is opt-in via GONDOLIN_PI_ENV_ALLOW=NAME,NAME
  *   - Module resolution happens relative to this file, so keeping it inside the
  *     gondolin repo (or installing `@earendil-works/gondolin` next to it) is easiest
  */
@@ -47,7 +46,7 @@ const GUEST_WORKSPACE = "/workspace";
 
 function shQuote(value: string): string {
   // POSIX shell quoting: wraps in single quotes and escapes internal quotes
-  return "'" + value.replace(/'/g, "'\\''") + "'";
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function toGuestPath(localCwd: string, localPath: string): string {
@@ -65,12 +64,10 @@ function toGuestPath(localCwd: string, localPath: string): string {
 function createGondolinReadOps(vm: VM, localCwd: string): ReadOperations {
   return {
     readFile: async (p) => {
-      const guestPath = toGuestPath(localCwd, p);
-      return vm.fs.readFile(guestPath);
+      return vm.fs.readFile(toGuestPath(localCwd, p));
     },
     access: async (p) => {
-      const guestPath = toGuestPath(localCwd, p);
-      return vm.fs.access(guestPath, { mode: fsConstants.R_OK });
+      await vm.fs.access(toGuestPath(localCwd, p), { mode: fsConstants.R_OK });
     },
     detectImageMimeType: async (p) => {
       const guestPath = toGuestPath(localCwd, p);
@@ -97,15 +94,15 @@ function createGondolinReadOps(vm: VM, localCwd: string): ReadOperations {
 
 function createGondolinWriteOps(vm: VM, localCwd: string): WriteOperations {
   return {
+    // Use the VM filesystem API rather than a shell round-trip: it streams the
+    // content, so there is no argv size limit and no quoting to get wrong.
     writeFile: async (p, content) => {
       const guestPath = toGuestPath(localCwd, p);
-      const dir = path.posix.dirname(guestPath);
-      await vm.fs.mkdir(dir, { recursive: true });
+      await vm.fs.mkdir(path.posix.dirname(guestPath), { recursive: true });
       await vm.fs.writeFile(guestPath, content);
     },
     mkdir: async (dir) => {
-      const guestDir = toGuestPath(localCwd, dir);
-      await vm.fs.mkdir(guestDir, { recursive: true });
+      await vm.fs.mkdir(toGuestPath(localCwd, dir), { recursive: true });
     },
   };
 }
@@ -116,29 +113,12 @@ function createGondolinEditOps(vm: VM, localCwd: string): EditOperations {
   return { readFile: r.readFile, access: r.access, writeFile: w.writeFile };
 }
 
-function sanitizeEnv(
-  env?: NodeJS.ProcessEnv,
-): Record<string, string> | undefined {
-  if (!env) return undefined;
-
-  const allow = new Set(
-    (process.env.GONDOLIN_PI_ENV_ALLOW ?? "")
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean),
-  );
-  if (allow.size === 0) return undefined;
-
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) {
-    if (allow.has(k) && typeof v === "string") out[k] = v;
-  }
-  return Object.keys(out).length === 0 ? undefined : out;
-}
-
 function createGondolinBashOps(vm: VM, localCwd: string): BashOperations {
   return {
-    exec: async (command, cwd, { onData, signal, timeout, env }) => {
+    // The host environment passed by pi is intentionally not forwarded: it
+    // usually contains API keys and other credentials.  Configure secrets for
+    // the guest with `httpHooks` (see docs/secrets.md) instead.
+    exec: async (command, cwd, { onData, signal, timeout }) => {
       const guestCwd = toGuestPath(localCwd, cwd);
 
       const ac = new AbortController();
@@ -159,7 +139,6 @@ function createGondolinBashOps(vm: VM, localCwd: string): BashOperations {
         const proc = vm.exec(["/bin/bash", "-lc", command], {
           cwd: guestCwd,
           signal: ac.signal,
-          env: sanitizeEnv(env),
           stdout: "pipe",
           stderr: "pipe",
         });
@@ -227,20 +206,13 @@ export default function (pi: ExtensionAPI) {
         "info",
       );
       return created;
-    })().catch((err) => {
-      vmStarting = null;
-      ctx?.ui.setStatus(
-        "gondolin",
-        ctx.ui.theme.fg("error", "Gondolin: failed to start"),
-      );
-      throw err;
-    });
+    })();
 
     return vmStarting;
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    // Start eagerly so the user sees runtime errors early.
+    // Start eagerly so the user sees errors early (missing qemu, etc.)
     await ensureVm(ctx);
   });
 
@@ -303,7 +275,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Run user `!` commands inside the VM too
-  pi.on("user_bash", (_event, ctx) => {
+  pi.on("user_bash", (_event, _ctx) => {
     if (!vm) return;
     return { operations: createGondolinBashOps(vm, localCwd) };
   });

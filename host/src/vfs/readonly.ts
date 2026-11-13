@@ -2,6 +2,7 @@ import { createErrnoError } from "./errors.ts";
 import type { VirtualProvider, VfsStatfs } from "./node/index.ts";
 import { delegateStatfsOrEnosys } from "./statfs.ts";
 import { ERRNO, isWriteFlag, VirtualProviderClass } from "./utils.ts";
+import { kProviderInternals } from "./native-marks.ts";
 
 /**
  * Wraps a VirtualProvider and makes it read-only by blocking all write operations.
@@ -20,6 +21,11 @@ export class ReadonlyProvider
 
   get readonly() {
     return true;
+  }
+
+  /** @internal */
+  [kProviderInternals]() {
+    return { kind: "readonly" as const, backend: this.backend };
   }
 
   get supportsSymlinks() {
@@ -108,6 +114,14 @@ export class ReadonlyProvider
     throw createErrnoError(ERRNO.EROFS, "link", newPath);
   }
 
+  async chmod(path: string, _mode: number): Promise<void> {
+    throw createErrnoError(ERRNO.EROFS, "chmod", path);
+  }
+
+  chmodSync(path: string, _mode: number): void {
+    throw createErrnoError(ERRNO.EROFS, "chmod", path);
+  }
+
   async readlink(path: string, options?: object): Promise<string> {
     if (this.backend.readlink) {
       return this.backend.readlink(path, options);
@@ -153,9 +167,10 @@ export class ReadonlyProvider
 
   accessSync(path: string, mode?: number): void {
     if (this.backend.accessSync) {
-      return this.backend.accessSync(path, mode);
+      this.backend.accessSync(path, mode);
+      return;
     }
-    return super.accessSync(path, mode);
+    super.accessSync(path, mode);
   }
 
   async statfs(path: string): Promise<VfsStatfs> {

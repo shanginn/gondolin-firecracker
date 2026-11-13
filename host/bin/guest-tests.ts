@@ -1,12 +1,11 @@
-import fs from "fs";
-import path from "path";
-import crypto from "crypto";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 
 import { VM } from "../src/vm/core.ts";
+import { errorMessage } from "../src/utils/error.ts";
 
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
-const DEFAULT_START_TIMEOUT_MS = 60_000;
-const DEFAULT_TEST_MEMORY = "256M";
 
 const SIGNAL_NAMES: Record<number, string> = {
   1: "SIGHUP",
@@ -59,7 +58,7 @@ async function dumpGuestLogs(vm: VM, label: string) {
       process.stderr.write(out);
       process.stderr.write("\n----- end -----\n");
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       process.stderr.write(
         `\n----- ${title} (failed) -----\n${detail}\n----- end -----\n`,
       );
@@ -69,9 +68,12 @@ async function dumpGuestLogs(vm: VM, label: string) {
 
 /**
  * Check if hardware virtualization is available.
- * Firecracker only runs on Linux/KVM.
+ * On Linux, this checks for KVM. On macOS, HVF is always available.
  */
 function hasHardwareAccel(): boolean {
+  if (process.platform === "darwin") {
+    return true;
+  }
   if (process.platform === "linux") {
     try {
       fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK);
@@ -100,13 +102,6 @@ function defaultTestPaths(repoRoot: string) {
   ];
 }
 
-function envPositiveInteger(name: string, fallback: number): number {
-  const value = process.env[name];
-  if (value === undefined) return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback;
-}
-
 async function runTest(vm: VM, label: string, payload: Buffer) {
   const guestPath = `/tmp/sandboxd-${label}-tests`;
 
@@ -131,7 +126,7 @@ async function runTest(vm: VM, label: string, payload: Buffer) {
       `if [ "$actual_size" != "${expectedSize}" ]; then echo "short write to ${guestPath}: expected ${expectedSize} bytes, got $actual_size" 1>&2; exit 111; fi`,
       `if command -v sha256sum >/dev/null 2>&1; then echo "${expectedSha256}  ${guestPath}" | sha256sum -c -; fi`,
       `chmod +x ${guestPath}`,
-      `(cd /tmp && ${guestPath})`,
+      `${guestPath}`,
     ].join(" && "),
   ];
 
@@ -164,7 +159,7 @@ async function main() {
   // (TCG emulation is too slow for reliable CI)
   if (!hasHardwareAccel() && process.env.GONDOLIN_FORCE_VM_TESTS !== "1") {
     process.stderr.write(
-      "Skipping guest tests: Firecracker requires Linux with read/write /dev/kvm.\n" +
+      "Skipping guest tests: hardware virtualization not available (KVM on Linux, HVF on macOS).\n" +
         "Set GONDOLIN_FORCE_VM_TESTS=1 to run anyway (may be slow).\n",
     );
     return;
@@ -185,11 +180,6 @@ async function main() {
       : "none";
 
   const vm = new VM({
-    memory: process.env.GONDOLIN_GUEST_TEST_MEMORY ?? DEFAULT_TEST_MEMORY,
-    startTimeoutMs: envPositiveInteger(
-      "GONDOLIN_GUEST_TEST_START_TIMEOUT_MS",
-      DEFAULT_START_TIMEOUT_MS,
-    ),
     sandbox: {
       console: consoleMode,
       maxStdinBytes: MAX_STDIN_BYTES,
@@ -208,7 +198,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   process.stderr.write(`${message}\n`);
   process.exit(1);
 });

@@ -1,158 +1,189 @@
-# VM Backends
+# VM Backends: Firecracker, vfkit, QEMU and libkrun
 
-Gondolin defaults to the Firecracker backend on Linux/KVM. The experimental
-vfkit backend can run local development VMs on macOS.
+Gondolin supports four VM backends:
 
-Select a backend with `sandbox.vmm` in the SDK or `--vmm` in the CLI:
+- `krun` (macOS default where it can run; uses `libkrun` via the `gondolin-krun-runner` helper)
+- `qemu` (the fallback everywhere else, broader feature support and tuning knobs)
+- `vfkit` (explicit Apple Silicon macOS backend; no guest networking)
+- `firecracker` (Linux default): each VM runs in Firecracker,
+  as an AWS Nitro Sandbox when the host supports them, otherwise as a microVM
+  on Linux KVM; see [firecracker](#firecracker) and
+  [AWS Nitro Sandboxes](./nitro.md)
 
-```bash
-gondolin bash --vmm firecracker
-gondolin bash --vmm vfkit
-```
+All backends are started and driven by the Gondolin daemon (`gondolind`; see
+[Architecture](./architecture.md)): the VMM process is a child of the daemon,
+and the network stack, policy and filesystem server are the same on all of
+them. QEMU and krun connect the guest helpers over virtio-serial;
+Firecracker has no virtio-serial device, so its guests use vsock (`guest/ARCHITECTURE.md`
+§3.1).
 
-## Firecracker
+This page is the authoritative backend-parity reference for SDK/CLI behavior.
 
-### Requirements
+## Default Backend Selection
 
-- Linux host with `/dev/kvm`
-- Firecracker binary in `PATH` or configured with `GONDOLIN_FIRECRACKER`
-- Guest image architecture matching the host architecture
-- Image manifest with `assets.firecrackerKernel`
+The backend is chosen in this order:
 
-### Defaults
+1. `sandbox.vmm` (SDK) or `--vmm qemu|krun|firecracker|vfkit` (CLI)
+2. `GONDOLIN_VMM=qemu|krun|firecracker|vfkit`
+3. A QEMU-only option selects `qemu`; otherwise Linux selects `firecracker`
+4. On other hosts, `krun` when all of these hold, else `qemu`:
+    - the host supports libkrun: macOS on Apple silicon (arm64), or Linux on
+      arm64/x86_64 with read/write access to `/dev/kvm` (libkrun has no
+      software emulation, QEMU falls back to TCG)
+    - a krun runner is installed (see [runner path resolution](#krun) below;
+      published installs ship it for macOS arm64 and Linux x86_64)
+    - the image ships krun boot assets (`manifest.assets.krunKernel`) for the
+      host architecture; explicit asset paths (`sandbox.imagePath` as an
+      object) always use `qemu`
+    - no qemu-only option is set (`sandbox.qemuPath`, `machineType`, `accel`,
+      `cpu`, `qemuIdlePauseMs`); setting one selects `qemu`
 
-- `1` vCPU
-- `84M` guest memory
-- raw root disks only
-- read-only base rootfs
-- no serial console unless requested
-- no guest network device
-- vsock ports:
-  - `1024` exec/control
-  - `1025` VFS
-  - `1026` host-to-guest SSH
-  - `1027` ingress
+Thus this fork requires Firecracker on Linux unless you explicitly select
+another backend; macOS still discovers krun or falls back to QEMU.  QEMU only has to be
+installed when a VM ends up on the `qemu` backend: root disks and checkpoints
+are prepared by the daemon on both backends.  Pin a backend with
+`GONDOLIN_VMM=qemu` (or `sandbox.vmm`, `--vmm`) when you rely on QEMU-only
+behavior such as the faster vhost-user virtio-fs on Linux.
 
-The default image is not designed for sub-`50M` guest memory. On x86_64,
-Firecracker needs an uncompressed ELF kernel, and the default Alpine-derived
-kernel asset is `38M` before initramfs and userspace memory. For the smallest
-agent sandbox profile, build `scripts/build-tiny-firecracker-kernel.sh` and use
-`images/alpine-tiny-firecracker.json`; that no-initrd profile passed VFS,
-`/bin/bash`, and mediated HTTP smoke tests at `29M` on June 26, 2026.
-`images/alpine-initramfs-firecracker.json` trades memory for startup latency; it
-passed the same smoke test at `50M` and failed at `49M`.
+Two cases keep `qemu` as the default:
 
-For startup work, call `vm.getStartupTimings()` after `vm.start()` to inspect
-host, Firecracker API, guest boot, VFS, and session IPC phases. Same-host
-Firecracker snapshots are exposed through `vm.createFirecrackerSnapshot(dir)`
-and `VM.restoreFirecrackerSnapshot(snapshot, options)`. Snapshot creation waits
-for active guest work to drain and rejects new exec, file, TCP, SSH, ingress, and
-VFS activity during capture. Restored VMs are expected to run on the same host
-class with compatible image, kernel, and root disk paths. VFS providers remain
-host-owned state, while the snapshot metadata preserves the guest-facing VFS
-inode map so restored FUSE mounts keep answering path operations.
+- Resuming a checkpoint whose metadata does not list `krun` as compatible
+  (built from an image without krun boot assets) without an explicit backend.
+- A [daemon on another machine](./remote.md): the runner and `/dev/kvm` live
+  on the daemon's machine, so your process cannot detect them; set
+  `sandbox.vmm: "krun"` (or `GONDOLIN_VMM=krun`, and `sandbox.krunRunnerPath`
+  if the runner is not on the daemon's `PATH`) to use krun there.
 
-## Storage
+## Fork Defaults and vfkit
 
-The base rootfs is attached read-only by default. `rootfs.mode="cow"` and
-`rootfs.mode="memory"` create a temporary raw rootfs copy and delete it on close.
-`rootfs.size` grows the effective writable raw disk before boot.
+Firecracker and vfkit default to 84 MB, one vCPU, readonly rootfs and
+`netEnabled: false`. Enable Firecracker networking explicitly; it requires
+the privileges and TAP setup described below. vfkit rejects networking.
 
-### Network
+vfkit runs on Apple Silicon macOS and uses an uncompressed ARM64 kernel
+(`assets.vfkitKernel`), raw root disk and four vsock channels. Select it via
+`sandbox.vmm: "vfkit"` / `--vmm vfkit`; binary precedence is
+`sandbox.vfkitPath`, `GONDOLIN_VFKIT`, then `vfkit` on PATH. It supports
+exec, sandboxfs, host-to-guest SSH/ingress, startup timings and raw disk
+checkpoints. It does not support VM-state snapshots or mediated egress.
 
-Guest egress is disabled by default. `netEnabled: true`, `httpHooks`, DNS
-overrides, mapped TCP, or outbound SSH proxying enable a short-lived Firecracker
-TAP device that is mediated by the host policy stack. Gondolin does not install
-generic host NAT rules.
+The remaining matrix covers upstream's three backends.
 
-Host-to-guest ingress and optional host-to-guest SSH are supported over
-vsock-backed forwarders. SSH requires a guest image with OpenSSH installed.
+## Feature Parity Matrix
 
-### Production Notes
+| Capability / setting | `qemu` | `krun` | `firecracker` | Notes |
+| --- | --- | --- | --- | --- |
+| `sandbox.vmm` | ✓ | ✓ | ✓ | Select backend (`"qemu"`, `"krun"` or `"firecracker"`); default: see [above](#default-backend-selection)  |
+| `sandbox.qemuPath` | ✓ |  |  | Rejected unless `vmm=qemu` |
+| `sandbox.krunRunnerPath` |  | ✓ |  | Used only with `vmm=krun` |
+| `sandbox.firecrackerPath` / `sandbox.nitro` |  |  | ✓ | Rejected unless `vmm=firecracker`; `sandbox.nitro` selects a Nitro Sandbox, see [AWS Nitro Sandboxes](./nitro.md) |
+| `sandbox.machineType` | ✓ |  |  | Rejected unless `vmm=qemu` |
+| `sandbox.accel` | ✓ |  |  | Rejected unless `vmm=qemu`; the other backends' accelerator is implicit |
+| `sandbox.cpu` | ✓ |  |  | Rejected unless `vmm=qemu`; `GONDOLIN_CPU` only applies to `qemu` |
+| `sandbox.qemuIdlePauseMs` | ✓ |  |  | Rejected unless `vmm=qemu`; see [QEMU: Idle Pause](./qemu.md#idle-pause) |
+| `sandbox.cpus` | ✓ | ✓ | ✓ | Shared high-level CPU count option; Firecracker with dedicated cores (`nitro.cpuOvercommit: false`) needs an even count |
+| `sandbox.memory` | ✓ | ✓ | ✓ | `krun` and `firecracker` parse memory and pass MiB (Firecracker: rounded up to 2 MiB) |
+| `sandbox.console` | ✓ | ✓ | ✓ | QEMU and Firecracker boot the kernel with `quiet` unless `"stdio"` or `protocol` debugging (see [Boot log](./debug.md#boot-log)); Firecracker on Nitro also turns the debug console off then |
+| `sandbox.rootDiskPath` / `rootDiskFormat` / `rootDiskReadOnly` | ✓ | ✓ | ✓ | Supported on all backends; Firecracker needs a raw disk; not with a [remote daemon](./remote.md) |
+| `rootfs.mode = "memory"` | ✓ | ✓ | ✓ | QEMU uses backend snapshot mode unless `rootfs.size` is set; krun uses a temporary qcow2 overlay the daemon creates; Firecracker attaches the image read-only and the guest keeps its writes in a tmpfs overlay (in guest memory; half of it at most), or with `rootfs.size` a raw copy in the session directory; writes are discarded on all |
+| `rootfs.mode = "cow"` | ✓ | ✓ | ✓ | QEMU and krun: a writable qcow2 copy-on-write overlay; Firecracker (raw disks only): a private writable raw copy, exportable as a disk checkpoint. The original rootfs image is never modified |
+| `rootfs.size` | ✓ | ✓ | ✓ | Ensures the effective writable root disk is at least the requested size before boot and runs `resize2fs` in the guest; requires `resize2fs` in the image |
+| `vm.checkpoint()` / checkpoint resume | ✓ | ✓ | ✓ | Resume enforces checkpoint compatibility metadata; `qemu` ↔ `krun` requires krun boot assets in the checkpoint build; Firecracker uses raw checkpoints and resumes only on the same backend |
+| Exec/VFS/network mediation/SSH/ingress APIs | ✓ | ✓ | ✓ | Same host-side control plane and policy stack |
+| VFS over virtio-fs | ✓ | ✓ |  | QEMU: a build with vhost-user (`vhost-user-fs-pci`/`-device`), see [QEMU](./qemu.md#virtio-fs-and-vhost-user). krun: a runner with the `virtiofs-socket` capability (the bundled runner; libkrun forwards FUSE requests to the daemon over a socket). Otherwise sandboxfs (FUSE over virtio-serial; Firecracker: over vsock, Nitro Sandboxes have no virtio-fs) |
 
-Use short socket paths with `GONDOLIN_RUNTIME_DIR=/run/gondolin`, pin workloads
-to KVM-capable nodes, and run Firecracker under the upstream jailer or equivalent
-cgroup/namespace/seccomp confinement when operating multi-tenant hosts.
+## Architecture and Kernel Constraints
 
-## vfkit
+### QEMU
 
-### Requirements
+- Guest architecture must match the selected QEMU binary (`qemu-system-aarch64` vs `qemu-system-x86_64`)
+- QEMU binary precedence: explicit `sandbox.qemuPath` → manifest-derived default when guest arch is known → host-arch default fallback
+- CPU model precedence: explicit `sandbox.cpu` → `GONDOLIN_CPU` → backend-specific auto selection
+- Kernel/initrd/rootfs come from selected guest assets
 
-- macOS host with `vfkit` in `PATH` or configured with `GONDOLIN_VFKIT`
-- Guest image architecture matching the host architecture
-- Image manifest with `assets.vfkitKernel`, `assets.initramfs`, and
-  `assets.rootfs`
+### krun
 
-### Defaults
+- Guest architecture must match the **host** architecture
+- Requires a **libkrunfw-compatible kernel**
+- Gondolin requires image manifest krun boot assets:
+    - `assets.krunKernel`
+    - `assets.krunInitrd` (optional; defaults to an empty initrd)
+- Build/setup path: `gondolin build` (or published image assets)
+- `make krun-runner` builds the runner binary; it does not provide kernel assets
+- Published runner packages exist for macOS arm64 and Linux x86_64 only; on
+  Linux arm64 build the runner with `make krun-runner` (or install
+  `gondolin-krun-runner` on `PATH`)
+- macOS: the runner must be signed with the Hypervisor entitlement
+  (`com.apple.security.hypervisor`); the SDK checks this before booting and
+  fails with a clear error instead of a VM that never starts
 
-- `1` vCPU
-- `256M` guest memory
-- raw root disks only
-- guest-to-host virtio-vsock ports:
-  - `1024` exec/control
-  - `1025` VFS
-  - `1026` host-to-guest SSH
-  - `1027` ingress
+Runner path resolution (when `sandbox.krunRunnerPath` is not set):
 
-The vfkit backend boots with vfkit's Linux bootloader, a `virtio-blk` root disk,
-`virtio-rng`, and four guest-to-host `virtio-vsock` sockets. The guest still
-uses `gondolin.transport=vsock`, so `sandboxd`, `sandboxfs`, `sandboxssh`, and
-`sandboxingress` reuse the existing protocol.
+- `GONDOLIN_KRUN_RUNNER`
+- A development build: `krun-runner/zig-out/bin/gondolin-krun-runner` or
+  `host/krun-runner/zig-out/bin/gondolin-krun-runner` in the current directory,
+  its parents, or above the installed SDK
+- Auto-detected from installed platform runner package when available (`@earendil-works/gondolin-krun-runner-darwin-arm64` or `@earendil-works/gondolin-krun-runner-linux-x64`, the only published platforms)
+- `gondolin-krun-runner` on `PATH`
 
-Use a published Apple Silicon image from this fork with the checked-out CLI:
+The static `gondolin` CLI checks `GONDOLIN_KRUN_RUNNER`,
+`host/krun-runner/zig-out/bin` and `krun-runner/zig-out/bin` in the current
+directory, the directory of the `gondolin` binary, then `PATH`. A remote daemon uses
+`sandbox.krunRunnerPath` as a path on its machine, else `gondolin-krun-runner`
+from its `PATH`.
 
-```bash
-brew install vfkit
-git clone https://github.com/shanginn/gondolin-firecracker.git
-cd gondolin-firecracker
-corepack enable
-pnpm install
-GONDOLIN_IMAGE_REGISTRY_URL=https://raw.githubusercontent.com/shanginn/gondolin-firecracker/master/builtin-image-registry.json \
-  node host/bin/gondolin.ts exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
-```
+### firecracker
 
-The published npm package `@earendil-works/gondolin@0.12.0` does not include
-the vfkit backend yet; it still accepts only the older macOS backends.
+- Where the VM runs:
+    - as an AWS Nitro Sandbox (direct mode) when the host is set up for them:
+      an x86_64 or Graviton EC2 instance with Nitro Enclaves enabled and a
+      reserved memory pool (`/dev/nitro_enclaves`; setup in
+      [AWS Nitro Sandboxes](./nitro.md)). The VM runs beside the instance on
+      AWS's hypervisor, so no nested virtualization is needed
+    - otherwise as a microVM on Linux KVM: read-write access to `/dev/kvm`
+      (bare metal, or a VM with nested virtualization such as EC2
+      `m8i`/`c8i`/`r8i` instances)
+    - `sandbox.nitro: false` (or `GONDOLIN_NITRO_MODE=off`) asks for KVM;
+      `sandbox.nitro` (or `GONDOLIN_NITRO_MODE` /
+      `GONDOLIN_NITRO_CPU_OVERCOMMIT`) configures the Nitro Sandbox
+- Linux daemon host only, with Firecracker 1.18 or newer
+- Boots the image's regular kernel and initramfs; the kernel needs
+  virtio-mmio, virtio-blk, virtio-net and the vsock transport (Alpine's
+  `linux-virt` qualifies). On KVM Firecracker only boots an uncompressed kernel,
+  so the daemon decompresses the image's `vmlinuz` (a gzip-compressed bzImage
+  on x86_64 or EFI zboot image on aarch64) once into
+  `~/.cache/gondolin/firecracker-kernels/`. Nitro Sandboxes boot the
+  compressed kernel through UEFI firmware (x86_64: an EFI-stub `bzImage`);
+  confidential mode also needs the DMB virtio patches
+- The default kernel command line is Firecracker's own (`console=ttyS0`,
+  `panic=1`, and on x86_64 `reboot=k` and the i8042 flags), so a guest panic
+  ends the VM instead of hanging it
+- Requires a guest image built with vsock support (this release or newer):
+  the guest helpers connect over vsock when the kernel command line has
+  `gondolin.vsock`
+- The daemon needs root (more precisely `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
+  `CAP_NET_RAW` and access to `/dev/kvm` or `/dev/nitro_enclaves`): it
+  creates a network namespace and a tap device per VM
+- Binary resolution: `sandbox.firecrackerPath`, else `GONDOLIN_FIRECRACKER`,
+  else `firecracker` on the daemon's `PATH` (a remote daemon only receives an
+  explicit `sandbox.firecrackerPath`)
 
-Build a local Apple Silicon image with Docker Desktop:
+## Runtime Caveats
 
-```bash
-gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --tag alpine-vfkit:local
-gondolin exec --vmm vfkit --image alpine-vfkit:local -- uname -m
-```
+- `krun` has less runtime parity coverage than `qemu`
+- Cross-backend checkpoint resume (`qemu` ↔ `krun`) requires assets that include `manifest.assets.krunKernel`
+- Some krun networking edge cases are still under investigation
+- krun's virtio-fs forwards every request through the runner to the daemon over a socket, one at a time: faster than sandboxfs, but slower than QEMU's vhost-user (shared guest memory, several queues) for large I/O; older runners (no `virtiofs-socket` capability) fall back to sandboxfs
+- Firecracker has no snapshots or pause in Gondolin, and no virtio-fs: mounts use sandboxfs over vsock. On Nitro it boots through UEFI firmware (~0.4 s)
+- Host CA trust configuration can cause guest-visible HTTP `502` errors on all backends when upstream TLS validation fails
 
-Publish the CI-built image with the Image Release workflow:
+## Recommendation
 
-```bash
-gh workflow run image-release.yml -f image_tag=0.1.0 -f build_config=images/alpine-vfkit.json
-```
-
-When publishing from a fork, set `GONDOLIN_IMAGE_REGISTRY_URL` to that fork's
-raw `builtin-image-registry.json` until the entry is available from the default
-upstream registry.
-
-The current x86_64 tiny Firecracker profile does not run locally on Apple
-Silicon. It is an x86_64 PVH/KVM kernel profile, while vfkit on M-series Macs
-needs an arm64 guest image and, for the Linux bootloader, an uncompressed arm64
-kernel. `images/alpine-vfkit.json` provides a working Alpine aarch64 profile;
-sub-`50M` vfkit tiny-image support is still a separate image-build task.
-
-### Storage
-
-vfkit's documented `virtio-blk` option does not expose a read-only device flag.
-When the VM API would normally attach the base rootfs read-only, Gondolin uses a
-temporary raw copy for vfkit so the published image file is not modified by a
-guest remount.
-
-### Network
-
-Mediated guest egress is not implemented for vfkit. Do not pass
-`sandbox.netEnabled`, HTTP hooks, DNS overrides, mapped TCP egress, or outbound
-SSH proxy settings with `vmm: "vfkit"`. Host-to-guest ingress and host-to-guest
-SSH continue to use the vsock-backed helper channels.
-
-### Snapshots
-
-Firecracker VM-state snapshots are not supported by vfkit. Disk checkpoints can
-record that they were created with vfkit and resume with `sandbox.vmm = "vfkit"`
-when the same guest image assets are available.
+Use the default unless you need something only one backend offers: `qemu` for
+the fastest guest mounts (vhost-user virtio-fs with a Linux distribution QEMU),
+QEMU tuning knobs, or guests for another architecture; `firecracker` for
+Firecracker's minimal device model on Linux KVM, or to run VMs as AWS Nitro
+Sandboxes on EC2 instances without nested virtualization. When the backend
+matters, pin it explicitly (`sandbox.vmm`, `--vmm`, `GONDOLIN_VMM`) rather than
+relying on detection. If you expose backend knobs in higher-level tooling, gate
+them by backend and fail fast on unsupported combinations.

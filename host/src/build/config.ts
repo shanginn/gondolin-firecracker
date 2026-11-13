@@ -1,4 +1,4 @@
-import path from "path";
+import path from "node:path";
 
 import { DEFAULT_ROOTFS_PACKAGES } from "./shared.ts";
 
@@ -30,7 +30,7 @@ export type EnvInput = string[] | Record<string, string>;
  * Alpine Linux specific configuration.
  */
 export interface AlpineConfig {
-  /** alpine version (e.g. "3.23.0") */
+  /** alpine version (e.g. "3.23.7") */
   version: string;
   /** alpine branch (e.g. "v3.23", default: derived from version) */
   branch?: string;
@@ -44,6 +44,8 @@ export interface AlpineConfig {
   rootfsPackages?: string[];
   /** extra packages to install in the initramfs */
   initramfsPackages?: string[];
+  /** libkrunfw release version used for krun boot artifacts */
+  krunfwVersion?: string;
 }
 
 /**
@@ -207,6 +209,16 @@ export interface BuildConfig {
 /**
  * Get the default build configuration for the current system.
  */
+/** Whether the build uses an OCI image as rootfs source */
+export function hasOciRootfs(config: BuildConfig): boolean {
+  return config.oci !== undefined;
+}
+
+/** Whether the build config declares post-build commands */
+export function hasPostBuildCommands(config: BuildConfig): boolean {
+  return (config.postBuild?.commands?.length ?? 0) > 0;
+}
+
 export function getDefaultBuildConfig(): BuildConfig {
   const arch = getDefaultArch();
 
@@ -214,7 +226,7 @@ export function getDefaultBuildConfig(): BuildConfig {
     arch,
     distro: "alpine",
     alpine: {
-      version: "3.23.0",
+      version: "3.23.7",
       kernelPackage: "linux-virt",
       kernelImage: "vmlinuz-virt",
       rootfsPackages: [...DEFAULT_ROOTFS_PACKAGES],

@@ -1,24 +1,36 @@
-import child_process from "child_process";
-import { randomUUID, createHash } from "crypto";
-import fs from "fs";
-import os from "os";
-import path from "path";
+import child_process from "node:child_process";
+import { randomUUID, createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { loadAssetManifest, loadGuestAssets } from "./assets.ts";
-import { gondolinCacheDir } from "./cache.ts";
 import type { Architecture } from "./build/config.ts";
-import { getHostNodeArchCached } from "./host/arch.ts";
+import {
+  getHostNodeArchCached,
+  normalizeArchitecture as normalizeImageArch,
+} from "./host/arch.ts";
+import {
+  getImageStoreDirectory,
+  isImageBuildId as isBuildId,
+  parseImageRef,
+} from "./image-ref.ts";
+import {
+  describeAvailableKeys,
+  fetchCachedJsonRegistry,
+  normalizeSha256,
+  parseKeyedRegistry,
+  parseRegistryUrl,
+  resolveKeyedRegistryRef,
+  selectKeyedEntry,
+} from "./registry.ts";
+import { isPathWithin } from "./utils/path.ts";
 
-const BUILD_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
-const IMAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
-const IMAGE_NAME_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const IMAGE_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export { getImageStoreDirectory } from "./image-ref.ts";
 
 const BUILTIN_IMAGE_REGISTRY_SCHEMA = 1 as const;
 const DEFAULT_IMAGE_REGISTRY_URL =
-  "https://raw.githubusercontent.com/earendil-works/gondolin/main/builtin-image-registry.json";
+  "https://raw.githubusercontent.com/shanginn/gondolin-firecracker/master/builtin-image-registry.json";
 
 const DOWNLOAD_SPINNER_FRAMES = [
   "⠋",
@@ -75,15 +87,6 @@ export interface ResolvedImage {
   arch?: ImageArch;
 }
 
-type ParsedImageRef = {
-  /** image name component */
-  name: string;
-  /** image tag component */
-  tag: string;
-  /** canonical `name:tag` */
-  canonical: string;
-};
-
 type ImageResolutionErrorCode =
   | "object_not_found"
   | "ref_not_found"
@@ -118,19 +121,6 @@ type BuiltinImageRegistry = {
   builds: Record<string, RegistryImageSource>;
 };
 
-type RegistryCache = {
-  /** source registry URL */
-  url: string;
-  /** HTTP etag from the last successful fetch */
-  etag?: string;
-  /** cached registry payload */
-  registry: BuiltinImageRegistry;
-};
-
-export function getImageStoreDirectory(): string {
-  return process.env.GONDOLIN_IMAGE_STORE ?? gondolinCacheDir("images");
-}
-
 function imageObjectRootDir(): string {
   return path.join(getImageStoreDirectory(), "objects");
 }
@@ -139,28 +129,9 @@ function imageRefRootDir(): string {
   return path.join(getImageStoreDirectory(), "refs");
 }
 
-function registryCachePath(): string {
-  return path.join(
-    getImageStoreDirectory(),
-    "builtin-image-registry-cache.json",
-  );
-}
-
 function builtinRegistryUrl(): string {
   const value = process.env.GONDOLIN_IMAGE_REGISTRY_URL?.trim();
   return value && value.length > 0 ? value : DEFAULT_IMAGE_REGISTRY_URL;
-}
-
-function normalizeImageArch(
-  value: string | undefined | null,
-): ImageArch | null {
-  if (!value) return null;
-  const lower = value.toLowerCase();
-  if (lower === "aarch64" || lower === "arm64") return "aarch64";
-  if (lower === "x86_64" || lower === "amd64" || lower === "x64") {
-    return "x86_64";
-  }
-  return null;
 }
 
 function defaultImageArch(): ImageArch {
@@ -172,73 +143,10 @@ function ensurePathWithinRoot(
   candidate: string,
   label: string,
 ): string {
-  const resolvedRoot = path.resolve(root);
-  const resolvedCandidate = path.resolve(candidate);
-  const relative = path.relative(resolvedRoot, resolvedCandidate);
-  if (
-    relative === ".." ||
-    relative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relative)
-  ) {
-    throw new Error(`invalid ${label}: path escapes ${resolvedRoot}`);
+  if (!isPathWithin(root, candidate)) {
+    throw new Error(`invalid ${label}: path escapes ${path.resolve(root)}`);
   }
-  return resolvedCandidate;
-}
-
-function validateImageNameSegments(name: string): void {
-  const segments = name.split("/");
-  if (segments.length === 0) {
-    throw new Error(`invalid image name '${name}'`);
-  }
-
-  for (const segment of segments) {
-    if (segment === "." || segment === ".." || segment.length === 0) {
-      throw new Error(
-        `invalid image name '${name}' (must not contain path traversal segments)`,
-      );
-    }
-    if (!IMAGE_NAME_SEGMENT_PATTERN.test(segment)) {
-      throw new Error(
-        `invalid image name '${name}' (invalid segment '${segment}')`,
-      );
-    }
-  }
-}
-
-function parseImageRef(reference: string): ParsedImageRef {
-  const trimmed = reference.trim();
-  if (!trimmed) {
-    throw new Error("image reference must not be empty");
-  }
-
-  const colon = trimmed.lastIndexOf(":");
-  const hasExplicitTag = colon > 0 && colon < trimmed.length - 1;
-
-  const name = hasExplicitTag ? trimmed.slice(0, colon) : trimmed;
-  const tag = hasExplicitTag ? trimmed.slice(colon + 1) : "latest";
-
-  if (!IMAGE_NAME_PATTERN.test(name)) {
-    throw new Error(
-      `invalid image name '${name}' (allowed: letters, numbers, '.', '_', '-', '/')`,
-    );
-  }
-  validateImageNameSegments(name);
-
-  if (!IMAGE_TAG_PATTERN.test(tag)) {
-    throw new Error(
-      `invalid image tag '${tag}' (allowed: letters, numbers, '.', '_', '-')`,
-    );
-  }
-
-  return {
-    name,
-    tag,
-    canonical: `${name}:${tag}`,
-  };
-}
-
-function isBuildId(value: string): boolean {
-  return BUILD_ID_PATTERN.test(value);
+  return path.resolve(candidate);
 }
 
 export function normalizeImageBuildId(buildId: string): string {
@@ -292,13 +200,9 @@ function resolveContainedAssetPath(
   }
 
   const resolvedPath = path.resolve(baseDir, assetPath);
-  const relative = path.relative(baseDir, resolvedPath);
   if (
-    relative.length === 0 ||
-    relative === "." ||
-    relative === ".." ||
-    relative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relative)
+    resolvedPath === path.resolve(baseDir) ||
+    !isPathWithin(baseDir, resolvedPath)
   ) {
     throw new Error(
       `invalid ${fieldName}: path must stay within ${baseDir} (got '${assetPath}')`,
@@ -315,12 +219,7 @@ function ensureSafeImportSourcePath(
 ): string {
   const realSourcePath = fs.realpathSync(sourcePath);
   const resolvedRootDir = fs.realpathSync(rootDir);
-  const relative = path.relative(resolvedRootDir, realSourcePath);
-  if (
-    relative === ".." ||
-    relative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relative)
-  ) {
+  if (!isPathWithin(resolvedRootDir, realSourcePath)) {
     throw new Error(
       `invalid ${fieldName}: resolved path escapes ${resolvedRootDir} (${realSourcePath})`,
     );
@@ -334,57 +233,6 @@ function ensureSafeImportSourcePath(
   }
 
   return realSourcePath;
-}
-
-type CopiedAsset = {
-  targetPath: string;
-  identity: FileIdentity;
-};
-
-type FileIdentity = {
-  dev: bigint;
-  ino: bigint;
-};
-
-function sameFileIdentity(a: FileIdentity, b: FileIdentity): boolean {
-  return a.dev === b.dev && a.ino === b.ino;
-}
-
-function copyImportedAsset(
-  sourcePath: string,
-  targetPath: string,
-  copiedAssets: CopiedAsset[],
-): void {
-  const resolvedTarget = path.resolve(targetPath);
-  if (
-    copiedAssets.some(
-      (asset) => path.resolve(asset.targetPath) === resolvedTarget,
-    )
-  ) {
-    return;
-  }
-
-  const stat = fs.statSync(sourcePath, { bigint: true });
-  const identity = { dev: stat.dev, ino: stat.ino };
-  const existing =
-    stat.ino === 0n
-      ? undefined
-      : copiedAssets.find((asset) =>
-          sameFileIdentity(asset.identity, identity),
-        );
-
-  if (existing) {
-    try {
-      fs.linkSync(existing.targetPath, targetPath);
-      copiedAssets.push({ targetPath, identity });
-      return;
-    } catch {
-      // Filesystems without hard-link support still get a correct full copy.
-    }
-  }
-
-  fs.copyFileSync(sourcePath, targetPath);
-  copiedAssets.push({ targetPath, identity });
 }
 
 export function importImageFromDirectory(assetDir: string): ImportedImage {
@@ -439,29 +287,21 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         manifest.assets?.rootfs,
         "manifest.assets.rootfs",
       );
-      const sourceFirecrackerKernelPath =
-        manifest.assets?.firecrackerKernel === undefined
+      const sourceKrunKernelPath =
+        manifest.assets?.krunKernel === undefined
           ? undefined
           : resolveContainedAssetPath(
               resolvedDir,
-              manifest.assets.firecrackerKernel,
-              "manifest.assets.firecrackerKernel",
+              manifest.assets.krunKernel,
+              "manifest.assets.krunKernel",
             );
-      const sourceFirecrackerInitrdPath =
-        manifest.assets?.firecrackerInitrd == null
+      const sourceKrunInitrdPath =
+        manifest.assets?.krunInitrd === undefined
           ? undefined
           : resolveContainedAssetPath(
               resolvedDir,
-              manifest.assets.firecrackerInitrd,
-              "manifest.assets.firecrackerInitrd",
-            );
-      const sourceVfkitKernelPath =
-        manifest.assets?.vfkitKernel === undefined
-          ? undefined
-          : resolveContainedAssetPath(
-              resolvedDir,
-              manifest.assets.vfkitKernel,
-              "manifest.assets.vfkitKernel",
+              manifest.assets.krunInitrd,
+              "manifest.assets.krunInitrd",
             );
 
       if (!fs.existsSync(sourceKernelPath)) {
@@ -479,25 +319,14 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
           `missing manifest.assets.rootfs file at ${sourceRootfsPath}`,
         );
       }
-      if (
-        sourceFirecrackerKernelPath &&
-        !fs.existsSync(sourceFirecrackerKernelPath)
-      ) {
+      if (sourceKrunKernelPath && !fs.existsSync(sourceKrunKernelPath)) {
         throw new Error(
-          `missing manifest.assets.firecrackerKernel file at ${sourceFirecrackerKernelPath}`,
+          `missing manifest.assets.krunKernel file at ${sourceKrunKernelPath}`,
         );
       }
-      if (
-        sourceFirecrackerInitrdPath &&
-        !fs.existsSync(sourceFirecrackerInitrdPath)
-      ) {
+      if (sourceKrunInitrdPath && !fs.existsSync(sourceKrunInitrdPath)) {
         throw new Error(
-          `missing manifest.assets.firecrackerInitrd file at ${sourceFirecrackerInitrdPath}`,
-        );
-      }
-      if (sourceVfkitKernelPath && !fs.existsSync(sourceVfkitKernelPath)) {
-        throw new Error(
-          `missing manifest.assets.vfkitKernel file at ${sourceVfkitKernelPath}`,
+          `missing manifest.assets.krunInitrd file at ${sourceKrunInitrdPath}`,
         );
       }
 
@@ -533,29 +362,21 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
         "manifest.assets.rootfs",
       );
 
-      const targetFirecrackerKernelPath =
-        sourceFirecrackerKernelPath === undefined
+      const targetKrunKernelPath =
+        sourceKrunKernelPath === undefined
           ? undefined
           : resolveContainedAssetPath(
               tmpDir,
-              manifest.assets!.firecrackerKernel,
-              "manifest.assets.firecrackerKernel",
+              manifest.assets!.krunKernel,
+              "manifest.assets.krunKernel",
             );
-      const targetFirecrackerInitrdPath =
-        sourceFirecrackerInitrdPath === undefined
+      const targetKrunInitrdPath =
+        sourceKrunInitrdPath === undefined
           ? undefined
           : resolveContainedAssetPath(
               tmpDir,
-              manifest.assets!.firecrackerInitrd!,
-              "manifest.assets.firecrackerInitrd",
-            );
-      const targetVfkitKernelPath =
-        sourceVfkitKernelPath === undefined
-          ? undefined
-          : resolveContainedAssetPath(
-              tmpDir,
-              manifest.assets!.vfkitKernel!,
-              "manifest.assets.vfkitKernel",
+              manifest.assets!.krunInitrd,
+              "manifest.assets.krunInitrd",
             );
 
       fs.mkdirSync(path.dirname(targetKernelPath), {
@@ -567,61 +388,31 @@ export function importImageFromDirectory(assetDir: string): ImportedImage {
       fs.mkdirSync(path.dirname(targetRootfsPath), {
         recursive: true,
       });
-      if (targetFirecrackerKernelPath) {
-        fs.mkdirSync(path.dirname(targetFirecrackerKernelPath), {
-          recursive: true,
-        });
+      if (targetKrunKernelPath) {
+        fs.mkdirSync(path.dirname(targetKrunKernelPath), { recursive: true });
       }
-      if (targetFirecrackerInitrdPath) {
-        fs.mkdirSync(path.dirname(targetFirecrackerInitrdPath), {
-          recursive: true,
-        });
-      }
-      if (targetVfkitKernelPath) {
-        fs.mkdirSync(path.dirname(targetVfkitKernelPath), {
-          recursive: true,
-        });
+      if (targetKrunInitrdPath) {
+        fs.mkdirSync(path.dirname(targetKrunInitrdPath), { recursive: true });
       }
 
-      const copiedAssets: CopiedAsset[] = [];
-      copyImportedAsset(safeKernelPath, targetKernelPath, copiedAssets);
-      copyImportedAsset(safeInitramfsPath, targetInitramfsPath, copiedAssets);
-      copyImportedAsset(safeRootfsPath, targetRootfsPath, copiedAssets);
-      if (targetFirecrackerKernelPath && sourceFirecrackerKernelPath) {
-        const safeFirecrackerKernelPath = ensureSafeImportSourcePath(
+      fs.copyFileSync(safeKernelPath, targetKernelPath);
+      fs.copyFileSync(safeInitramfsPath, targetInitramfsPath);
+      fs.copyFileSync(safeRootfsPath, targetRootfsPath);
+      if (targetKrunKernelPath && sourceKrunKernelPath) {
+        const safeKrunKernelPath = ensureSafeImportSourcePath(
           resolvedDir,
-          sourceFirecrackerKernelPath,
-          "manifest.assets.firecrackerKernel",
+          sourceKrunKernelPath,
+          "manifest.assets.krunKernel",
         );
-        copyImportedAsset(
-          safeFirecrackerKernelPath,
-          targetFirecrackerKernelPath,
-          copiedAssets,
-        );
+        fs.copyFileSync(safeKrunKernelPath, targetKrunKernelPath);
       }
-      if (targetFirecrackerInitrdPath && sourceFirecrackerInitrdPath) {
-        const safeFirecrackerInitrdPath = ensureSafeImportSourcePath(
+      if (targetKrunInitrdPath && sourceKrunInitrdPath) {
+        const safeKrunInitrdPath = ensureSafeImportSourcePath(
           resolvedDir,
-          sourceFirecrackerInitrdPath,
-          "manifest.assets.firecrackerInitrd",
+          sourceKrunInitrdPath,
+          "manifest.assets.krunInitrd",
         );
-        copyImportedAsset(
-          safeFirecrackerInitrdPath,
-          targetFirecrackerInitrdPath,
-          copiedAssets,
-        );
-      }
-      if (targetVfkitKernelPath && sourceVfkitKernelPath) {
-        const safeVfkitKernelPath = ensureSafeImportSourcePath(
-          resolvedDir,
-          sourceVfkitKernelPath,
-          "manifest.assets.vfkitKernel",
-        );
-        copyImportedAsset(
-          safeVfkitKernelPath,
-          targetVfkitKernelPath,
-          copiedAssets,
-        );
+        fs.copyFileSync(safeKrunInitrdPath, targetKrunInitrdPath);
       }
 
       fs.mkdirSync(imageObjectRootDir(), { recursive: true });
@@ -856,34 +647,19 @@ function resolveBuildIdFromRef(
   const local = readLocalRefTargets(parsedRef.canonical);
 
   const requestedArch = normalizeImageArch(arch) ?? defaultImageArch();
-  const exact = local.targets[requestedArch];
-  if (exact) {
-    return { buildId: exact, arch: requestedArch };
+  const selected = selectKeyedEntry(local.targets, requestedArch, true);
+  if (selected) {
+    return { buildId: selected.buildId, arch: selected.key };
   }
 
-  const available = Object.entries(local.targets).filter(
-    (pair): pair is [ImageArch, string] => {
-      const [name, value] = pair;
-      return normalizeImageArch(name) !== null && typeof value === "string";
-    },
-  );
-
-  if (available.length === 1) {
-    const [fallbackArch, fallbackBuildId] = available[0]!;
-    return {
-      buildId: fallbackBuildId,
-      arch: fallbackArch,
-    };
-  }
-
-  if (available.length === 0) {
+  const availableArchs = describeAvailableKeys(local.targets);
+  if (availableArchs === "none") {
     throw new ImageResolutionError(
       "ref_not_found",
       `image ref not found: ${parsedRef.canonical}`,
     );
   }
 
-  const availableArchs = available.map(([name]) => name).join(", ") || "none";
   throw new ImageResolutionError(
     "ref_arch_not_found",
     `image ref '${parsedRef.canonical}' has no target for ${requestedArch} (available: ${availableArchs})`,
@@ -960,21 +736,12 @@ function parseRegistrySource(
   }
 
   const rec = value as Record<string, unknown>;
-  if (typeof rec.url !== "string" || rec.url.length === 0) {
-    throw new Error(`invalid ${where}.url: expected non-empty string`);
-  }
-
   const out: RegistryImageSource = {
-    url: new URL(rec.url, baseUrl).toString(),
+    url: parseRegistryUrl(rec.url, `${where}.url`, baseUrl),
   };
 
   if (rec.sha256 !== undefined) {
-    if (typeof rec.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(rec.sha256)) {
-      throw new Error(
-        `invalid ${where}.sha256: expected 64-char lowercase hex`,
-      );
-    }
-    out.sha256 = rec.sha256;
+    out.sha256 = normalizeSha256(rec.sha256, `${where}.sha256`);
   }
 
   if (rec.arch !== undefined) {
@@ -995,127 +762,17 @@ function parseBuiltinRegistry(
   raw: unknown,
   sourceUrl: string,
 ): BuiltinImageRegistry {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("invalid builtin image registry: expected object");
-  }
-
-  const rec = raw as Record<string, unknown>;
-  if (rec.schema !== BUILTIN_IMAGE_REGISTRY_SCHEMA) {
-    throw new Error(
-      `invalid builtin image registry schema: expected ${BUILTIN_IMAGE_REGISTRY_SCHEMA}`,
-    );
-  }
-
-  const baseUrl = new URL(sourceUrl);
-
-  if (
-    !rec.builds ||
-    typeof rec.builds !== "object" ||
-    Array.isArray(rec.builds)
-  ) {
-    throw new Error("invalid builtin image registry: builds must be an object");
-  }
-
-  const builds: Record<string, RegistryImageSource> = {};
-  for (const [buildId, value] of Object.entries(
-    rec.builds as Record<string, unknown>,
-  )) {
-    const canonical = normalizeImageBuildId(buildId);
-    const source = parseRegistrySource(value, `builds['${buildId}']`, baseUrl);
-    builds[canonical] = source;
-  }
-
-  if (!rec.refs || typeof rec.refs !== "object" || Array.isArray(rec.refs)) {
-    throw new Error("invalid builtin image registry: refs must be an object");
-  }
-
-  const refs: Record<string, Partial<Record<ImageArch, string>>> = {};
-  for (const [reference, archMap] of Object.entries(
-    rec.refs as Record<string, unknown>,
-  )) {
-    const parsedRef = parseImageRef(reference);
-    if (parsedRef.canonical !== reference) {
-      throw new Error(`invalid builtin image registry ref key: ${reference}`);
-    }
-
-    if (!archMap || typeof archMap !== "object" || Array.isArray(archMap)) {
-      throw new Error(`invalid registry ref '${reference}': expected object`);
-    }
-
-    const mapped: Partial<Record<ImageArch, string>> = {};
-    for (const [archKey, value] of Object.entries(
-      archMap as Record<string, unknown>,
-    )) {
-      const arch = normalizeImageArch(archKey);
-      if (!arch) {
-        throw new Error(
-          `invalid registry ref '${reference}' arch key: ${archKey}`,
-        );
-      }
-
-      if (typeof value !== "string") {
-        throw new Error(
-          `invalid refs['${reference}']['${archKey}']: expected build id string`,
-        );
-      }
-
-      const buildId = normalizeImageBuildId(value);
-      const buildSource = builds[buildId];
-      if (!buildSource) {
-        throw new Error(
-          `invalid refs['${reference}']['${archKey}']: unknown build id ${buildId}`,
-        );
-      }
-      if (buildSource.arch && buildSource.arch !== arch) {
-        throw new Error(
-          `invalid refs['${reference}']['${archKey}']: arch ${arch} does not match build arch ${buildSource.arch}`,
-        );
-      }
-
-      mapped[arch] = buildId;
-    }
-
-    refs[parsedRef.canonical] = mapped;
-  }
-
-  return {
+  const { refs, builds } = parseKeyedRegistry(raw, sourceUrl, {
+    label: "builtin image registry",
     schema: BUILTIN_IMAGE_REGISTRY_SCHEMA,
-    refs,
-    builds,
-  };
-}
-
-function loadRegistryCache(url: string): RegistryCache | null {
-  const cachePath = registryCachePath();
-  if (!fs.existsSync(cachePath)) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(
-      fs.readFileSync(cachePath, "utf8"),
-    ) as RegistryCache;
-    if (!parsed || typeof parsed !== "object") return null;
-    if (parsed.url !== url) return null;
-    const registry = parseBuiltinRegistry(parsed.registry as unknown, url);
-    return {
-      url,
-      etag: typeof parsed.etag === "string" ? parsed.etag : undefined,
-      registry,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function saveRegistryCache(cache: RegistryCache): void {
-  const storeDir = getImageStoreDirectory();
-  fs.mkdirSync(storeDir, { recursive: true });
-
-  const cachePath = registryCachePath();
-  const tmpPath = `${cachePath}.tmp-${randomUUID().slice(0, 8)}`;
-  fs.writeFileSync(tmpPath, JSON.stringify(cache, null, 2));
-  fs.renameSync(tmpPath, cachePath);
+    keyName: "arch",
+    normalizeKey: normalizeImageArch,
+    normalizeBuildId: normalizeImageBuildId,
+    canonicalRef: (reference) => parseImageRef(reference).canonical,
+    parseBuild: parseRegistrySource,
+    buildKey: (source) => source.arch,
+  });
+  return { schema: BUILTIN_IMAGE_REGISTRY_SCHEMA, refs, builds };
 }
 
 function formatProgressBytes(bytes: number): string {
@@ -1264,59 +921,14 @@ function createDownloadProgress(
 }
 
 async function fetchBuiltinImageRegistry(): Promise<BuiltinImageRegistry> {
-  const url = builtinRegistryUrl();
-  const cached = loadRegistryCache(url);
-
-  const headers: Record<string, string> = {
-    "User-Agent": "gondolin-image-registry",
-  };
-  if (cached?.etag) {
-    headers["If-None-Match"] = cached.etag;
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(url, { headers });
-  } catch (error) {
-    if (cached) {
-      return cached.registry;
-    }
-    throw new Error(
-      `failed to fetch builtin image registry from ${url}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  if (response.status === 304 && cached) {
-    return cached.registry;
-  }
-
-  if (!response.ok) {
-    if (cached) {
-      return cached.registry;
-    }
-    throw new Error(
-      `failed to fetch builtin image registry: ${response.status} ${response.statusText} (${url})`,
-    );
-  }
-
-  const text = await response.text();
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (error) {
-    throw new Error(
-      `failed to parse builtin image registry json from ${url}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  const registry = parseBuiltinRegistry(raw, url);
-  saveRegistryCache({
-    url,
-    etag: response.headers.get("etag") ?? undefined,
-    registry,
+  return await fetchCachedJsonRegistry({
+    url: builtinRegistryUrl(),
+    storeDir: getImageStoreDirectory(),
+    cacheFileName: "builtin-image-registry-cache.json",
+    userAgent: "gondolin-image-registry",
+    parse: parseBuiltinRegistry,
+    label: "builtin image registry",
   });
-
-  return registry;
 }
 
 async function downloadArchive(
@@ -1427,52 +1039,6 @@ async function importImageFromSource(
   }
 }
 
-function resolveRegistrySourceForRef(
-  registry: BuiltinImageRegistry,
-  reference: string,
-  arch?: ImageArch,
-): {
-  buildId: string;
-  resolvedArch: ImageArch;
-} {
-  const parsedRef = parseImageRef(reference);
-  const entries = registry.refs[parsedRef.canonical];
-  if (!entries) {
-    throw new Error(
-      `image ref not found in builtin registry: ${parsedRef.canonical}`,
-    );
-  }
-
-  const requestedArch = normalizeImageArch(arch) ?? defaultImageArch();
-  const exactBuildId = entries[requestedArch];
-  if (exactBuildId) {
-    return {
-      buildId: exactBuildId,
-      resolvedArch: requestedArch,
-    };
-  }
-
-  const available = Object.entries(entries).filter(
-    (pair): pair is [ImageArch, string] => {
-      const [name, value] = pair;
-      return normalizeImageArch(name) !== null && typeof value === "string";
-    },
-  );
-
-  if (available.length === 1) {
-    const [resolvedArch, buildId] = available[0]!;
-    return {
-      buildId,
-      resolvedArch,
-    };
-  }
-
-  const availableArchs = available.map(([name]) => name).join(", ") || "none";
-  throw new Error(
-    `image ref '${parsedRef.canonical}' has no registry source for ${requestedArch} (available: ${availableArchs})`,
-  );
-}
-
 function isExpectedLocalImageMiss(error: unknown): boolean {
   if (!(error instanceof ImageResolutionError)) {
     return false;
@@ -1528,18 +1094,16 @@ export async function ensureImageSelector(
   }
 
   const parsedRef = parseImageRef(trimmed);
-  const { buildId, resolvedArch } = resolveRegistrySourceForRef(
+  const {
+    buildId,
+    key: resolvedArch,
+    build: source,
+  } = resolveKeyedRegistryRef(
     registry,
     parsedRef.canonical,
-    arch,
+    normalizeImageArch(arch) ?? defaultImageArch(),
+    { label: "image", allowSingleFallback: true },
   );
-
-  const source = registry.builds[buildId];
-  if (!source) {
-    throw new Error(
-      `image ref '${parsedRef.canonical}' points to unknown registry build id: ${buildId}`,
-    );
-  }
 
   const imported = await importImageFromSource(
     source,
@@ -1576,11 +1140,228 @@ export function tagImage(
   return setImageRef(targetReference, resolved.buildId, resolvedArch);
 }
 
+function pruneEmptyRefDirectories(startDir: string): void {
+  const root = path.resolve(imageRefRootDir());
+  let current = path.resolve(startDir);
+
+  while (current !== root) {
+    const relative = path.relative(root, current);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`)) return;
+    if (!fs.existsSync(current) || fs.readdirSync(current).length > 0) return;
+    fs.rmdirSync(current);
+    current = path.dirname(current);
+  }
+}
+
+function localRefsForBuildId(buildId: string): Array<{
+  reference: string;
+  arch: ImageArch;
+  linkPath: string;
+}> {
+  const objectDir = path.resolve(getImageObjectDirectory(buildId));
+  const refs: Array<{
+    reference: string;
+    arch: ImageArch;
+    linkPath: string;
+  }> = [];
+
+  for (const entry of collectRefSymlinkEntries(imageRefRootDir())) {
+    const linkPath = symlinkTargetForRef(entry.reference, entry.arch);
+    let target: string;
+    try {
+      target = fs.readlinkSync(linkPath);
+    } catch {
+      // Ignore malformed refs, consistent with listImageRefs().
+      continue;
+    }
+    if (path.resolve(path.dirname(linkPath), target) !== objectDir) continue;
+    refs.push({ ...entry, linkPath });
+  }
+
+  return refs;
+}
+
+function removeRefLink(linkPath: string): void {
+  try {
+    fs.unlinkSync(linkPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  pruneEmptyRefDirectories(path.dirname(linkPath));
+}
+
+export function listUntaggedImages(): ResolvedImage[] {
+  const objectRoot = imageObjectRootDir();
+  if (!fs.existsSync(objectRoot)) return [];
+
+  const referenced = new Set<string>();
+  for (const entry of collectRefSymlinkEntries(imageRefRootDir())) {
+    try {
+      const linkPath = symlinkTargetForRef(entry.reference, entry.arch);
+      referenced.add(readBuildIdFromRefSymlink(linkPath));
+    } catch {
+      // Ignore malformed refs, consistent with listImageRefs().
+    }
+  }
+
+  const images: ResolvedImage[] = [];
+  for (const entry of fs.readdirSync(objectRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !isBuildId(entry.name)) continue;
+    const buildId = normalizeImageBuildId(entry.name);
+    if (referenced.has(buildId)) continue;
+
+    try {
+      const assetDir = ensureImageObjectExists(buildId);
+      images.push({
+        source: "build-id",
+        selector: buildId,
+        assetDir,
+        buildId,
+        arch: detectImageArchFromAssetDir(assetDir),
+      });
+    } catch {
+      // Ignore malformed image objects, consistent with listImageRefs().
+    }
+  }
+
+  return images.sort((a, b) => a.selector.localeCompare(b.selector));
+}
+
+function removeUnreferencedObject(buildId: string): boolean {
+  if (localRefsForBuildId(buildId).length > 0) return false;
+
+  const objectDir = getImageObjectDirectory(buildId);
+  if (!fs.existsSync(objectDir)) return false;
+  fs.rmSync(objectDir, { recursive: true, force: true });
+  return true;
+}
+
+export function removeUntaggedImages(): {
+  removedBuildIds: string[];
+} {
+  const removedBuildIds: string[] = [];
+  for (const image of listUntaggedImages()) {
+    if (image.buildId && removeUnreferencedObject(image.buildId)) {
+      removedBuildIds.push(image.buildId);
+    }
+  }
+  return { removedBuildIds };
+}
+
+export function removeAllImages(): {
+  removedRefs: Array<{ reference: string; arch: ImageArch }>;
+  removedBuildIds: string[];
+} {
+  const removedRefs = collectRefSymlinkEntries(imageRefRootDir()).map(
+    ({ reference, arch }) => ({ reference, arch }),
+  );
+  const removedBuildIds = fs.existsSync(imageObjectRootDir())
+    ? fs
+        .readdirSync(imageObjectRootDir(), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && isBuildId(entry.name))
+        .map((entry) => normalizeImageBuildId(entry.name))
+        .sort()
+    : [];
+
+  fs.rmSync(imageRefRootDir(), { recursive: true, force: true });
+  fs.rmSync(imageObjectRootDir(), { recursive: true, force: true });
+  return { removedRefs, removedBuildIds };
+}
+
+export function removeImage(
+  selector: string,
+  options: { force?: boolean } = {},
+): {
+  selector: string;
+  removedRefs: Array<{ reference: string; arch: ImageArch }>;
+  removedBuildIds: string[];
+} {
+  const trimmed = selector.trim();
+  if (!trimmed) {
+    throw new Error("image selector must not be empty");
+  }
+
+  const removedRefs: Array<{ reference: string; arch: ImageArch }> = [];
+  const removedBuildIds: string[] = [];
+
+  if (isBuildId(trimmed)) {
+    const buildId = normalizeImageBuildId(trimmed);
+    const objectDir = getImageObjectDirectory(buildId);
+    if (!fs.existsSync(objectDir)) {
+      throw new ImageResolutionError(
+        "object_not_found",
+        `image object not found for buildId ${buildId} (expected ${objectDir})`,
+      );
+    }
+
+    const refs = localRefsForBuildId(buildId);
+    if (refs.length > 0 && !options.force) {
+      const labels = refs
+        .map((ref) => `${ref.reference} (${ref.arch})`)
+        .join(", ");
+      throw new Error(
+        `image object ${buildId} is referenced by ${labels}; remove those tags first or use --force`,
+      );
+    }
+
+    for (const ref of refs) {
+      removeRefLink(ref.linkPath);
+      removedRefs.push({ reference: ref.reference, arch: ref.arch });
+    }
+    fs.rmSync(objectDir, { recursive: true, force: true });
+    removedBuildIds.push(buildId);
+    return { selector: buildId, removedRefs, removedBuildIds };
+  }
+
+  const parsed = parseImageRef(trimmed);
+  const targetBuildIds = new Set<string>();
+  let found = false;
+
+  for (const arch of ["aarch64", "x86_64"] as const) {
+    const linkPath = symlinkTargetForRef(parsed.canonical, arch);
+    try {
+      if (!fs.lstatSync(linkPath).isSymbolicLink()) {
+        throw new Error(`invalid image ref link: ${linkPath} is not a symlink`);
+      }
+    } catch (error: any) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+
+    found = true;
+    try {
+      targetBuildIds.add(readBuildIdFromRefSymlink(linkPath));
+    } catch {
+      // Remove malformed local refs, but do not infer an object to delete.
+    }
+    removeRefLink(linkPath);
+    removedRefs.push({ reference: parsed.canonical, arch });
+  }
+
+  if (!found) {
+    throw new ImageResolutionError(
+      "ref_not_found",
+      `image ref not found: ${parsed.canonical}`,
+    );
+  }
+
+  for (const buildId of targetBuildIds) {
+    if (removeUnreferencedObject(buildId)) {
+      removedBuildIds.push(buildId);
+    }
+  }
+
+  return {
+    selector: parsed.canonical,
+    removedRefs,
+    removedBuildIds,
+  };
+}
+
 export const __test = {
   parseImageRef,
   normalizeImageArch,
   isBuildId,
   normalizeImageBuildId,
   parseBuiltinRegistry,
-  sameFileIdentity,
 };

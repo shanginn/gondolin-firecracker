@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import type fs from "node:fs";
 
 import { createErrnoError } from "./errors.ts";
 import type { VirtualFileHandle, VirtualProvider } from "./node/index.ts";
@@ -107,6 +107,14 @@ export abstract class ReadonlyVirtualProvider
 
   symlinkSync(_target: string, entryPath: string, _type?: string): void {
     throw createErrnoError(ERRNO.EROFS, "symlink", entryPath);
+  }
+
+  async chmod(entryPath: string, mode: number) {
+    return this.chmodSync(entryPath, mode);
+  }
+
+  chmodSync(entryPath: string, _mode: number): void {
+    throw createErrnoError(ERRNO.EROFS, "chmod", entryPath);
   }
 
   // Convenience async wrappers for optional sync overrides

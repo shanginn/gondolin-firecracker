@@ -8,7 +8,6 @@
 // Main VM interface
 export {
   VM,
-  type FirecrackerVmSnapshot,
   type VMOptions,
   type VMState,
   type EnableSshOptions,
@@ -30,10 +29,20 @@ export {
   type VmFsDeleteOptions,
 } from "./vm/core.ts";
 export { VmCheckpoint, type VmCheckpointData } from "./checkpoint.ts";
-export { type ExecOptions, type ExecResult, type ExecProcess } from "./exec.ts";
+export type {
+  FirecrackerVmSnapshot,
+  NitroOptions,
+  SandboxVmm,
+} from "./sandbox/server-options.ts";
+export type { ExecOptions, ExecResult, ExecProcess } from "./exec.ts";
+export type { ExecSignalName } from "./utils/signals.ts";
 
-// Server for running the sandbox
-export { SandboxServer } from "./sandbox/server.ts";
+// Guest tmpfs mounts
+export {
+  DEFAULT_GUEST_TMPFS,
+  type GuestTmpfsMountOptions,
+  type GuestTmpfsMounts,
+} from "./sandbox/tmpfs.ts";
 
 // VFS (Virtual File System) providers
 export {
@@ -54,6 +63,16 @@ export {
 export { ReadonlyProvider } from "./vfs/readonly.ts";
 export { ReadonlyVirtualProvider } from "./vfs/readonly-virtual.ts";
 export {
+  createObjectMount,
+  ObjectVirtualProvider,
+  type ObjectProvider,
+  type ObjectMountOptions,
+  type ObjectStat,
+  type ObjectDirEntry,
+  type ObjectEntryKind,
+} from "./vfs/object.ts";
+export { nativeMounts, type NativeHostMountOptions } from "./native/vfs.ts";
+export {
   ShadowProvider,
   createShadowPathPredicate,
   type ShadowProviderOptions,
@@ -70,11 +89,6 @@ export {
   createVirtualDirStats,
   formatVirtualEntries,
 } from "./vfs/utils.ts";
-export {
-  FsRpcService,
-  type FsRpcMetrics,
-  MAX_RPC_DATA,
-} from "./vfs/rpc-service.ts";
 
 // HTTP hooks for network policy
 export {
@@ -97,6 +111,14 @@ export {
   type UpdateSecretOptions,
 } from "./http/hooks.ts";
 
+// Tier-2 hooks (JavaScript policies run inside gondolind)
+export {
+  createDjsHooks,
+  djsHooksOptionsFromFile,
+  type DjsHookLimits,
+  type DjsHooksOptions,
+} from "./http/djs-hooks.ts";
+
 // Network types
 export type {
   DnsMode,
@@ -105,7 +127,8 @@ export type {
   HttpIpAllowInfo,
   HttpHooks,
   HttpFetch,
-} from "./net/backend.ts";
+} from "./net/types.ts";
+export type { TcpOptions } from "./net/tcp.ts";
 export type {
   SshOptions,
   SshCredential,
@@ -113,7 +136,6 @@ export type {
   SshExecDecision,
   SshExecPolicy,
 } from "./net/ssh.ts";
-export type { TcpOptions } from "./net/tcp.ts";
 export { HttpRequestBlockedError } from "./http/utils.ts";
 export {
   suggestHostsForSecret,
@@ -125,11 +147,11 @@ export {
 export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh/exec.ts";
 
 // Debug helpers
-export {
-  type DebugFlag,
-  type DebugConfig,
-  type DebugComponent,
-  type DebugLogFn,
+export type {
+  DebugFlag,
+  DebugConfig,
+  DebugComponent,
+  DebugLogFn,
 } from "./debug.ts";
 
 // Ingress gateway
@@ -189,12 +211,36 @@ export {
   listImageRefs,
   setImageRef,
   tagImage,
+  removeImage,
   type ImageArch,
   type ImageRefTargets,
   type LocalImageRef,
   type ImportedImage,
   type ResolvedImage,
 } from "./images.ts";
+
+// Native engine (gondolind): engine selection, connections to local or remote daemons
+export type { NativeEngineOptions, SandboxEngine } from "./native/config.ts";
+export {
+  type NativeConnection,
+  spawnNativeConnection,
+} from "./native/transport.ts";
+
+// Native engine binaries (the multi-call `gondolin`) for this and remote platforms
+export {
+  ensureNativeBinary,
+  getNativeBinaryPath,
+  nativeDaemonArgs,
+  nativeDaemonCommand,
+  nativePackageName,
+  nativeRustTarget,
+  type EnsureNativeBinaryOptions,
+  type NativeArch,
+  type NativeBinary,
+  type NativeBinaryLookupOptions,
+  type NativeBinaryTarget,
+  type NativePlatform,
+} from "./native/binary.ts";
 
 // Build configuration and builder
 export {

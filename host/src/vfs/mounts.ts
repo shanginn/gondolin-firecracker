@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import type fs from "node:fs";
 
 import { createErrnoError } from "./errors.ts";
 import type {
@@ -7,6 +7,7 @@ import type {
   VfsStatfs,
 } from "./node/index.ts";
 import { cloneSyntheticStatfs, isStatfsProbeFallbackError } from "./statfs.ts";
+import { kProviderInternals } from "./native-marks.ts";
 import {
   createVirtualDirStats,
   ERRNO,
@@ -47,6 +48,11 @@ export class MountRouterProvider
 
   get readonly() {
     return this.allReadonly;
+  }
+
+  /** @internal */
+  [kProviderInternals]() {
+    return { kind: "router" as const, mounts: this.mountMap };
   }
 
   get supportsSymlinks() {
@@ -285,6 +291,22 @@ export class MountRouterProvider
       return resolved.provider.linkSync(resolved.fromPath, resolved.toPath);
     }
     throw createErrnoError(ERRNO.ENOSYS, "link", existingPath);
+  }
+
+  async chmod(entryPath: string, mode: number) {
+    const mount = this.requireMount(entryPath, "chmod");
+    if (mount.provider.chmod) {
+      return mount.provider.chmod(mount.relativePath, mode);
+    }
+    throw createErrnoError(ERRNO.ENOSYS, "chmod", entryPath);
+  }
+
+  chmodSync(entryPath: string, mode: number) {
+    const mount = this.requireMount(entryPath, "chmod");
+    if (mount.provider.chmodSync) {
+      return mount.provider.chmodSync(mount.relativePath, mode);
+    }
+    throw createErrnoError(ERRNO.ENOSYS, "chmod", entryPath);
   }
 
   async readlink(entryPath: string, options?: object) {
@@ -581,7 +603,8 @@ function mergeEntries(
   return dirents;
 }
 
-function getEntryName(entry: string | fs.Dirent) {
+/** @internal */
+export function getEntryName(entry: string | fs.Dirent) {
   return typeof entry === "string" ? entry : entry.name;
 }
 
@@ -603,7 +626,7 @@ export function isNoEntryError(err: unknown) {
 export function isUnderMountPoint(normalizedPath: string, mountPoint: string) {
   if (normalizedPath === mountPoint) return true;
   if (mountPoint === "/") return normalizedPath.startsWith("/");
-  return normalizedPath.startsWith(mountPoint + "/");
+  return normalizedPath.startsWith(`${mountPoint}/`);
 }
 
 /** @internal */

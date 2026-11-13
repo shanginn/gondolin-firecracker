@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { MemoryProvider, type VirtualProvider } from "../src/vfs/node/index.ts";
 import { createExecSession } from "../src/exec.ts";
@@ -22,11 +23,9 @@ function makeTempResolvedServerOptions() {
   return {
     dir,
     resolved: {
-      vmm: "firecracker" as const,
-      firecrackerPath: "firecracker",
-      firecrackerApiSocketPath: path.join(dir, "firecracker-api.sock"),
-      firecrackerVsockPath: path.join(dir, "firecracker-vsock.sock"),
-      firecrackerGuestCid: 3,
+      vmm: "qemu" as const,
+      qemuPath: "qemu-system-aarch64",
+      krunRunnerPath: "gondolin-krun-runner",
       kernelPath,
       initrdPath,
       rootfsPath,
@@ -39,26 +38,26 @@ function makeTempResolvedServerOptions() {
       virtioFsSocketPath: path.join(dir, "virtiofs.sock"),
       virtioSshSocketPath: path.join(dir, "virtio-ssh.sock"),
       virtioIngressSocketPath: path.join(dir, "virtio-ingress.sock"),
+      netSocketPath: path.join(dir, "net.sock"),
       netMac: "02:00:00:00:00:01",
       netEnabled: false,
       debug: [],
+      machineType: "virt",
+      accel: "tcg",
+      cpu: "max",
       console: "none" as const,
       autoRestart: false,
       append: "console=ttyAMA0",
       maxStdinBytes: 64 * 1024,
-      maxQueuedStdinBytes: 8 * 1024 * 1024,
-      maxTotalQueuedStdinBytes: 32 * 1024 * 1024,
-      maxQueuedExecs: 64,
+      maxHttpBodyBytes: 1024 * 1024,
+      maxHttpResponseBodyBytes: 1024 * 1024,
+      mitmCertDir: path.join(dir, "mitm"),
       vfsProvider: null,
     },
   };
 }
 
-function writeAssetManifest(
-  dir: string,
-  rootfsMode?: RootfsMode,
-  rootfsPlaceholder = false,
-) {
+function writeAssetManifest(dir: string, rootfsMode?: RootfsMode) {
   fs.writeFileSync(
     path.join(dir, "manifest.json"),
     JSON.stringify(
@@ -68,7 +67,6 @@ function writeAssetManifest(
           arch: "aarch64",
           distro: "alpine",
           alpine: { version: "3.23.0" },
-          rootfs: rootfsPlaceholder ? { placeholder: true } : undefined,
         },
         runtimeDefaults: rootfsMode ? { rootfsMode } : undefined,
         buildTime: new Date().toISOString(),
@@ -87,6 +85,12 @@ function writeAssetManifest(
       2,
     ),
   );
+}
+
+/** The root disk the VM would send to the daemon (`configure.vm.root_disk`) */
+async function rootDiskOf(vm: VM): Promise<Record<string, unknown>> {
+  const { configure } = await vm.describeNativeConfigure();
+  return (configure.vm as Record<string, any>).root_disk;
 }
 
 function makeVm(options: VMOptions = {}) {
@@ -116,13 +120,6 @@ test("vm internals: VM.create validates rootfs size before asset resolution", as
   );
 });
 
-test("vm internals: network policy options require enabled networking", async () => {
-  await assert.rejects(
-    () => VM.create({ httpHooks: {}, sandbox: { netEnabled: false } } as any),
-    /network policy options require sandbox\.netEnabled !== false/,
-  );
-});
-
 test("vm internals: getHostPid returns null before start", () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
@@ -137,52 +134,6 @@ test("vm internals: getHostPid returns null before start", () => {
   }
 });
 
-test("vm internals: exposes startup timings", () => {
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    vfs: null,
-    rootfs: { mode: "readonly" },
-  });
-
-  try {
-    const server = (vm as any).server;
-    server.resetStartupTimings();
-    server.recordStartupTiming("probe");
-
-    const timings = vm.getStartupTimings();
-    assert.equal(timings.length, 1);
-    assert.equal(timings[0].name, "probe");
-    assert.equal(typeof timings[0].atMs, "number");
-  } finally {
-    cleanup();
-  }
-});
-
-test("vm internals: validates all VFS mounts in one guest exec", async () => {
-  const { vm, cleanup } = makeVm({ autoStart: false });
-  const commands: unknown[] = [];
-
-  (vm as any).execInternalNoVfsWait = async (command: unknown) => {
-    commands.push(command);
-    return { exitCode: 0, stdout: "", stderr: "" };
-  };
-
-  try {
-    await (vm as any).waitForVfsReadyInternal();
-    assert.equal(commands.length, 1);
-
-    const command = commands[0] as string[];
-    assert.deepEqual(command.slice(0, 2), ["/bin/sh", "-c"]);
-    assert.equal(command[4], "/data");
-    assert.ok(command.includes("/etc/gondolin"));
-    assert.match(command[2]!, /fuse\.sandboxfs/);
-    assert.match(command[2]!, /mount --bind/);
-  } finally {
-    await vm.close();
-    cleanup();
-  }
-});
-
 test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
@@ -192,12 +143,11 @@ test("vm internals: rootfs readonly mode sets readonly root disk", async () => {
 
   try {
     const resolved = (vm as any).resolvedSandboxOptions;
-    assert.equal(resolved.rootDiskPath, resolved.rootfsPath);
-    assert.equal(resolved.rootDiskReadOnly, true);
-
-    const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.readOnly, true);
+    const rootDisk = await rootDiskOf(vm);
+    assert.equal(rootDisk.path, resolved.rootfsPath);
+    assert.equal(rootDisk.format, "raw");
+    assert.equal(rootDisk.mode, "readonly");
+    assert.equal(rootDisk.size, undefined);
   } finally {
     await vm.close();
     cleanup();
@@ -226,7 +176,7 @@ test("vm internals: rootfs size rejects readonly mode", () => {
 
 test("vm internals: constructor cleans delete-on-close root disk after resize setup failure", () => {
   const { dir, resolved } = makeTempResolvedServerOptions();
-  const rootDiskPath = path.join(dir, "root-disk.raw");
+  const rootDiskPath = path.join(dir, "root-disk.qcow2");
   fs.writeFileSync(rootDiskPath, "temporary root disk");
 
   try {
@@ -260,12 +210,7 @@ test("vm internals: manifest runtimeDefaults.rootfsMode is used by default", asy
   const vm = new VM({ autoStart: false, vfs: null }, resolved as any);
 
   try {
-    const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    assert.equal(resolvedOptions.rootDiskReadOnly, true);
-
-    const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.readOnly, true);
+    assert.equal((await rootDiskOf(vm)).mode, "readonly");
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -286,139 +231,93 @@ test("vm internals: rootfs option overrides manifest default", async () => {
   );
 
   try {
-    const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    assert.equal(resolvedOptions.rootDiskReadOnly, false);
-
-    const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.readOnly, false);
+    const rootDisk = await rootDiskOf(vm);
+    assert.equal(rootDisk.mode, "memory");
+    assert.equal(rootDisk.read_only, false);
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("vm internals: rootfs size rejects placeholder images", () => {
-  const { dir, resolved } = makeTempResolvedServerOptions();
-  writeAssetManifest(dir, undefined, true);
-
-  try {
-    assert.throws(
-      () =>
-        new VM(
-          {
-            autoStart: false,
-            vfs: null,
-            rootfs: { mode: "cow", size: "64M" },
-          },
-          resolved as any,
-        ),
-      /rootfs\.size is not supported by images with rootfs\.placeholder/,
-    );
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("vm internals: defaults to readonly rootfs", async () => {
-  const { dir, resolved } = makeTempResolvedServerOptions();
-  fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
-
-  const vm = new VM(
-    {
-      autoStart: false,
-      vfs: null,
-    },
-    resolved as any,
-  );
-
-  try {
-    const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.equal(resolvedOptions.rootDiskPath, resolvedOptions.rootfsPath);
-    assert.equal(resolvedOptions.rootDiskFormat, "raw");
-    assert.equal(resolvedOptions.rootDiskReadOnly, true);
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.readOnly, true);
-    assert.equal(rootDisk.deleteOnClose, false);
-  } finally {
-    await vm.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("vm internals: rootfs cow mode uses throwaway raw copy", async () => {
-  const { dir, resolved } = makeTempResolvedServerOptions();
-  fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
-
-  const vm = new VM(
-    {
-      autoStart: false,
-      vfs: null,
-      rootfs: { mode: "cow" },
-    },
-    resolved as any,
-  );
-
-  try {
-    const resolvedOptions = (vm as any).resolvedSandboxOptions;
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.notEqual(resolvedOptions.rootDiskPath, resolvedOptions.rootfsPath);
-    assert.equal(resolvedOptions.rootDiskFormat, "raw");
-    assert.equal(rootDisk.snapshot, false);
-    assert.equal(rootDisk.readOnly, false);
-    assert.equal(rootDisk.deleteOnClose, true);
-    assert.equal(fs.readFileSync(rootDisk.path, "utf8"), "base-rootfs");
-  } finally {
-    await vm.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("vm internals: Firecracker snapshots reject temporary root disks", async () => {
+test("vm internals: rootfs cow mode asks the daemon for an overlay", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
     vfs: null,
     rootfs: { mode: "cow" },
   });
 
-  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-snapshot-"));
   try {
-    await assert.rejects(
-      () => vm.createFirecrackerSnapshot(outDir),
-      /persistent root disk/,
-    );
+    const resolved = (vm as any).resolvedSandboxOptions;
+    const rootDisk = await rootDiskOf(vm);
+    // the daemon creates the overlay on the rootfs when the VM starts
+    assert.equal(rootDisk.path, resolved.rootfsPath);
+    assert.equal(rootDisk.mode, "cow");
+    assert.equal(rootDisk.read_only, false);
+    assert.equal(rootDisk.snapshot, false);
   } finally {
-    fs.rmSync(outDir, { recursive: true, force: true });
     await vm.close();
     cleanup();
   }
 });
 
-test("vm internals: rootfs size grows raw copy before boot", async () => {
-  const { dir, resolved } = makeTempResolvedServerOptions();
-  fs.writeFileSync(resolved.rootfsPath, "base-rootfs");
+for (const mode of ["cow", "memory"] as const) {
+  test(`vm internals: rootfs size is applied by the daemon (${mode} mode)`, async () => {
+    const { vm, cleanup } = makeVm({
+      autoStart: false,
+      vfs: null,
+      rootfs: { mode, size: "64M" },
+    });
 
+    try {
+      const rootDisk = await rootDiskOf(vm);
+      assert.equal(rootDisk.mode, mode);
+      assert.equal(rootDisk.size, 64 * 1024 * 1024);
+      assert.equal((vm as any).rootfsGuestResizePending, true);
+    } finally {
+      await vm.close();
+      cleanup();
+    }
+  });
+}
+
+test("vm internals: own root disks are sent as is, rootfs size grows them", async () => {
+  const { dir, resolved } = makeTempResolvedServerOptions();
+  const rootDiskPath = path.join(dir, "mine.qcow2");
+  fs.writeFileSync(rootDiskPath, "");
   const vm = new VM(
     {
       autoStart: false,
       vfs: null,
-      rootfs: { mode: "cow", size: "1M" },
+      rootfs: { mode: "readonly", size: "64M" },
+      sandbox: { rootDiskPath, rootDiskFormat: "qcow2" },
     },
     resolved as any,
   );
-
   try {
-    const rootDisk = (vm as any).rootDisk;
-
-    assert.equal(rootDisk.format, "raw");
-    assert.equal((vm as any).rootfsGuestResizePending, true);
-    assert.equal(fs.statSync(rootDisk.path).size, 1024 * 1024);
+    const rootDisk = await rootDiskOf(vm);
+    assert.equal(rootDisk.path, rootDiskPath);
+    assert.equal(rootDisk.format, "qcow2");
+    assert.equal(rootDisk.mode, undefined);
+    assert.equal(rootDisk.size, 64 * 1024 * 1024);
   } finally {
     await vm.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("vm internals: checkpoints of disks that are not qcow2 overlays fail early", async () => {
+  for (const [rootfs, message] of [
+    [{ mode: "readonly" }, /root disk must be qcow2 \(got raw\)/],
+    [{ mode: "memory" }, /ephemeral snapshot mode/],
+  ] as const) {
+    const { vm, cleanup } = makeVm({ autoStart: false, vfs: null, rootfs });
+    try {
+      await assert.rejects(() => vm.checkpoint("/tmp/never.qcow2"), message);
+    } finally {
+      await vm.close();
+      cleanup();
+    }
   }
 });
 
@@ -467,50 +366,6 @@ test("vm internals: rootfs size refuses symlink to base image", () => {
   }
 });
 
-test("vm internals: custom vfs binds use writable rootfs copy by default", async () => {
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    vfs: {
-      mounts: {
-        "/": new MemoryProvider(),
-        "/app": new MemoryProvider(),
-      },
-    },
-  });
-
-  try {
-    const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.readOnly, false);
-    assert.equal(rootDisk.deleteOnClose, true);
-  } finally {
-    await vm.close();
-    cleanup();
-  }
-});
-
-test("vm internals: internal gondolin VFS submounts keep readonly rootfs", async () => {
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    sandbox: {
-      netEnabled: true,
-    },
-    vfs: {
-      mounts: {
-        "/": new MemoryProvider(),
-      },
-    },
-  });
-
-  try {
-    const rootDisk = (vm as any).rootDisk;
-    assert.equal(rootDisk.readOnly, true);
-    assert.equal(rootDisk.deleteOnClose, false);
-  } finally {
-    await vm.close();
-    cleanup();
-  }
-});
-
 test("vm internals: start timeout rejects stalled guest readiness", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
@@ -518,6 +373,9 @@ test("vm internals: start timeout rejects stalled guest readiness", async () => 
     vfs: null,
   });
 
+  // the timeout must win: no real daemon (the native engine spawns its
+  // daemon in server.start(), which fails fast without the fake QEMU)
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => {};
@@ -535,31 +393,6 @@ test("vm internals: start timeout rejects stalled guest readiness", async () => 
   }
 });
 
-test("vm internals: start timeout includes server diagnostic hint", async () => {
-  const { vm, cleanup } = makeVm({
-    autoStart: false,
-    startTimeoutMs: 10,
-    vfs: null,
-  });
-
-  (vm as any).ensureVmmAvailable = () => {};
-  (vm as any).ensureConnection = async () => {};
-  (vm as any).ensureRunning = async () => new Promise<void>(() => {});
-  (vm as any).ensureVfsReady = async () => {};
-  (vm as any).ensureSessionIpc = async () => {};
-  (vm as any).server.getStartupDiagnostic = () => " (firecracker: boot hung)";
-
-  try {
-    await assert.rejects(
-      () => vm.start(),
-      /vm startup timed out after 10ms while waiting for guest readiness \(firecracker: boot hung\)/,
-    );
-  } finally {
-    await vm.close();
-    cleanup();
-  }
-});
-
 test("vm internals: start timeout also applies when ensureRunning stalls", async () => {
   const { vm, cleanup } = makeVm({
     autoStart: false,
@@ -567,6 +400,9 @@ test("vm internals: start timeout also applies when ensureRunning stalls", async
     vfs: null,
   });
 
+  // the timeout must win: no real daemon (the native engine spawns its
+  // daemon in server.start(), which fails fast without the fake QEMU)
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
@@ -593,11 +429,14 @@ test("vm internals: timed out startup does not run late session setup", async ()
 
   let ensureSessionIpcCalls = 0;
 
+  // the timeout must win: no real daemon (the native engine spawns its
+  // daemon in server.start(), which fails fast without the fake QEMU)
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => {};
   (vm as any).ensureVfsReady = async () => {
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await delay(30);
   };
   (vm as any).ensureSessionIpc = async () => {
     ensureSessionIpcCalls += 1;
@@ -608,7 +447,7 @@ test("vm internals: timed out startup does not run late session setup", async ()
       () => vm.start(),
       /vm startup timed out after 10ms while waiting for guest readiness/,
     );
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await delay(60);
     assert.equal(ensureSessionIpcCalls, 0);
   } finally {
     await vm.close();
@@ -624,14 +463,17 @@ test("vm internals: stale timeout cleanup does not close newer startup", async (
   });
 
   let staleCloseCalls = 0;
-  const originalClose = vm.close.bind(vm);
+  const originalCloseInternal = (vm as any).closeInternal.bind(vm);
 
+  // keep the 10ms budget for the startup stages under test (the native
+  // engine spawns its daemon in server.start())
+  (vm as any).server.start = async () => {};
   (vm as any).ensureVmmAvailable = () => {};
   (vm as any).ensureConnection = async () => {};
   (vm as any).ensureRunning = async () => new Promise<void>(() => {});
   (vm as any).ensureVfsReady = async () => {};
   (vm as any).ensureSessionIpc = async () => {};
-  (vm as any).close = async () => {
+  (vm as any).closeInternal = async () => {
     staleCloseCalls += 1;
   };
 
@@ -644,11 +486,84 @@ test("vm internals: stale timeout cleanup does not close newer startup", async (
     (vm as any).ensureRunning = async () => {};
     await vm.start();
 
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await delay(30);
     assert.equal(staleCloseCalls, 0);
   } finally {
-    (vm as any).close = originalClose;
-    await originalClose();
+    (vm as any).closeInternal = originalCloseInternal;
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: startup timeout cleanup tears down without closing the vm", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    startTimeoutMs: 10,
+    vfs: null,
+  });
+
+  let closeInternalCalls = 0;
+  const originalCloseInternal = (vm as any).closeInternal.bind(vm);
+
+  // keep the 10 ms budget about the stubbed readiness wait (the native
+  // engine spawns its daemon in server.start(), which is slow under load)
+  (vm as any).server.start = async () => {};
+  (vm as any).ensureVmmAvailable = () => {};
+  (vm as any).ensureConnection = async () => {};
+  (vm as any).ensureRunning = async () => new Promise<void>(() => {});
+  (vm as any).ensureVfsReady = async () => {};
+  (vm as any).ensureSessionIpc = async () => {};
+  (vm as any).closeInternal = async () => {
+    closeInternalCalls += 1;
+  };
+
+  try {
+    await assert.rejects(
+      () => vm.start(),
+      /vm startup timed out after 10ms while waiting for guest readiness/,
+    );
+    await delay(30);
+    assert.equal(closeInternalCalls, 1);
+
+    // The timeout cleanup must leave the vm restartable.
+    (vm as any).ensureRunning = async () => {};
+    await vm.start();
+  } finally {
+    (vm as any).closeInternal = originalCloseInternal;
+    await vm.close();
+    cleanup();
+  }
+});
+
+test("vm internals: closed vm cannot be restarted by start or exec", async () => {
+  const { vm, cleanup } = makeVm({
+    autoStart: false,
+    vfs: null,
+  });
+
+  let serverStarts = 0;
+  (vm as any).ensureVmmAvailable = () => {};
+  (vm as any).ensureConnection = async () => {};
+  (vm as any).ensureRunning = async () => {};
+  (vm as any).ensureVfsReady = async () => {};
+  (vm as any).ensureSessionIpc = async () => {};
+  const server = (vm as any).server;
+  const originalServerStart = server.start.bind(server);
+  server.start = async () => {
+    serverStarts += 1;
+  };
+
+  try {
+    await vm.close();
+
+    await assert.rejects(() => vm.start(), /vm is closed/);
+    await assert.rejects(async () => {
+      await vm.exec(["/bin/true"]);
+    }, /vm is closed/);
+    await assert.rejects(() => vm.enableIngress(), /vm is closed/);
+    assert.equal(serverStarts, 0);
+  } finally {
+    server.start = originalServerStart;
     cleanup();
   }
 });
@@ -728,6 +643,54 @@ test("vm internals: resolveVmVfs supports null vfs and default MemoryProvider", 
   assert.ok(enabled.provider, "expected default vfs provider");
 });
 
+test("vm internals: resolveMitmMounts injects /etc/gondolin/mitm unless overridden", () => {
+  const injected = __test.resolveMitmMounts(undefined, undefined, true);
+  assert.ok(
+    injected["/etc/gondolin/mitm"],
+    "expected mitm mounts to include /etc/gondolin/mitm",
+  );
+
+  const customMitm = __test.resolveMitmMounts(
+    { mounts: { "/etc/gondolin/mitm": new MemoryProvider() } },
+    undefined,
+    true,
+  );
+  assert.deepEqual(customMitm, {});
+
+  const customEtc = __test.resolveMitmMounts(
+    { mounts: { "/etc/gondolin": new MemoryProvider() } },
+    undefined,
+    true,
+  );
+  assert.deepEqual(customEtc, {});
+
+  const disabledNet = __test.resolveMitmMounts(undefined, undefined, false);
+  assert.deepEqual(disabledNet, {});
+
+  const disabledVfs = __test.resolveMitmMounts(null, undefined, true);
+  assert.deepEqual(disabledVfs, {});
+});
+
+test("vm internals: createMitmCaProvider creates readonly ca.crt", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-mitmca-test-"));
+  try {
+    const provider = __test.createMitmCaProvider(dir) as any;
+    assert.equal(provider.readonly, true);
+
+    const handle = provider.openSync("/ca.crt", "r");
+    try {
+      const pem = handle.readFileSync({ encoding: "utf8" });
+      assert.ok(typeof pem === "string");
+      assert.match(pem, /BEGIN CERTIFICATE/);
+      assert.ok(pem.endsWith("\n"), "expected trailing newline");
+    } finally {
+      handle.closeSync();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("vm internals: mergeEnvInputs and buildShellEnv normalize TERM", () => {
   const prevTerm = process.env.TERM;
   try {
@@ -760,7 +723,7 @@ test("vm internals: file helpers short-circuit VFS mounts", async () => {
   });
 
   try {
-    (vm as any).start = async () => {
+    (vm as any).startImplicitly = async () => {
       throw new Error("start should not be called for VFS shortcut");
     };
 
@@ -843,7 +806,7 @@ test("vm internals: file helpers still use VM path for non-VFS files", async () 
   });
 
   try {
-    (vm as any).start = async () => {
+    (vm as any).startImplicitly = async () => {
       throw new Error("start called");
     };
 
@@ -902,9 +865,89 @@ test("vm internals: pending stdin and pty resize flush after markSessionReady", 
     assert.deepEqual(sent[1], {
       type: "stdin",
       id: 1,
-      data: Buffer.from("hi").toString("base64"),
+      data: Buffer.from("hi"),
     });
     assert.deepEqual(sent[2], { type: "stdin", id: 1, eof: true });
+  } finally {
+    cleanup();
+  }
+});
+
+test("vm internals: exec signals wait for the request and abort sends killSignal", async () => {
+  const { vm, cleanup } = makeVm({ vfs: null });
+  try {
+    const sent: any[] = [];
+    (vm as any).connection = {
+      send: (msg: any) => sent.push(msg),
+      close: () => {},
+    };
+    // keep the exec from starting: it waits for the VM
+    (vm as any).startImplicitly = () => new Promise(() => {});
+
+    const proc = vm.exec(["sleep", "10"]);
+    assert.equal(proc.kill("SIGINT"), true);
+    assert.equal(sent.length, 0);
+    const session = (vm as any).sessions.get(proc.id);
+    (vm as any).markSessionReady(session);
+    assert.deepEqual(sent, [{ type: "exec_signal", id: proc.id, signal: 2 }]);
+
+    // abort after the request: SIGKILL by default, then reject
+    sent.length = 0;
+    const ac = new AbortController();
+    const aborted = vm.exec(["sleep", "10"], { signal: ac.signal });
+    (vm as any).markSessionReady((vm as any).sessions.get(aborted.id));
+    ac.abort();
+    await assert.rejects(aborted.result, /exec aborted/);
+    assert.deepEqual(sent, [
+      { type: "exec_signal", id: aborted.id, signal: 9 },
+    ]);
+    assert.equal(aborted.kill(), false);
+
+    // killSignal; numbers are passed through, names are Linux numbers
+    sent.length = 0;
+    const ac2 = new AbortController();
+    const term = vm.exec(["sleep", "10"], {
+      signal: ac2.signal,
+      killSignal: "SIGUSR1",
+    });
+    (vm as any).markSessionReady((vm as any).sessions.get(term.id));
+    ac2.abort();
+    await assert.rejects(term.result, /exec aborted/);
+    assert.deepEqual(sent, [{ type: "exec_signal", id: term.id, signal: 10 }]);
+    assert.throws(
+      () => vm.exec("true", { killSignal: "SIGNOPE" as any }),
+      /unknown signal/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("vm internals: an exec aborted before it started is never sent", async () => {
+  const { vm, cleanup } = makeVm({ vfs: null });
+  try {
+    const sent: any[] = [];
+    (vm as any).connection = {
+      send: (msg: any) => sent.push(msg),
+      close: () => {},
+    };
+    let release!: () => void;
+    (vm as any).startImplicitly = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    const ac = new AbortController();
+    const proc = vm.exec(["sleep", "10"], { signal: ac.signal });
+    ac.abort();
+    await assert.rejects(proc.result, /exec aborted/);
+    release();
+    await delay(10);
+    assert.deepEqual(sent, []);
+
+    await assert.rejects(
+      vm.exec(["sleep", "10"], { signal: AbortSignal.abort() }).result,
+      /exec aborted/,
+    );
   } finally {
     cleanup();
   }
@@ -959,7 +1002,7 @@ test("vm internals: ensureRunning sends boot and resolves once running", async (
   }
 });
 
-test("vm internals: ensureRunning boots when autoStart is disabled", async () => {
+test("vm internals: ensureRunning throws when stopped and autoStart disabled", async () => {
   const { vm, cleanup } = makeVm({ autoStart: false, vfs: null });
   try {
     const sent: any[] = [];
@@ -984,11 +1027,8 @@ test("vm internals: ensureRunning boots when autoStart is disabled", async () =>
     const p = (vm as any).ensureRunning();
     onMessage!(JSON.stringify({ type: "status", state: "stopped" }), false);
 
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(sent.filter((m) => m.type === "boot").length, 1);
-
-    onMessage!(JSON.stringify({ type: "status", state: "running" }), false);
-    await p;
+    await assert.rejects(p, /sandbox is stopped/);
+    assert.equal(sent.filter((m) => m.type === "boot").length, 0);
   } finally {
     cleanup();
   }

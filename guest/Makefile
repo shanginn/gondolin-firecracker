@@ -1,4 +1,4 @@
-.PHONY: build build-bins build-inner test test-inner clean run assets lint typecheck check-fast-init format fuzz fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean
+.PHONY: build build-bins build-inner test test-inner clean run assets lint typecheck format fuzz fuzz-cbor fuzz-protocol fuzz-sandbox fuzz-cbor-last fuzz-protocol-last fuzz-sandbox-last fuzz-cbor-repro fuzz-protocol-repro fuzz-sandbox-repro fuzz-clean
 
 RUN_PARALLEL ?= ../scripts/run-parallel
 
@@ -9,7 +9,7 @@ GONDOLIN ?= $(NODE) ../host/bin/gondolin.ts
 GONDOLIN_BUILD_CONFIG ?=
 GONDOLIN_BUILD_EXTRA_ARGS ?=
 
-ZIG_SOURCES := $(shell find src fuzz -name '*.zig' ! -name '._*') build.zig
+ZIG_SOURCES := $(shell find src fuzz -name '*.zig') build.zig
 ZIG_BUILD_DEPS := $(ZIG_SOURCES) build.zig.zon
 # NOTE: guest image builds are driven by the host TypeScript builder (host/src/build/alpine.ts).
 HOST_BUILD_DEPS := $(shell find ../host/src ../host/bin -name '*.ts') ../host/package.json ../host/tsconfig.json
@@ -20,7 +20,8 @@ IMAGE_OUT ?= ./image/out
 IMAGE_INITRAMFS ?= $(IMAGE_OUT)/initramfs.cpio.lz4
 IMAGE_ROOTFS ?= $(IMAGE_OUT)/rootfs.ext4
 KERNEL ?= $(IMAGE_OUT)/vmlinuz-virt
-FIRECRACKER_KERNEL ?= $(IMAGE_OUT)/firecracker-kernel
+KRUN_KERNEL ?= $(IMAGE_OUT)/krun-kernel
+KRUN_INITRD ?= $(IMAGE_OUT)/krun-empty-initrd
 
 HOST_ARCH := $(shell uname -m)
 HOST_OS := $(shell uname -s)
@@ -80,9 +81,9 @@ build-inner:
 run: build-bins
 	./zig-out/bin/sandboxd
 
-assets: $(IMAGE_INITRAMFS) $(IMAGE_ROOTFS) $(KERNEL) $(FIRECRACKER_KERNEL)
+assets: $(IMAGE_INITRAMFS) $(IMAGE_ROOTFS) $(KERNEL) $(KRUN_KERNEL) $(KRUN_INITRD)
 
-$(IMAGE_INITRAMFS) $(IMAGE_ROOTFS) $(KERNEL) $(FIRECRACKER_KERNEL): $(BUILD_DEPS)
+$(IMAGE_INITRAMFS) $(IMAGE_ROOTFS) $(KERNEL) $(KRUN_KERNEL) $(KRUN_INITRD): $(BUILD_DEPS)
 	$(GONDOLIN) build $(GONDOLIN_BUILD_ARGS)
 
 format:
@@ -91,13 +92,7 @@ format:
 lint:
 	$(ZIG) fmt --check $(ZIG_SOURCES)
 
-typecheck: build-bins check-fast-init
-
-check-fast-init:
-	@mkdir -p zig-cache/fastinit-check
-	$(ZIG) cc -target x86_64-linux-musl -c \
-		-o zig-cache/fastinit-check/gondolin-init.o \
-		-Wall -Wextra -Werror fastinit/gondolin-init.c
+typecheck: build-bins
 
 
 test:

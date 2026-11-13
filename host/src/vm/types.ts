@@ -1,9 +1,11 @@
 import type { DebugLogFn } from "../debug.ts";
-import type { DnsOptions, HttpFetch, HttpHooks } from "../net/backend.ts";
+import type { NativeEngineOptions } from "../native/config.ts";
+import type { DnsOptions, HttpFetch, HttpHooks } from "../net/types.ts";
 import type { SshOptions } from "../net/ssh.ts";
 import type { TcpOptions } from "../net/tcp.ts";
 import type { RootfsMode } from "../build/config.ts";
 import type { SandboxServerOptions } from "../sandbox/server-options.ts";
+import type { GuestTmpfsMounts } from "../sandbox/tmpfs.ts";
 import type { VirtualProvider } from "../vfs/node/index.ts";
 import type { VfsHooks } from "../vfs/provider.ts";
 
@@ -26,16 +28,26 @@ export type VmRootfsOptions = {
 };
 
 export type VMOptions = {
+  /** how to reach gondolind (native engine): local binary, a command, a connection, remote mode */
+  native?: NativeEngineOptions;
+  /** host engine: `native` (the `gondolind` daemon, the only engine) or `auto` (the same; kept for compatibility); `"node"` was removed and throws */
+  engine?: "native" | "auto";
   /** sandbox controller options */
   sandbox?: SandboxServerOptions;
   /** rootfs mode override */
   rootfs?: VmRootfsOptions;
-  /** whether to boot the vm immediately (default: true) */
+  /** whether operations that need a running vm (`exec`, `vm.fs`, `enableSsh`, `enableIngress`) boot it on demand (default: true); with `false`, call `start()` first */
   autoStart?: boolean;
-  /** http fetch implementation for asset downloads */
+  /**
+   * Ignored: was the guest HTTP egress client of the removed node engine.
+   * Use `httpHooks.onRequest` (it may return a `Response`) to intercept or
+   * replace upstream requests.
+   * @deprecated
+   */
   fetch?: HttpFetch;
   /** http interception hooks */
   httpHooks?: HttpHooks;
+
   /** dns configuration */
   dns?: DnsOptions;
   /** ssh egress configuration */
@@ -46,16 +58,18 @@ export type VMOptions = {
   maxHttpBodyBytes?: number;
   /** max buffered upstream http response body size in `bytes` */
   maxHttpResponseBodyBytes?: number;
-  /** whether to allow WebSocket upgrades for guest egress */
+  /** whether to allow WebSocket upgrades for guest egress (default: true) */
   allowWebSockets?: boolean;
   /** vfs configuration (null disables vfs integration) */
   vfs?: VmVfsOptions | null;
   /** default environment variables */
   env?: EnvInput;
-  /** vm memory size (default: "84M") */
+  /** vm memory size (qemu syntax, default: "1G") */
   memory?: string;
-  /** vm cpu count (default: 1) */
+  /** vm cpu count (default: 2) */
   cpus?: number;
+  /** guest tmpfs mounts replacing the built-in set (`{}` keeps scratch paths on the root disk) */
+  tmpfs?: GuestTmpfsMounts;
   /** startup timeout while waiting for guest readiness in `ms` (`<= 0` disables timeout) */
   startTimeoutMs?: number;
   /** session label for `gondolin list` */

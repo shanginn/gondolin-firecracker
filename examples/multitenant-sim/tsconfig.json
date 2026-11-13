@@ -6,6 +6,7 @@
     "rootDir": ".",
     "outDir": "dist",
     "strict": true,
+    "types": ["node"],
     "erasableSyntaxOnly": true,
     "allowImportingTsExtensions": false,
     "rewriteRelativeImportExtensions": true,

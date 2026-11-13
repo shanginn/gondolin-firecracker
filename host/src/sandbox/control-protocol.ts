@@ -9,6 +9,7 @@
  * - exec { type: "exec", id, cmd, argv?, env?, cwd?, stdin?, pty? }
  * - stdin { type: "stdin", id, data?: base64 string, eof? }
  * - pty_resize { type: "pty_resize", id, rows, cols }
+ * - exec_signal { type: "exec_signal", id, signal } (Linux signal number)
  * - lifecycle { type: "lifecycle", action: "restart" | "shutdown" }
  * - snapshot { type: "snapshot", id, path }
  * - boot { type: "boot", fuseMount?, fuseBinds? }
@@ -16,6 +17,7 @@
  * Server → Client:
  * - status { type: "status", state: "starting" | "running" | "stopped" }
  * - exec_response { type: "exec_response", id, exit_code, signal? }
+ * - stdin_ack { type: "stdin_ack", id, bytes } (stdin bytes forwarded to the guest)
  * - snapshot_response { type: "snapshot_response", id, path, name }
  * - error { type: "error", id?, code, message }
  *
@@ -25,6 +27,10 @@
  * +---------+-----------+-------------------+
  * tag = 1 stdout, tag = 2 stderr, id big-endian.
  */
+
+/** VM lifecycle state */
+export type SandboxState = "starting" | "running" | "stopped";
+
 export type ExecCommandMessage = {
   type: "exec";
   /** request id */
@@ -52,8 +58,8 @@ export type StdinCommandMessage = {
   type: "stdin";
   /** request id */
   id: number;
-  /** stdin chunk as base64 */
-  data?: string;
+  /** stdin chunk as base64, or raw bytes from in-process clients */
+  data?: string | Buffer;
   /** whether this chunk closes stdin */
   eof?: boolean;
 };
@@ -68,6 +74,14 @@ export type PtyResizeCommandMessage = {
   cols: number;
 };
 
+export type ExecSignalCommandMessage = {
+  type: "exec_signal";
+  /** request id */
+  id: number;
+  /** Linux signal number (1-64) */
+  signal: number;
+};
+
 export type LifecycleCommandMessage = {
   type: "lifecycle";
   /** lifecycle action */
@@ -78,7 +92,7 @@ export type SnapshotCommandMessage = {
   type: "snapshot";
   /** request id */
   id: number;
-  /** absolute output path for the checkpoint `.raw` file */
+  /** absolute output path for the checkpoint `.qcow2` file */
   path: string;
 };
 
@@ -105,6 +119,7 @@ export type ClientMessage =
   | ExecCommandMessage
   | StdinCommandMessage
   | PtyResizeCommandMessage
+  | ExecSignalCommandMessage
   | ExecWindowCommandMessage
   | LifecycleCommandMessage
   | SnapshotCommandMessage;
@@ -117,6 +132,18 @@ export type ExecResponseMessage = {
   exit_code: number;
   /** termination signal (if any) */
   signal?: number;
+};
+
+/**
+ * Stdin bytes of an exec that left the server's queue towards the guest; the
+ * client keeps its unacknowledged stdin bounded with it (backpressure).
+ */
+export type StdinAckMessage = {
+  type: "stdin_ack";
+  /** request id */
+  id: number;
+  /** acknowledged stdin in `bytes` */
+  bytes: number;
 };
 
 export type ErrorMessage = {
@@ -133,7 +160,7 @@ export type SnapshotResponseMessage = {
   type: "snapshot_response";
   /** request id */
   id: number;
-  /** absolute path to the checkpoint `.raw` file */
+  /** absolute path to the checkpoint `.qcow2` file */
   path: string;
   /** snapshot name */
   name: string;
@@ -142,11 +169,12 @@ export type SnapshotResponseMessage = {
 export type StatusMessage = {
   type: "status";
   /** sandbox state */
-  state: "starting" | "running" | "stopped";
+  state: SandboxState;
 };
 
 export type ServerMessage =
   | ExecResponseMessage
+  | StdinAckMessage
   | ErrorMessage
   | SnapshotResponseMessage
   | StatusMessage;
@@ -154,7 +182,6 @@ export type ServerMessage =
 export type OutputStream = "stdout" | "stderr";
 
 const OUTPUT_HEADER_BYTES = 5;
-const OUTPUT_SINGLE_ALLOCATION_MAX_BYTES = 1024;
 
 export function encodeOutputFrame(
   id: number,
@@ -164,20 +191,10 @@ export function encodeOutputFrame(
   if (!Number.isInteger(id) || id < 0 || id > 0xffffffff) {
     throw new RangeError("id must be a uint32");
   }
-  // A single JS-side copy is faster for small output chunks; for larger chunks
-  // Node's native Buffer.concat path has better throughput.
-  if (data.length > OUTPUT_SINGLE_ALLOCATION_MAX_BYTES) {
-    const header = Buffer.alloc(OUTPUT_HEADER_BYTES);
-    header[0] = stream === "stdout" ? 1 : 2;
-    header.writeUInt32BE(id, 1);
-    return Buffer.concat([header, data]);
-  }
-
-  const frame = Buffer.allocUnsafe(OUTPUT_HEADER_BYTES + data.length);
-  frame[0] = stream === "stdout" ? 1 : 2;
-  frame.writeUInt32BE(id, 1);
-  frame.set(data, OUTPUT_HEADER_BYTES);
-  return frame;
+  const header = Buffer.alloc(OUTPUT_HEADER_BYTES);
+  header.writeUInt8(stream === "stdout" ? 1 : 2, 0);
+  header.writeUInt32BE(id, 1);
+  return Buffer.concat([header, data]);
 }
 
 export function decodeOutputFrame(frame: Buffer): {

@@ -1,6 +1,6 @@
-import fs from "fs";
-import os from "os";
-import path from "path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -169,7 +169,7 @@ if [ "$cmd" = "image" ]; then
   sub="\${2:-}"
   if [ "$sub" = "inspect" ]; then
     if [ -n "\${FAKE_REPO_DIGEST:-}" ]; then
-      printf "[\\\"%s\\\"]\\n" "$FAKE_REPO_DIGEST"
+      printf "[\\"%s\\"]\\n" "$FAKE_REPO_DIGEST"
     else
       printf "[]\\n"
     fi
@@ -205,7 +205,9 @@ test("oci rootfs: buildOciCreateArgs includes dummy command", () => {
 });
 
 test("oci rootfs: tar ownership parser preserves uid/gid metadata", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-oci-tar-owners-"));
+  const tmp = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-oci-tar-owners-"),
+  );
   const tarPath = path.join(tmp, "rootfs.tar");
 
   try {
@@ -464,5 +466,54 @@ test("oci rootfs: ensureRootfsShell accepts absolute /bin/sh symlink", () => {
     });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("syncKernelModules copies the overlay module when the kernel has one", () => {
+  const kernelVersion = "6.18.9-0-virt";
+  const setup = (withOverlay: boolean) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-modules-"));
+    const rootfsDir = path.join(tmp, "rootfs");
+    const initramfsDir = path.join(tmp, "initramfs");
+    const modules = path.join(rootfsDir, "lib", "modules", kernelVersion);
+    const files = [
+      "kernel/drivers/block/virtio_blk.ko",
+      "kernel/fs/ext4/ext4.ko",
+      "kernel/fs/jbd2/jbd2.ko",
+      ...(withOverlay ? ["kernel/fs/overlayfs/overlay.ko"] : []),
+    ];
+    for (const file of files) {
+      fs.mkdirSync(path.dirname(path.join(modules, file)), { recursive: true });
+      fs.writeFileSync(path.join(modules, file), "module");
+    }
+    fs.writeFileSync(
+      path.join(modules, "modules.dep"),
+      files
+        .map((f) =>
+          f.endsWith("ext4.ko") ? `${f}: kernel/fs/jbd2/jbd2.ko` : `${f}:`,
+        )
+        .join("\n"),
+    );
+    fs.mkdirSync(initramfsDir, { recursive: true });
+    return { tmp, rootfsDir, initramfsDir };
+  };
+  const copied = (initramfsDir: string, file: string) =>
+    fs.existsSync(
+      path.join(initramfsDir, "lib", "modules", kernelVersion, file),
+    );
+
+  for (const withOverlay of [true, false]) {
+    const { tmp, rootfsDir, initramfsDir } = setup(withOverlay);
+    try {
+      syncKernelModules(rootfsDir, initramfsDir, () => {});
+      assert.equal(copied(initramfsDir, "kernel/fs/ext4/ext4.ko"), true);
+      assert.equal(copied(initramfsDir, "kernel/fs/jbd2/jbd2.ko"), true);
+      assert.equal(
+        copied(initramfsDir, "kernel/fs/overlayfs/overlay.ko"),
+        withOverlay,
+      );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   }
 });

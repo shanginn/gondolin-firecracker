@@ -1,13 +1,12 @@
-import fs from "fs";
-import os from "os";
-import path from "path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildAssets } from "../src/build/index.ts";
 import type { BuildConfig } from "../src/build/config.ts";
-import { __test as containerTest } from "../src/build/container.ts";
 
 const SANDBOX_HELPER_NAMES = [
   "sandboxd",
@@ -15,29 +14,6 @@ const SANDBOX_HELPER_NAMES = [
   "sandboxssh",
   "sandboxingress",
 ] as const;
-
-test("builder: placeholder images skip the ext4 container toolchain", () => {
-  const base: BuildConfig = {
-    arch: "x86_64",
-    distro: "alpine",
-    alpine: { version: "3.23.0" },
-  };
-
-  assert.equal(
-    containerTest.resolveContainerBuildPackages(base).includes("e2fsprogs"),
-    true,
-  );
-  assert.equal(
-    containerTest
-      .resolveContainerBuildPackages({
-        ...base,
-        init: { initramfsRoot: true },
-        rootfs: { placeholder: true },
-      })
-      .includes("e2fsprogs"),
-    false,
-  );
-});
 
 function createSandboxHelpersDir(root: string): string {
   const helpersDir = path.join(root, "helpers");

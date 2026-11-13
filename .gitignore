@@ -1,4 +1,3 @@
-.husky/_
 .pi/todos
 .cache
 tmp/
@@ -8,6 +7,7 @@ guest/zig-cache/
 guest/zig-out/
 guest/.zig-cache/
 guest/image/out/
+guest/image/out-*/
 guest/image/.cache/
 guest/fuzz/out/
 guest/fuzz/out-native/
@@ -19,5 +19,5 @@ host/dist/
 host/var/
 host/fuzz/artifacts/
 
-# Zensical docs output
+# Docs output (make docs)
 site/

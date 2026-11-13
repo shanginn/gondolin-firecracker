@@ -86,17 +86,8 @@ test("assets: computeAssetBuildId is deterministic", () => {
       kernel: "a",
       initramfs: "b",
       rootfs: "c",
-      firecrackerKernel: "k1",
-      firecrackerInitrd: "i1",
-    },
-    arch: "aarch64",
-  });
-  const id5 = computeAssetBuildId({
-    checksums: {
-      kernel: "a",
-      initramfs: "b",
-      rootfs: "c",
-      vfkitKernel: "vk1",
+      krunKernel: "k1",
+      krunInitrd: "i1",
     },
     arch: "aarch64",
   });
@@ -104,7 +95,6 @@ test("assets: computeAssetBuildId is deterministic", () => {
   assert.equal(id1, id2);
   assert.notEqual(id1, id3);
   assert.notEqual(id1, id4);
-  assert.notEqual(id1, id5);
 });
 
 test("assets: loadGuestAssets uses manifest filenames and validates existence", () => {

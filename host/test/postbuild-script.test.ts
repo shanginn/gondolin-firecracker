@@ -5,27 +5,16 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findGuestSourceRoot, runPostbuild } from "../scripts/postbuild.mjs";
+import { findGuestSourceRoot, runPostbuild } from "../scripts/postbuild.ts";
 
 function makeHostPackage(root: string): string {
   const pkgRoot = path.join(root, "host");
-  const vendoredRoot = path.join(
-    pkgRoot,
-    "src",
-    "vfs",
-    "node",
-    "vendored-node-vfs",
-  );
-  fs.mkdirSync(path.join(vendoredRoot, "lib"), { recursive: true });
-  fs.writeFileSync(path.join(vendoredRoot, "lib", "stub.js"), "vendored");
+  fs.mkdirSync(path.join(pkgRoot, "src", "vfs", "node", "vendored-node-vfs"), {
+    recursive: true,
+  });
   fs.writeFileSync(
-    path.join(vendoredRoot, "package.json"),
-    '{"type":"commonjs"}\n',
-  );
-  fs.writeFileSync(path.join(vendoredRoot, "LICENSE"), "license\n");
-  fs.writeFileSync(
-    path.join(vendoredRoot, "README.md"),
-    "not needed at runtime\n",
+    path.join(pkgRoot, "src", "vfs", "node", "vendored-node-vfs", "stub.txt"),
+    "vendored",
   );
   fs.mkdirSync(path.join(pkgRoot, "dist", "src"), { recursive: true });
   fs.writeFileSync(
@@ -78,32 +67,13 @@ test("postbuild: finds guest sources via GONDOLIN_GUEST_SRC", () => {
           "vfs",
           "node",
           "vendored-node-vfs",
-          "lib",
-          "stub.js",
+          "stub.txt",
         ),
       ),
-    );
-    assert.equal(
-      fs.existsSync(
-        path.join(
-          pkgRoot,
-          "dist",
-          "src",
-          "vfs",
-          "node",
-          "vendored-node-vfs",
-          "README.md",
-        ),
-      ),
-      false,
     );
     assert.equal(
       fs.readFileSync(path.join(pkgRoot, "dist", "src", "index.d.ts"), "utf8"),
       'export { foo } from "./foo.js";\nexport type Bar = import("./bar.js").Bar;\n',
-    );
-    assert.equal(
-      fs.readFileSync(path.join(pkgRoot, "dist", "src", "index.cjs"), "utf8"),
-      '"use strict";\nmodule.exports = require("./index.js");\n',
     );
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

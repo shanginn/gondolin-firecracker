@@ -4,14 +4,15 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "gondolin": "pnpm --filter @earendil-works/gondolin gondolin",
-    "bash": "pnpm --filter @earendil-works/gondolin bash"
+    "bash": "pnpm --filter @earendil-works/gondolin bash",
+    "prepare:krun-runner-package": "node ./scripts/prepare-krun-runner-package.mjs"
   },
   "dependencies": {
     "@earendil-works/gondolin": "workspace:*"
   },
   "devDependencies": {
-    "prettier": "^3.8.1",
-    "typescript": "^5.7.3"
+    "@biomejs/biome": "2.5.15",
+    "typescript": "7.0.2"
   },
-  "packageManager": "pnpm@9.15.9"
+  "packageManager": "pnpm@12.8.1"
 }

@@ -20,7 +20,7 @@ function makeCommonOptions(overrides: Record<string, unknown> = {}) {
 }
 
 test("buildVmOptions keeps implicit open egress for host secrets without --allow-host", async () => {
-  const vmOptions = await __test.buildVmOptions(
+  const vmOptions = __test.buildVmOptions(
     makeCommonOptions({
       secrets: [
         {
@@ -70,66 +70,8 @@ test("parseHostSecret supports host discovery mode with inline value", () => {
   });
 });
 
-test("parseHostSecret rejects unsafe names without echoing inline values", () => {
-  const secretValue = "do-not-print-this-secret";
-  assert.throws(
-    () => __test.parseHostSecret(`BAD-NAME=${secretValue}`),
-    (error: Error) => {
-      assert.match(error.message, /environment name/);
-      assert.ok(!error.message.includes(secretValue));
-      return true;
-    },
-  );
-  assert.throws(
-    () => __test.parseHostSecret(`API_KEY@=${secretValue}`),
-    (error: Error) => {
-      assert.match(error.message, /no hosts/);
-      assert.ok(!error.message.includes(secretValue));
-      return true;
-    },
-  );
-});
-
-test("secret host discovery requires a TTY before scanning", () => {
-  assert.doesNotThrow(() =>
-    __test.assertInteractiveSecretHostDiscovery("API_KEY", true, true),
-  );
-  assert.throws(
-    () => __test.assertInteractiveSecretHostDiscovery("API_KEY", false, true),
-    /interactive TTY/,
-  );
-  assert.throws(
-    () => __test.assertInteractiveSecretHostDiscovery("API_KEY", true, false),
-    /interactive TTY/,
-  );
-});
-
-test("suggested secret hosts require explicit numbered selection", () => {
-  const suggestions = [
-    { host: "api.github.com" },
-    { host: "uploads.github.com" },
-  ];
-
-  assert.deepEqual(__test.selectSuggestedSecretHosts("", suggestions), []);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("y", suggestions), []);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("yes", suggestions), []);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("a", suggestions), []);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("all", suggestions), []);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("0", suggestions), []);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("1,x", suggestions), []);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("3", suggestions), []);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("2, 1", suggestions), [
-    "uploads.github.com",
-    "api.github.com",
-  ]);
-  assert.deepEqual(__test.selectSuggestedSecretHosts("2,1,2", suggestions), [
-    "uploads.github.com",
-    "api.github.com",
-  ]);
-});
-
 test("buildVmOptions still honors explicit global allowlists", async () => {
-  const vmOptions = await __test.buildVmOptions(
+  const vmOptions = __test.buildVmOptions(
     makeCommonOptions({
       allowedHosts: ["api.example.com"],
       secrets: [

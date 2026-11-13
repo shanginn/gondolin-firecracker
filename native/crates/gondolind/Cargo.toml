@@ -1,0 +1,34 @@
+[package]
+name = "gondolind"
+description = "Gondolin's native host engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gondolin-wire.workspace = true
+gondolin-log.workspace = true
+gondolin-qcow2.workspace = true
+gondolin-proto.workspace = true
+gondolin-assets.workspace = true
+gondolin-vfs.workspace = true
+gondolin-virtiofs = { path = "../gondolin-virtiofs" }
+gondolin-netstack.workspace = true
+gondolin-egress.workspace = true
+gondolin-sshproxy.workspace = true
+gondolin-hooks-djs = { workspace = true, optional = true }
+bytes.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+libc = "0.2"
+ring = "0.17"
+
+[features]
+default = ["djs-hooks"]
+# tier-2 hooks (`configure.net.djs_hooks`) on djs
+djs-hooks = ["dep:gondolin-hooks-djs"]
+
+[dev-dependencies]
+# gzip writer for the kernel decompression test
+flate2 = "1"
+tokio = { workspace = true, features = ["macros", "rt", "io-std", "process"] }

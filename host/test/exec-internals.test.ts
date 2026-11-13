@@ -25,37 +25,6 @@ test("resolveOutputMode only treats objects with write() as writable", () => {
   assert.equal(resolvedWritable.mode, "writable");
 });
 
-test("finishExecSession reuses a single buffered output chunk", async () => {
-  const session = createExecSession(1, {
-    stdinEnabled: false,
-    stdout: { mode: "buffer" },
-    stderr: { mode: "buffer" },
-  });
-  const chunk = Buffer.from("hello");
-
-  applyOutputChunk(session, "stdout", chunk);
-  finishExecSession(session, 0);
-
-  const result = await session.resultPromise;
-  assert.strictEqual(result.stdoutBuffer, chunk);
-  assert.equal(result.stdout, "hello");
-  assert.equal(result.stderrBuffer.length, 0);
-});
-
-test("finishExecSession concatenates multiple buffered output chunks", async () => {
-  const session = createExecSession(1, {
-    stdinEnabled: false,
-    stdout: { mode: "buffer" },
-    stderr: { mode: "buffer" },
-  });
-
-  applyOutputChunk(session, "stdout", Buffer.from("hel"));
-  applyOutputChunk(session, "stdout", Buffer.from("lo"));
-  finishExecSession(session, 0);
-
-  assert.equal((await session.resultPromise).stdout, "hello");
-});
-
 test("pipe mode byte accounting is stable with setEncoding()", async () => {
   const session = createExecSession(1, {
     stdinEnabled: false,

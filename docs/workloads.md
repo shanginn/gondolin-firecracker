@@ -15,20 +15,19 @@ The primary workload Gondolin targets is an agent that:
 
 Most agent turns produce artifacts on disk (code, config files, logs) and
 little in-memory state worth keeping.  Gondolin leans into this: disk
-checkpoints are the durable persistence path, while Firecracker VM-state
-snapshots are a fast same-host restore path for idle VMs.  See
-[Snapshots](./snapshots.md) for details.
+snapshots are supported, but full VM save/restore (RAM + process state) is
+not.  See [Persistence and Snapshots](./snapshots.md) for details.
 
 ## Treat VMs as Disposable
 
 Design your workloads so that throwing away a VM is always safe.  This means:
 
 - **Write durable state to VFS mounts.**  The root filesystem is ephemeral by
-  default.  Use a [VFS provider](./vfs.md) (e.g. `MemoryProvider`,
-  `RealFSProvider`) mounted at a known path like `/workspace` to store files
+  default.  Use a [mount](./vfs.md) (e.g. `RealFSProvider`,
+  `MemoryProvider`) mounted at a known path like `/workspace` to store files
   you care about.
-- **Don't rely on long-running background processes.**  Disk checkpoints do not
-  capture RAM, and VM-state snapshots are only a same-host idle boundary.
+- **Don't rely on long-running background processes.**  There is no mechanism
+  to reconnect to a process inside a discarded VM.
 - **Expect re-creation, not resumption.**  While disk checkpoints let you
   capture and restore root-disk state, resuming requires the same kernel and
   rootfs assets.  Over time, as you update guest images, old checkpoints may
@@ -39,8 +38,8 @@ Design your workloads so that throwing away a VM is always safe.  This means:
 
 | Location | Backing | Survives VM close? | In disk checkpoints? |
 |---|---|---|---|
-| Most of `/` (rootfs) | raw disk | No | Yes |
-| `/root`, `/tmp`, `/run`, `/var/log`, `/var/tmp`, `/var/cache` | tmpfs | No | No |
+| Most of `/` (rootfs) | qcow2 overlay | No | Yes |
+| `/root`, `/tmp`, `/run`, `/var/log`, `/var/tmp`, `/var/cache` | tmpfs (configurable via `tmpfs`, except `/run`) | No | No (unless moved to the root disk) |
 | VFS-mounted paths (e.g. `/workspace`) | Host provider | Yes (provider-dependent) | No |
 
 The key takeaway: if you need data to survive, write it to a VFS mount or
@@ -58,7 +57,7 @@ in keeping a VM alive across long idle periods:
 
 - **Cold starts are fast.**  Gondolin VMs boot in under a second, so
   recreating a VM is cheap.
-- **Idle VMs waste resources.**  A parked Firecracker VM still holds memory.
+- **Idle VMs waste resources.**  A parked VM still holds host memory.
 - **LLM context resets anyway.**  If your model's context window or cache
   has gone cold (e.g. after minutes of inactivity), you are effectively
   starting fresh regardless.  Aligning VM lifecycle with context lifecycle
@@ -66,18 +65,3 @@ in keeping a VM alive across long idle periods:
 
 A reasonable default: spin up a VM at the start of a task, run all the
 commands the agent needs, persist results, and tear it down.
-
-## Pi Agent Extension
-
-`host/examples/pi-gondolin.ts` is a Pi extension that runs read, write, edit,
-bash, and user `!` commands inside one Gondolin VM with the host project mounted
-at `/workspace`.
-
-```bash
-cd /path/to/project
-pi -e /absolute/path/to/gondolin/host/examples/pi-gondolin.ts
-```
-
-Bash environment forwarding is denied by default. Set
-`GONDOLIN_PI_ENV_ALLOW=NAME,NAME` when a specific non-secret variable must be
-passed into the guest.

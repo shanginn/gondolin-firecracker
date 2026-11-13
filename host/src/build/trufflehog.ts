@@ -1,16 +1,12 @@
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { randomUUID } from "crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { extractTarGz } from "../alpine/tar.ts";
-import {
-  cacheBaseDir,
-  computeFileHash,
-  downloadToBuffer,
-  fetchCachedJsonRegistry,
-  normalizeSha256,
-} from "./helpers.ts";
+import { cacheBaseDir, computeFileHash, downloadToBuffer } from "./helpers.ts";
+
+import { fetchCachedJsonRegistry, normalizeSha256 } from "../registry.ts";
 
 const TRUFFLEHOG_REGISTRY_SCHEMA = 1 as const;
 const DEFAULT_TRUFFLEHOG_REF = "trufflehog:3.95.9";

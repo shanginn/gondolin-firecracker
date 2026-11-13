@@ -52,7 +52,7 @@ export function parseIPv6Hextets(ip: string): number[] | null {
 
   const parts = normalized.split(":");
   const expanded = expandIpv6Parts(parts);
-  if (!expanded || expanded.length !== 8) return null;
+  if (expanded?.length !== 8) return null;
   return expanded;
 }
 
@@ -76,30 +76,87 @@ function expandIpv6Parts(parts: string[]): number[] | null {
   return expanded;
 }
 
-function ipv6HextetsToBytes(hextets: number[]): Buffer | null {
-  if (hextets.length !== 8) return null;
-  const buf = Buffer.alloc(16);
-  for (let i = 0; i < 8; i++) {
-    buf.writeUInt16BE(hextets[i]!, i * 2);
+/** Whether an ip address is in a loopback, private, link-local or otherwise internal range */
+export function isInternalIpAddress(ip: string): boolean {
+  const family = net.isIP(ip);
+  if (family === 4) return isInternalIPv4(ip);
+  if (family === 6) return isInternalIPv6(ip);
+  return false;
+}
+
+function isInternalIPv4(ip: string): boolean {
+  const octets = ip.split(".").map((part) => Number(part));
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part))) {
+    return false;
   }
-  return buf;
+
+  const [a, b] = octets;
+  if (a === 0) return true;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 255) return true;
+  return false;
 }
 
-export function parseIPv6Bytes(ip: string): Buffer | null {
+function hextetsToIPv4(hi: number, lo: number): string {
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+}
+
+/**
+ * IPv4 addresses embedded in IPv6 transition formats (NAT64 RFC 6052, 6to4,
+ * Teredo, IPv4-mapped/-compatible): a destination like `64:ff9b::127.0.0.1`
+ * reaches the embedded address through a translator.
+ */
+export function embeddedIPv4Addresses(hextets: number[]): string[] {
+  if (hextets.length !== 8) return [];
+  const h = hextets;
+  const b: number[] = [];
+  for (const x of h) b.push(x >> 8, x & 0xff);
+  const out: string[] = [];
+  // IPv4-mapped ::ffff:a.b.c.d and IPv4-compatible ::a.b.c.d
+  if (h.slice(0, 5).every((x) => x === 0) && (h[5] === 0xffff || h[5] === 0)) {
+    out.push(hextetsToIPv4(h[6]!, h[7]!));
+  }
+  // NAT64 well-known prefix 64:ff9b::/96
+  if (h[0] === 0x64 && h[1] === 0xff9b && h.slice(2, 6).every((x) => x === 0)) {
+    out.push(hextetsToIPv4(h[6]!, h[7]!));
+  }
+  // NAT64 local-use prefix 64:ff9b:1::/48: the embedding depends on the
+  // network's prefix length (/48../96, RFC 6052), so every candidate counts;
+  // the zero candidates make this fail closed for the whole prefix
+  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) {
+    out.push(`${b[6]}.${b[7]}.${b[9]}.${b[10]}`); // /48 (bits 64..71: "u" octet)
+    out.push(`${b[7]}.${b[9]}.${b[10]}.${b[11]}`); // /56
+    out.push(`${b[9]}.${b[10]}.${b[11]}.${b[12]}`); // /64
+    out.push(hextetsToIPv4(h[6]!, h[7]!)); // /96
+  }
+  // 6to4 2002:a.b.c.d::/48
+  if (h[0] === 0x2002) {
+    out.push(hextetsToIPv4(h[1]!, h[2]!));
+  }
+  // Teredo 2001:0::/32: server address and the obfuscated client address
+  if (h[0] === 0x2001 && h[1] === 0) {
+    out.push(hextetsToIPv4(h[2]!, h[3]!));
+    out.push(hextetsToIPv4(~h[6]! & 0xffff, ~h[7]! & 0xffff));
+  }
+  return out;
+}
+
+function isInternalIPv6(ip: string): boolean {
   const hextets = parseIPv6Hextets(ip);
-  if (!hextets) return null;
-  return ipv6HextetsToBytes(hextets);
-}
+  if (!hextets) return false;
 
-/** Extract an IPv4 address from an IPv4-mapped IPv6 address (e.g. ::ffff:1.2.3.4) */
-export function extractIPv4Mapped(hextets: number[]): string | null {
-  if (hextets.length !== 8) return null;
-  const prefixZero = hextets.slice(0, 5).every((value) => value === 0);
-  if (!prefixZero || hextets[5] !== 0xffff) return null;
+  const isAllZero = hextets.every((value) => value === 0);
+  const isLoopback =
+    hextets.slice(0, 7).every((value) => value === 0) && hextets[7] === 1;
+  if (isAllZero || isLoopback) return true;
 
-  const a = hextets[6]! >> 8;
-  const b = hextets[6]! & 0xff;
-  const c = hextets[7]! >> 8;
-  const d = hextets[7]! & 0xff;
-  return `${a}.${b}.${c}.${d}`;
+  if ((hextets[0]! & 0xfe00) === 0xfc00) return true;
+  if ((hextets[0]! & 0xffc0) === 0xfe80) return true;
+
+  return embeddedIPv4Addresses(hextets).some(isInternalIPv4);
 }

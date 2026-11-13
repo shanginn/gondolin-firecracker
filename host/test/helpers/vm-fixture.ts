@@ -1,17 +1,37 @@
-import fs from "fs";
-import { execFileSync } from "child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { VM, type VMOptions } from "../../src/vm/core.ts";
 
-/** Check whether Linux KVM is available for Firecracker. */
+/**
+ * Check if hardware virtualization is available.
+ * On Linux, this checks for KVM. On macOS, HVF is always available.
+ * Returns false for other platforms or when acceleration is unavailable.
+ */
 export function hasHardwareAccel(): boolean {
-  if (process.platform !== "linux") return false;
-  try {
-    fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK);
-    return true;
-  } catch {
-    return false;
+  if (process.platform === "darwin") {
+    return true; // HVF is always available on macOS
   }
+  if (process.platform === "linux") {
+    try {
+      fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Skip reason for a test of `feature` when the suite runs on Firecracker
+ * (`GONDOLIN_VMM=firecracker`), which does not support it; `false` otherwise.
+ */
+export function skipOnFirecracker(feature: string): string | false {
+  return process.env.GONDOLIN_VMM?.trim() === "firecracker"
+    ? `vmm=firecracker does not support ${feature}`
+    : false;
 }
 
 /**
@@ -19,16 +39,25 @@ export function hasHardwareAccel(): boolean {
  * Can be overridden by setting GONDOLIN_FORCE_VM_TESTS=1.
  */
 export function shouldSkipVmTests(): boolean {
+  if (process.env.GONDOLIN_SKIP_VM_TESTS === "1") return true;
   if (process.env.GONDOLIN_FORCE_VM_TESTS === "1") {
     return false;
   }
   return !hasHardwareAccel();
 }
 
-/** Resolve a runnable Firecracker binary path for integration tests. */
-export function resolveFirecrackerPath(): string | null {
-  const envPath = process.env.GONDOLIN_FIRECRACKER?.trim();
-  const candidates = [envPath, "firecracker"];
+/** Resolve a runnable krun helper binary path for integration tests. */
+export function resolveKrunRunnerPath(): string | null {
+  const envPath = process.env.GONDOLIN_KRUN_RUNNER?.trim();
+  const localRunnerPath = path.resolve(
+    process.cwd(),
+    "krun-runner",
+    "zig-out",
+    "bin",
+    "gondolin-krun-runner",
+  );
+
+  const candidates = [envPath, localRunnerPath, "gondolin-krun-runner"];
   for (const candidate of candidates) {
     if (!candidate) continue;
     try {
@@ -42,46 +71,43 @@ export function resolveFirecrackerPath(): string | null {
   return null;
 }
 
-/** Return a skip reason for Firecracker VM integration tests or false when runnable. */
-export function shouldSkipFirecrackerVmTests(): string | false {
-  if (process.platform !== "linux") {
-    return "Firecracker requires Linux/KVM";
-  }
+/** Return a skip reason for krun VM integration tests or false when runnable. */
+export function shouldSkipKrunVmTests(): string | false {
   if (shouldSkipVmTests()) {
     return "hardware virtualization unavailable";
   }
 
-  const firecrackerPath = resolveFirecrackerPath();
-  if (!firecrackerPath) {
-    return "Firecracker binary unavailable (install firecracker or set GONDOLIN_FIRECRACKER)";
+  const runnerPath = resolveKrunRunnerPath();
+  if (!runnerPath) {
+    return "krun runner unavailable (build host/krun-runner or set GONDOLIN_KRUN_RUNNER)";
   }
 
   return false;
 }
 
-let firecrackerRuntimeSkipCheck: Promise<string | false> | null = null;
+let krunRuntimeSkipCheck: Promise<string | false> | null = null;
 
-const firecrackerPrecheckTimeoutMs = Math.max(
+const krunPrecheckTimeoutMs = Math.max(
   1,
-  Number(process.env.GONDOLIN_FIRECRACKER_PRECHECK_TIMEOUT_MS ?? 30000),
+  Number(process.env.GONDOLIN_KRUN_PRECHECK_TIMEOUT_MS ?? 30000),
 );
 
-/** Probe whether Firecracker can actually boot/exec on this host. */
-export async function getFirecrackerRuntimeSkipReason(): Promise<string | false> {
-  const staticReason = shouldSkipFirecrackerVmTests();
+/** Probe whether krun can actually boot/exec on this host. */
+export async function getKrunRuntimeSkipReason(): Promise<string | false> {
+  const staticReason = shouldSkipKrunVmTests();
   if (staticReason) {
     return staticReason;
   }
 
-  if (!firecrackerRuntimeSkipCheck) {
-    firecrackerRuntimeSkipCheck = (async () => {
+  if (!krunRuntimeSkipCheck) {
+    krunRuntimeSkipCheck = (async () => {
       let vm: VM | null = null;
       try {
         vm = await VM.create({
-          startTimeoutMs: firecrackerPrecheckTimeoutMs,
+          startTimeoutMs: krunPrecheckTimeoutMs,
           sandbox: {
-            firecrackerPath: resolveFirecrackerPath() ?? undefined,
-            netEnabled: false,
+            vmm: "krun",
+            krunRunnerPath: resolveKrunRunnerPath() ?? undefined,
             console: "none",
           },
         });
@@ -89,12 +115,12 @@ export async function getFirecrackerRuntimeSkipReason(): Promise<string | false>
         await vm.start();
         const probe = await vm.exec(["/bin/sh", "-lc", "echo preflight-ok"]);
         if (probe.exitCode !== 0) {
-          return `Firecracker runtime preflight exec failed (exit ${probe.exitCode})`;
+          return `krun runtime preflight exec failed (exit ${probe.exitCode})`;
         }
         return false;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return `Firecracker runtime unavailable: ${message}`;
+        return `krun runtime unavailable: ${message}`;
       } finally {
         if (vm) {
           await closeWithTimeout(vm);
@@ -103,7 +129,7 @@ export async function getFirecrackerRuntimeSkipReason(): Promise<string | false>
     })();
   }
 
-  return await firecrackerRuntimeSkipCheck;
+  return await krunRuntimeSkipCheck;
 }
 
 class Semaphore {
@@ -155,7 +181,18 @@ async function getEntry(key: string, options: VMOptions): Promise<VmEntry> {
 
   const created = (async () => {
     try {
-      const vm = await VM.create(options);
+      // Upstream integration scenarios assume writable roots and networking.
+      // Keep those explicit without changing this fork's production defaults.
+      const vm = await VM.create(
+        process.env.GONDOLIN_VMM === "firecracker"
+          ? {
+              memory: "1G",
+              ...options,
+              rootfs: { mode: "memory", ...options.rootfs },
+              sandbox: { netEnabled: true, ...options.sandbox },
+            }
+          : options,
+      );
       const entry = { vm, semaphore: new Semaphore(1) };
       pool.set(key, entry);
       return entry;
@@ -208,7 +245,7 @@ export async function closeVm(key: string): Promise<void> {
     return;
   }
 
-  // VM.create() may still be in-flight (e.g. booting). Wait briefly for
+  // VM.create() may still be in-flight (e.g. QEMU booting).  Wait briefly for
   // it to resolve so we can close the underlying process; otherwise the child
   // keeps node alive forever.
   const inflight = pending.get(key);
@@ -237,11 +274,12 @@ export async function closeVm(key: string): Promise<void> {
 
 /**
  * Schedule a hard process.exit() as a safety net.  If vm.close() fails to
- * kill the Firecracker child, the orphaned process keeps node alive via its
- * stdio pipes. Calling process.exit() triggers process exit cleanup.
+ * kill the QEMU child, the orphaned process keeps node alive via its stdio
+ * pipes.  Calling process.exit() triggers the "exit" hook in
+ * sandbox-controller which SIGKILLs all tracked children.
  *
  * The timer is unref'd so it does not *itself* keep node alive — it only
- * fires when something else is holding the event loop open.
+ * fires when something else (the QEMU pipe) is holding the event loop open.
  *
  * Each call refreshes the deadline so early-finishing files don't force-exit
  * while later tests are still running.

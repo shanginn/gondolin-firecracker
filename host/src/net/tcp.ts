@@ -1,6 +1,11 @@
-import net from "net";
+/**
+ * `tcp.hosts` mappings: validation and normalization of guest host[:port] ->
+ * upstream host:port rules (served by the daemon).
+ */
 
-import type { DnsMode, SyntheticDnsHostMappingMode } from "./contracts.ts";
+import net from "node:net";
+
+import type { DnsMode, SyntheticDnsHostMappingMode } from "./types.ts";
 
 export type TcpOptions = {
   /** guest host[:port] -> upstream host:port mappings */
@@ -19,7 +24,7 @@ export type TcpMappedTarget = {
 };
 
 /** @internal */
-export type MediatedTcpInternals = {
+export type TcpMappings = {
   /** whether mapped tcp egress is enabled */
   enabled: boolean;
   /** normalized mapping rules */
@@ -138,9 +143,7 @@ function parseMappingTarget(raw: string): ParsedHostPort {
 }
 
 /** @internal */
-export function createMediatedTcpInternals(
-  options?: TcpOptions,
-): MediatedTcpInternals {
+export function createTcpMappings(options?: TcpOptions): TcpMappings {
   const byHostPort = new Map<string, TcpMappedTarget>();
   const byHost = new Map<string, TcpMappedTarget>();
   const rules: TcpMappedTarget[] = [];
@@ -184,7 +187,7 @@ export function createMediatedTcpInternals(
 
 /** @internal */
 export function assertTcpDnsConfig(options: {
-  tcp: MediatedTcpInternals;
+  tcp: TcpMappings;
   dnsMode: DnsMode;
   syntheticHostMapping: SyntheticDnsHostMappingMode;
 }) {
@@ -200,21 +203,4 @@ export function assertTcpDnsConfig(options: {
       "tcp host mapping requires dns syntheticHostMapping='per-host'",
     );
   }
-}
-
-/** @internal */
-export function resolveMappedTcpTarget(
-  tcp: MediatedTcpInternals,
-  hostname: string | null,
-  dstPort: number,
-): TcpMappedTarget | null {
-  if (!tcp.enabled || !hostname) return null;
-
-  const normalizedHost = normalizeHost(hostname);
-  if (!normalizedHost) return null;
-
-  const exact = tcp.byHostPort.get(`${normalizedHost}:${dstPort}`);
-  if (exact) return exact;
-
-  return tcp.byHost.get(normalizedHost) ?? null;
 }

@@ -14,7 +14,15 @@ if [ ! -c "\${CONSOLE}" ]; then
   fi
 fi
 
+# set from /proc/cmdline: \`quiet\` drops the log, which otherwise goes to the
+# serial console (each byte traps to the VMM; the device listings alone cost
+# ~50 ms per boot on a slow emulated serial console)
+gondolin_quiet=0
+
 log() {
+  if [ "\${gondolin_quiet}" = 1 ]; then
+    return 0
+  fi
   if [ -n "\${CONSOLE}" ]; then
     printf "%s\\n" "$*" > "\${CONSOLE}" 2>/dev/null || printf "%s\\n" "$*"
   else
@@ -22,7 +30,12 @@ log() {
   fi
 }
 
+# runs a command, its output going where log() writes
 log_cmd() {
+  if [ "\${gondolin_quiet}" = 1 ]; then
+    "$@" > /dev/null 2>&1 || true
+    return 0
+  fi
   if [ -n "\${CONSOLE}" ]; then
     "$@" > "\${CONSOLE}" 2>&1 || "$@" || true
   else
@@ -90,7 +103,59 @@ resolve_virtio_port_path() {
   printf "%s\n" "/dev/virtio-ports/\${expected}"
 }
 
+setup_mitm_ca() {
+  system_ca_bundle=""
+  for candidate in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/pki/tls/certs/ca-bundle.crt; do
+    if [ -r "\${candidate}" ]; then
+      system_ca_bundle="\${candidate}"
+      break
+    fi
+  done
+
+  mitm_ca_cert="/etc/gondolin/mitm/ca.crt"
+  if [ ! -r "\${mitm_ca_cert}" ]; then
+    if [ -n "\${system_ca_bundle}" ]; then
+      export SSL_CERT_FILE="\${system_ca_bundle}"
+    fi
+    return
+  fi
+
+  mitm_ca_install="/usr/local/share/ca-certificates/gondolin-mitm-ca.crt"
+  if mkdir -p /usr/local/share/ca-certificates 2>/dev/null; then
+    if cp "\${mitm_ca_cert}" "\${mitm_ca_install}" 2>/dev/null; then
+      if command -v update-ca-certificates > /dev/null 2>&1; then
+        if update-ca-certificates > /dev/null 2>&1; then
+          if [ -r /etc/ssl/certs/ca-certificates.crt ]; then
+            system_ca_bundle="/etc/ssl/certs/ca-certificates.crt"
+          fi
+        else
+          log "[init] update-ca-certificates failed"
+        fi
+      fi
+    fi
+  fi
+
+  runtime_ca_bundle="/run/gondolin/ca-certificates.crt"
+  mkdir -p /run/gondolin
+  : > "\${runtime_ca_bundle}"
+
+  if [ -n "\${system_ca_bundle}" ] && [ -r "\${system_ca_bundle}" ]; then
+    cat "\${system_ca_bundle}" >> "\${runtime_ca_bundle}" 2>/dev/null || true
+  fi
+
+  printf "\\n" >> "\${runtime_ca_bundle}"
+  cat "\${mitm_ca_cert}" >> "\${runtime_ca_bundle}" 2>/dev/null || true
+
+  export SSL_CERT_FILE="\${runtime_ca_bundle}"
+  export CURL_CA_BUNDLE="\${runtime_ca_bundle}"
+  export REQUESTS_CA_BUNDLE="\${runtime_ca_bundle}"
+  export NODE_EXTRA_CA_CERTS="\${mitm_ca_cert}"
+}
+
 mount -t proc proc /proc || log "[init] mount proc failed"
+case " $(cat /proc/cmdline 2>/dev/null || true) " in
+  *" quiet "*) gondolin_quiet=1 ;;
+esac
 mount -t sysfs sysfs /sys || log "[init] mount sysfs failed"
 mount -t devtmpfs devtmpfs /dev || log "[init] mount devtmpfs failed"
 
@@ -98,72 +163,117 @@ mkdir -p /dev/pts /dev/shm /run
 mount -t devpts devpts /dev/pts || log "[init] mount devpts failed"
 mount -t tmpfs tmpfs /run || log "[init] mount tmpfs failed"
 
+# Standard /dev symlinks (needed for bash process substitution, /dev/stdin, ...)
+for dev_link in fd:/proc/self/fd stdin:/proc/self/fd/0 stdout:/proc/self/fd/1 stderr:/proc/self/fd/2; do
+  dev_name="/dev/\${dev_link%%:*}"
+  if [ ! -e "\${dev_name}" ] && [ ! -L "\${dev_name}" ]; then
+    ln -s "\${dev_link#*:}" "\${dev_name}" 2>/dev/null || log "[init] symlink \${dev_name} failed"
+  fi
+done
+
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-
-mkdir -p /tmp /var/tmp /var/cache /var/log /root /home
-mount -t tmpfs tmpfs /tmp || log "[init] mount tmpfs /tmp failed"
-mount -t tmpfs tmpfs /root || log "[init] mount tmpfs /root failed"
-chmod 700 /root || true
-mount -t tmpfs tmpfs /var/tmp || log "[init] mount tmpfs /var/tmp failed"
-mount -t tmpfs tmpfs /var/cache || log "[init] mount tmpfs /var/cache failed"
-mount -t tmpfs tmpfs /var/log || log "[init] mount tmpfs /var/log failed"
-
-mkdir -p /tmp/.cache /tmp/.config /tmp/.local/share
-
-export HOME=/root
-export TMPDIR=/tmp
-export XDG_CACHE_HOME=/tmp/.cache
-export XDG_CONFIG_HOME=/tmp/.config
-export XDG_DATA_HOME=/tmp/.local/share
-export UV_CACHE_DIR=/tmp/.cache/uv
-export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-export UV_SYSTEM_CERTS=true
 
 sandboxfs_mount="/data"
 sandboxfs_binds=""
-gondolin_transport="virtio"
-gondolin_net="on"
-gondolin_debug="1"
-vsock_control_port="1024"
-vsock_fs_port="1025"
-vsock_ssh_port="1026"
-vsock_ingress_port="1027"
+# virtio-fs tag offered by the host (empty: sandboxfs over virtio-serial)
+sandboxfs_virtiofs=""
+# scratch tmpfs mounts: "/path[:opt=value...][,/path...]" or "none"
+gondolin_tmpfs="/root:mode=0700,/tmp,/var/cache,/var/log,/var/tmp"
+# static network configuration from the host, instead of DHCP:
+# "ADDRESS/PREFIX,GATEWAY,DNS[+DNS...]" (gondolin.net)
+gondolin_net=""
+# host channels over vsock instead of virtio-serial (gondolin.vsock)
+gondolin_vsock=0
 
 if [ -r /proc/cmdline ]; then
-  for arg in \$(cat /proc/cmdline); do
+  for arg in $(cat /proc/cmdline); do
     case "\${arg}" in
-      gondolin.transport=*)
-        gondolin_transport="\${arg#gondolin.transport=}"
-        ;;
-      gondolin.net=*)
-        gondolin_net="\${arg#gondolin.net=}"
-        ;;
-      gondolin.debug=*)
-        gondolin_debug="\${arg#gondolin.debug=}"
-        ;;
-      gondolin.vsock.control=*)
-        vsock_control_port="\${arg#gondolin.vsock.control=}"
-        ;;
-      gondolin.vsock.fs=*)
-        vsock_fs_port="\${arg#gondolin.vsock.fs=}"
-        ;;
-      gondolin.vsock.ssh=*)
-        vsock_ssh_port="\${arg#gondolin.vsock.ssh=}"
-        ;;
-      gondolin.vsock.ingress=*)
-        vsock_ingress_port="\${arg#gondolin.vsock.ingress=}"
-        ;;
       sandboxfs.mount=*)
         sandboxfs_mount="\${arg#sandboxfs.mount=}"
         ;;
       sandboxfs.bind=*)
         sandboxfs_binds="\${arg#sandboxfs.bind=}"
         ;;
+      sandboxfs.virtiofs=*)
+        sandboxfs_virtiofs="\${arg#sandboxfs.virtiofs=}"
+        ;;
+      gondolin.tmpfs=*)
+        gondolin_tmpfs="\${arg#gondolin.tmpfs=}"
+        ;;
+      gondolin.net=*)
+        gondolin_net="\${arg#gondolin.net=}"
+        ;;
+      gondolin.vsock)
+        gondolin_vsock=1
+        ;;
+      gondolin.vsock=*)
+        case "$(printf "%s" "\${arg#gondolin.vsock=}" | tr "A-Z" "a-z")" in
+          0|off|false|no) gondolin_vsock=0 ;;
+          *) gondolin_vsock=1 ;;
+        esac
+        ;;
     esac
   done
 fi
 
-if [ "\${gondolin_debug}" = "1" ]; then
+mount_tmpfs_entry() {
+  tmpfs_path="\${1%%:*}"
+  tmpfs_opts=""
+  if [ "\${tmpfs_path}" != "$1" ]; then
+    tmpfs_opts="$(printf "%s" "\${1#*:}" | tr ':' ',')"
+  fi
+  case "\${tmpfs_path}" in
+    /?*) ;;
+    *)
+      log "[init] ignoring invalid tmpfs entry $1"
+      return 0
+      ;;
+  esac
+  mkdir -p "\${tmpfs_path}" 2>/dev/null || true
+  if [ -n "\${tmpfs_opts}" ]; then
+    mount -t tmpfs -o "\${tmpfs_opts}" tmpfs "\${tmpfs_path}" || log "[init] mount tmpfs \${tmpfs_path} failed"
+  else
+    mount -t tmpfs tmpfs "\${tmpfs_path}" || log "[init] mount tmpfs \${tmpfs_path} failed"
+  fi
+}
+
+mkdir -p /tmp /home 2>/dev/null || true
+if [ "\${gondolin_tmpfs}" != "none" ]; then
+  for tmpfs_entry in $(printf "%s" "\${gondolin_tmpfs}" | tr ',' ' '); do
+    mount_tmpfs_entry "\${tmpfs_entry}"
+  done
+fi
+
+export HOME=/root
+export TMPDIR=/tmp
+export UV_SYSTEM_CERTS=true
+
+# rootfs.mode "readonly": nothing can be created on the root filesystem, so
+# mount points must come with the image and the resolver configuration lives
+# on /run (images built by gondolin link /etc/resolv.conf there)
+root_ro=0
+if ! touch /.gondolin-rw-check 2> /dev/null; then
+  root_ro=1
+  log "[init] root filesystem is read-only"
+else
+  rm -f /.gondolin-rw-check
+fi
+if [ "\${root_ro}" = 1 ] && [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
+  : > /run/resolv.conf
+  mount --bind /run/resolv.conf /etc/resolv.conf || log "[init] cannot redirect /etc/resolv.conf to /run"
+fi
+
+# message for a mount point that cannot be created
+mount_point_error() {
+  if [ "\${root_ro}" = 1 ]; then
+    printf "cannot create the mount point %s: the root filesystem is read-only (rootfs mode readonly); add the directory to the image or mount below a writable path such as /tmp" "$1"
+  else
+    printf "cannot create the mount point %s" "$1"
+  fi
+}
+
+# device listings for debugging boot problems (nobody reads them when quiet)
+if [ "\${gondolin_quiet}" != 1 ]; then
   log "[init] /dev entries:"
   log_cmd ls -l /dev
   if [ -d /dev/virtio-ports ]; then
@@ -180,68 +290,73 @@ if [ "\${gondolin_debug}" = "1" ]; then
   fi
 fi
 
-if [ "\${gondolin_transport}" != "vsock" ] && modprobe virtio_console > /dev/null 2>&1; then
+if modprobe virtio_console > /dev/null 2>&1; then
   log "[init] loaded virtio_console"
-  setup_virtio_ports
+fi
+setup_virtio_ports
+if [ "\${gondolin_vsock}" = 1 ]; then
+  # the helpers connect to the host over vsock (see guest/ARCHITECTURE.md)
+  if modprobe vmw_vsock_virtio_transport > /dev/null 2>&1; then
+    log "[init] loaded vmw_vsock_virtio_transport"
+  fi
 fi
 if modprobe virtio_rng > /dev/null 2>&1; then
   log "[init] loaded virtio_rng"
 fi
-if [ -e /dev/hwrng ] && command -v rngd > /dev/null 2>&1; then
-  log "[init] starting rngd"
-  rngd -r /dev/hwrng -o /dev/random > /dev/null 2>&1 &
-elif [ -e /dev/hwrng ]; then
-  log "[init] rngd unavailable"
-else
+# No rngd: the kernel's hwrng thread feeds virtio-rng output into the input
+# pool by itself, and the crng is seeded at boot (rngd kept two vCPUs busy for
+# ~11 s after every boot).
+if [ ! -e /dev/hwrng ]; then
   log "[init] /dev/hwrng missing"
 fi
 
-if [ "\${gondolin_net}" != "off" ]; then
-  if modprobe virtio_net > /dev/null 2>&1; then
-    log "[init] loaded virtio_net"
-  fi
-
-  if command -v ip > /dev/null 2>&1; then
-    ip link set lo up || true
-    ip link set eth0 up || true
-  elif command -v ifconfig > /dev/null 2>&1; then
-    ifconfig lo up || true
-    ifconfig eth0 up || true
-  else
-    log "[init] no network link tool (ip/ifconfig)"
-  fi
-
-  if command -v udhcpc > /dev/null 2>&1; then
-    UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
-    if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
-      UDHCPC_SCRIPT="/sbin/udhcpc.script"
-    fi
-    if [ -x "\${UDHCPC_SCRIPT}" ]; then
-      udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[init] udhcpc failed"
-    else
-      udhcpc -i eth0 -q -n || log "[init] udhcpc failed"
-    fi
-  fi
-  if [ ! -s /etc/resolv.conf ]; then
-    printf "nameserver 192.168.127.1\n" > /etc/resolv.conf || true
-  fi
-else
-  if command -v ip > /dev/null 2>&1; then
-    ip link set lo up || true
-  elif command -v ifconfig > /dev/null 2>&1; then
-    ifconfig lo up || true
-  fi
+if modprobe virtio_net > /dev/null 2>&1; then
+  log "[init] loaded virtio_net"
 fi
 
-if [ "\${gondolin_transport}" = "vsock" ]; then
-  if modprobe vsock > /dev/null 2>&1; then
-    log "[init] loaded vsock"
+if command -v ip > /dev/null 2>&1; then
+  ip link set lo up || true
+  ip link set eth0 up || true
+elif command -v ifconfig > /dev/null 2>&1; then
+  ifconfig lo up || true
+  ifconfig eth0 up || true
+else
+  log "[init] no network link tool (ip/ifconfig)"
+fi
+
+# The host's settings when it sends them (what its DHCP server would hand
+# out; DHCP costs ~40 ms of udhcpc per boot), else DHCP.
+net_configured=0
+case "\${gondolin_net}" in
+  */*,*,*)
+    if command -v ip > /dev/null 2>&1; then
+      net_address="\${gondolin_net%%,*}"
+      net_rest="\${gondolin_net#*,}"
+      net_gateway="\${net_rest%%,*}"
+      net_dns="\${net_rest#*,}"
+      if ip addr add "\${net_address}" brd + dev eth0 \
+        && ip route add default via "\${net_gateway}" dev eth0; then
+        for net_server in $(printf "%s" "\${net_dns}" | tr '+' ' '); do
+          printf "nameserver %s\\n" "\${net_server}"
+        done > /etc/resolv.conf
+        net_configured=1
+      else
+        log "[init] static network configuration failed, trying DHCP"
+        ip addr flush dev eth0 > /dev/null 2>&1 || true
+      fi
+    fi
+    ;;
+esac
+
+if [ "\${net_configured}" != 1 ] && command -v udhcpc > /dev/null 2>&1; then
+  UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
+  if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
+    UDHCPC_SCRIPT="/sbin/udhcpc.script"
   fi
-  if modprobe vmw_vsock_virtio_transport > /dev/null 2>&1; then
-    log "[init] loaded vmw_vsock_virtio_transport"
-  fi
-  if modprobe virtio_vsock > /dev/null 2>&1; then
-    log "[init] loaded virtio_vsock"
+  if [ -x "\${UDHCPC_SCRIPT}" ]; then
+    udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[init] udhcpc failed"
+  else
+    udhcpc -i eth0 -q -n || log "[init] udhcpc failed"
   fi
 fi
 
@@ -250,57 +365,86 @@ if modprobe fuse > /dev/null 2>&1; then
 fi
 
 wait_for_sandboxfs() {
-  for i in \$(seq 1 300); do
+  # every 10 ms (30 s in total): the mount lands a few ms after sandboxfs
+  # connects, and every boot waits for it
+  for i in $(seq 1 3000); do
     if grep -q " \${sandboxfs_mount} fuse.sandboxfs " /proc/mounts; then
       return 0
     fi
-    sleep 0.1
+    if grep -q " \${sandboxfs_mount} virtiofs " /proc/mounts; then
+      return 0
+    fi
+    sleep 0.01
   done
   return 1
 }
 
-mkdir -p "\${sandboxfs_mount}"
-
 sandboxfs_ready=0
 sandboxfs_error="sandboxfs mount not ready"
-
-if [ "\${gondolin_transport}" != "vsock" ]; then
-  setup_virtio_ports
+sandboxfs_mountpoint=1
+if ! mkdir -p "\${sandboxfs_mount}" 2> /dev/null; then
+  sandboxfs_mountpoint=0
+  sandboxfs_error="$(mount_point_error "\${sandboxfs_mount}")"
+  log "[init] \${sandboxfs_error}"
 fi
 
-if [ -x /usr/bin/sandboxfs ]; then
+setup_virtio_ports
+
+if [ "\${sandboxfs_mountpoint}" = 0 ]; then
+  :
+elif [ -x /usr/bin/sandboxfs ]; then
   log "[init] starting sandboxfs at \${sandboxfs_mount}"
   SANDBOXFS_LOG="\${CONSOLE:-/dev/null}"
   if [ -z "\${SANDBOXFS_LOG}" ]; then
     SANDBOXFS_LOG="/dev/null"
   fi
-  if [ "\${gondolin_transport}" = "vsock" ]; then
-    /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-vsock-port "\${vsock_fs_port}" > "\${SANDBOXFS_LOG}" 2>&1 &
-  else
-    sandboxfs_rpc_path="$(resolve_virtio_port_path virtio-fs)"
-    log "[init] sandboxfs rpc path \${sandboxfs_rpc_path}"
-    /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" > "\${SANDBOXFS_LOG}" 2>&1 &
+  sandboxfs_rpc_path="$(resolve_virtio_port_path virtio-fs)"
+  log "[init] sandboxfs rpc path \${sandboxfs_rpc_path}"
+  sandboxfs_binds_file="/run/sandboxfs.binds"
+  rm -f "\${sandboxfs_binds_file}"
+  sandboxfs_extra=""
+  if [ -n "\${sandboxfs_virtiofs}" ]; then
+    # sandboxfs fetches the bind list, mounts the virtio-fs tag and exits
+    # (falling back to FUSE over virtio-serial if the mount fails)
+    if modprobe virtiofs > /dev/null 2>&1; then
+      log "[init] loaded virtiofs"
+    fi
+    sandboxfs_extra="--virtiofs \${sandboxfs_virtiofs}"
   fi
+  /usr/bin/sandboxfs --mount "\${sandboxfs_mount}" --rpc-path "\${sandboxfs_rpc_path}" --binds-file "\${sandboxfs_binds_file}" \${sandboxfs_extra} > "\${SANDBOXFS_LOG}" 2>&1 &
 
   if wait_for_sandboxfs; then
     sandboxfs_ready=1
-    if [ -n "\${sandboxfs_binds}" ]; then
-      OLD_IFS="\${IFS}"
-      IFS=","
-      for bind in \${sandboxfs_binds}; do
+    # sandboxfs writes the bind list (fetched from the host) before mounting.
+    # Older hosts only provide it via the kernel cmdline, which is limited in
+    # size, so only fall back to that if the file is missing.
+    if [ ! -f "\${sandboxfs_binds_file}" ] && [ -n "\${sandboxfs_binds}" ]; then
+      printf "%s\\n" "\${sandboxfs_binds}" | tr ',' '\\n' > "\${sandboxfs_binds_file}"
+    fi
+    if [ -f "\${sandboxfs_binds_file}" ]; then
+      while IFS= read -r bind; do
         if [ -z "\${bind}" ]; then
           continue
         fi
-        mkdir -p "\${bind}" 2>/dev/null || true
+        if ! mkdir -p "\${bind}" 2> /dev/null; then
+          # reported to the host instead of stopping init
+          sandboxfs_ready=0
+          sandboxfs_error="$(mount_point_error "\${bind}")"
+          log "[init] \${sandboxfs_error}"
+          continue
+        fi
         if [ "\${sandboxfs_mount}" = "/" ]; then
           bind_source="\${bind}"
         else
           bind_source="\${sandboxfs_mount}\${bind}"
         fi
+        # the host binds it itself when it gets there first
+        if awk -v p="\${bind}" '$2 == p { found = 1 } END { exit !found }' /proc/mounts; then
+          continue
+        fi
         log "[init] binding sandboxfs \${bind_source} -> \${bind}"
         log_cmd mount --bind "\${bind_source}" "\${bind}"
-      done
-      IFS="\${OLD_IFS}"
+      done < "\${sandboxfs_binds_file}"
     fi
   else
     log "[init] sandboxfs mount not ready"
@@ -316,45 +460,25 @@ else
   printf "%s\\n" "\${sandboxfs_error}" > /run/sandboxfs.failed
 fi
 
-if [ -r /etc/gondolin/mitm/ca.crt ] && [ -r /etc/ssl/certs/ca-certificates.crt ]; then
-  cat /etc/ssl/certs/ca-certificates.crt /etc/gondolin/mitm/ca.crt > /tmp/gondolin-ca-certificates.crt || true
-  if [ -s /tmp/gondolin-ca-certificates.crt ]; then
-    export SSL_CERT_FILE=/tmp/gondolin-ca-certificates.crt
-    export CURL_CA_BUNDLE=/tmp/gondolin-ca-certificates.crt
-    export REQUESTS_CA_BUNDLE=/tmp/gondolin-ca-certificates.crt
-    export NODE_EXTRA_CA_CERTS=/etc/gondolin/mitm/ca.crt
-  fi
-fi
+setup_mitm_ca
 
 if [ -x /usr/bin/sandboxssh ]; then
   log "[init] starting sandboxssh"
-  if [ "\${gondolin_transport}" = "vsock" ]; then
-    /usr/bin/sandboxssh --vsock-port "\${vsock_ssh_port}" > "\${CONSOLE:-/dev/null}" 2>&1 &
-  else
-    /usr/bin/sandboxssh > "\${CONSOLE:-/dev/null}" 2>&1 &
-  fi
+  /usr/bin/sandboxssh > "\${CONSOLE:-/dev/null}" 2>&1 &
 else
   log "[init] /usr/bin/sandboxssh missing"
 fi
 
 if [ -x /usr/bin/sandboxingress ]; then
   log "[init] starting sandboxingress"
-  if [ "\${gondolin_transport}" = "vsock" ]; then
-    /usr/bin/sandboxingress --vsock-port "\${vsock_ingress_port}" > "\${CONSOLE:-/dev/null}" 2>&1 &
-  else
-    /usr/bin/sandboxingress > "\${CONSOLE:-/dev/null}" 2>&1 &
-  fi
+  /usr/bin/sandboxingress > "\${CONSOLE:-/dev/null}" 2>&1 &
 else
   log "[init] /usr/bin/sandboxingress missing"
 fi
 
 log "[init] starting sandboxd"
 
-if [ "\${gondolin_transport}" = "vsock" ]; then
-  exec /usr/bin/sandboxd --vsock-port "\${vsock_control_port}"
-else
-  exec /usr/bin/sandboxd
-fi
+exec /usr/bin/sandboxd
 `;
 
 export const INITRAMFS_INIT_SCRIPT = `#!/bin/sh
@@ -371,7 +495,15 @@ if [ ! -c "\${CONSOLE}" ]; then
   fi
 fi
 
+# set from /proc/cmdline: \`quiet\` drops the log, which otherwise goes to the
+# serial console (each byte traps to the VMM; the device listings alone cost
+# ~50 ms per boot on a slow emulated serial console)
+gondolin_quiet=0
+
 log() {
+  if [ "\${gondolin_quiet}" = 1 ]; then
+    return 0
+  fi
   if [ -n "\${CONSOLE}" ]; then
     printf "%s\\n" "$*" > "\${CONSOLE}" 2>/dev/null || printf "%s\\n" "$*"
   else
@@ -411,17 +543,21 @@ setup_virtio_ports() {
 }
 
 wait_for_virtio_ports() {
-  for i in $(seq 1 300); do
+  # every 10 ms, 30 s in total
+  for i in $(seq 1 3000); do
     setup_virtio_ports
     if [ -c /dev/virtio-ports/virtio-port ] && [ -c /dev/virtio-ports/virtio-fs ]; then
       return 0
     fi
-    sleep 0.1
+    sleep 0.01
   done
   return 1
 }
 
 mount -t proc proc /proc || log "[initramfs] mount proc failed"
+case " $(cat /proc/cmdline 2>/dev/null || true) " in
+  *" quiet "*) gondolin_quiet=1 ;;
+esac
 mount -t sysfs sysfs /sys || log "[initramfs] mount sysfs failed"
 mount -t devtmpfs devtmpfs /dev || log "[initramfs] mount devtmpfs failed"
 
@@ -433,30 +569,31 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 root_device="/dev/vda"
 root_fstype="ext4"
-root_mount_opts="rw"
-gondolin_transport="virtio"
-gondolin_net="on"
+gondolin_vsock=0
+# the root disk is a read-only base whose writes go to a tmpfs overlay
+# (gondolin.overlay; the host attaches the disk read-only and nothing is copied)
+gondolin_overlay=0
 
 if [ -r /proc/cmdline ]; then
-  for arg in \$(cat /proc/cmdline); do
+  for arg in $(cat /proc/cmdline); do
     case "\${arg}" in
-      gondolin.transport=*)
-        gondolin_transport="\${arg#gondolin.transport=}"
-        ;;
-      gondolin.net=*)
-        gondolin_net="\${arg#gondolin.net=}"
-        ;;
       root=*)
         root_device="\${arg#root=}"
         ;;
       rootfstype=*)
         root_fstype="\${arg#rootfstype=}"
         ;;
-      ro)
-        root_mount_opts="ro"
+      gondolin.overlay)
+        gondolin_overlay=1
         ;;
-      rw)
-        root_mount_opts="rw"
+      gondolin.vsock)
+        gondolin_vsock=1
+        ;;
+      gondolin.vsock=*)
+        case "$(printf "%s" "\${arg#gondolin.vsock=}" | tr "A-Z" "a-z")" in
+          0|off|false|no) gondolin_vsock=0 ;;
+          *) gondolin_vsock=1 ;;
+        esac
         ;;
     esac
   done
@@ -464,57 +601,29 @@ fi
 
 modprobe virtio_blk > /dev/null 2>&1 || true
 modprobe ext4 > /dev/null 2>&1 || true
-if [ "\${gondolin_transport}" != "vsock" ]; then
-  modprobe virtio_console > /dev/null 2>&1 || true
-fi
+modprobe virtio_console > /dev/null 2>&1 || true
 modprobe virtio_rng > /dev/null 2>&1 || true
-if [ "\${gondolin_net}" != "off" ]; then
-  modprobe virtio_net > /dev/null 2>&1 || true
-fi
+modprobe virtio_net > /dev/null 2>&1 || true
 modprobe fuse > /dev/null 2>&1 || true
 
-if [ "\${gondolin_transport}" != "vsock" ] && ! wait_for_virtio_ports; then
+if [ "\${gondolin_vsock}" = 1 ]; then
+  # host channels use vsock; there are no virtio-serial ports to wait for
+  :
+elif ! wait_for_virtio_ports; then
   log "[initramfs] virtio ports not ready"
 fi
 
-if [ "\${gondolin_net}" != "off" ]; then
-  if command -v ip > /dev/null 2>&1; then
-    ip link set lo up || true
-    ip link set eth0 up || true
-  elif command -v ifconfig > /dev/null 2>&1; then
-    ifconfig lo up || true
-    ifconfig eth0 up || true
-  fi
-
-  if command -v udhcpc > /dev/null 2>&1; then
-    UDHCPC_SCRIPT="/usr/share/udhcpc/default.script"
-    if [ ! -x "\${UDHCPC_SCRIPT}" ]; then
-      UDHCPC_SCRIPT="/sbin/udhcpc.script"
-    fi
-    if [ -x "\${UDHCPC_SCRIPT}" ]; then
-      udhcpc -i eth0 -q -n -s "\${UDHCPC_SCRIPT}" || log "[initramfs] udhcpc failed"
-    else
-      udhcpc -i eth0 -q -n || log "[initramfs] udhcpc failed"
-    fi
-  fi
-  if [ ! -s /etc/resolv.conf ]; then
-    printf "nameserver 192.168.127.1\n" > /etc/resolv.conf || true
-  fi
-else
-  if command -v ip > /dev/null 2>&1; then
-    ip link set lo up || true
-  elif command -v ifconfig > /dev/null 2>&1; then
-    ifconfig lo up || true
-  fi
-fi
+# no network here: the root filesystem's init brings it up (DHCP twice cost
+# ~30 ms per boot)
 
 wait_for_block() {
   dev="$1"
-  for i in \$(seq 1 50); do
+  # every 10 ms, 5 s in total
+  for i in $(seq 1 500); do
     if [ -b "\${dev}" ]; then
       return 0
     fi
-    sleep 0.1
+    sleep 0.01
   done
   return 1
 }
@@ -524,18 +633,37 @@ if ! wait_for_block "\${root_device}"; then
   exec sh
 fi
 
+# overlay root: the read-only disk under a tmpfs that takes the writes (and
+# goes with the VM)
+mount_overlay_root() {
+  modprobe overlay > /dev/null 2>&1 || true
+  mkdir -p /lower /overlay
+  mount -t "\${root_fstype}" -o ro "\${root_device}" /lower || return 1
+  if mount -t tmpfs -o mode=0755 tmpfs /overlay \
+    && mkdir -p /overlay/upper /overlay/work \
+    && mount -t overlay overlay \
+      -o lowerdir=/lower,upperdir=/overlay/upper,workdir=/overlay/work /newroot; then
+    return 0
+  fi
+  umount /overlay > /dev/null 2>&1 || true
+  umount /lower > /dev/null 2>&1 || true
+  return 1
+}
+
 mkdir -p /newroot
-if ! mount -o "\${root_mount_opts}" -t "\${root_fstype}" "\${root_device}" /newroot; then
-  log "[initramfs] failed to mount \${root_device}"
-  exec sh
+if [ "\${gondolin_overlay}" = 1 ] && mount_overlay_root; then
+  :
+else
+  if [ "\${gondolin_overlay}" = 1 ]; then
+    log "[initramfs] overlay root failed, mounting \${root_device} directly"
+  fi
+  if ! mount -t "\${root_fstype}" "\${root_device}" /newroot; then
+    log "[initramfs] failed to mount \${root_device}"
+    exec sh
+  fi
 fi
 
 mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
-
-if [ -s /etc/resolv.conf ]; then
-  mkdir -p /newroot/etc
-  cp /etc/resolv.conf /newroot/etc/resolv.conf 2>/dev/null || true
-fi
 
 exec switch_root /newroot /init
 `;

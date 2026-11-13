@@ -1,141 +1,500 @@
-# Custom Images
+# Building Custom Images
 
-`gondolin build` creates Alpine guest assets for the VM backends.
+## Fork Image Profiles
 
-```bash
-gondolin build --config images/alpine-base.json --output ./guest/image/out
-```
+`images/alpine-vfkit.json`, `alpine-tiny-firecracker.json`,
+`alpine-fast-agent.json` and `alpine-initramfs-firecracker.json` remain
+supported. Rebuild with the current Zig 0.17 helpers. The tiny profiles use
+`scripts/build-tiny-firecracker-kernel.sh`; fast init is built by
+`scripts/build-fast-agent-init.sh`. Build configuration supports
+`firecrackerKernelPath`, nullable `firecrackerInitrdPath`, `vfkitKernelPath`,
+`init.rootfsInitBinary`, `init.initramfsRoot`, `rootfs.placeholder` and
+`release.arches`. Backend assets and checksums are recorded in the manifest;
+`assets.firecrackerInitrd: null` explicitly disables the external initrd.
 
-Required output files:
 
-- `manifest.json`
-- `vmlinuz-virt`
-- `firecracker-kernel`
-- `vfkit-kernel` for aarch64 vfkit images
-- `initramfs.cpio.lz4`
-- `rootfs.ext4`
+Gondolin supports building custom guest images with your own package selection,
+kernel configuration, and init scripts. This is useful for:
 
-The manifest records `assets.firecrackerKernel`; Gondolin uses that kernel when
-booting Firecracker. `assets.firecrackerInitrd: null` tells Gondolin to boot
-Firecracker without an initrd. For aarch64 builds, the builder also extracts an
-uncompressed arm64 Linux Image from Alpine's zboot kernel and records it as
-`assets.vfkitKernel`; Gondolin uses that kernel when booting vfkit.
+- Adding language runtimes (Rust, Go, Ruby, etc.)
+- Pre-installing project dependencies
+- Customizing the boot process
+- Creating minimal images for faster startup
 
-Build a local Apple Silicon vfkit image with:
-
-```bash
-gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --tag alpine-vfkit:local
-gondolin exec --vmm vfkit --image alpine-vfkit:local -- uname -m
-```
-
-The vfkit config forces Docker-based image assembly so macOS hosts do not need
-`mke2fs`, `cpio`, or `lz4` installed directly.
-
-Publish a CI-built Apple Silicon image with:
+## Quick Start
 
 ```bash
-gh workflow run image-release.yml -f image_tag=0.1.0 -f build_config=images/alpine-vfkit.json
+# Generate a default configuration
+gondolin build --init-config > build-config.json
+
+# Edit the config to add packages, change settings, etc.
+# Then build and tag it in the local image store:
+gondolin build --config build-config.json --tag my-image:latest
+
+# Use your custom image:
+gondolin bash --image my-image:latest
+
+# Or keep an output directory and use it directly:
+gondolin build --config build-config.json --output ./my-assets
+GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 ```
 
-The Image Release workflow builds the architectures declared by
-`release.arches` in the config and packages every asset listed in the manifest,
-including `vfkit-kernel`. Once the registry entry is available, macOS users only
-need `vfkit` at runtime, but they must run a package build that includes the
-vfkit backend:
+Every build is imported into the local image store (with `--tag`, under that
+ref); see [Images](./images.md) for selecting, sharing and managing images.
+
+`gondolin build` produces both qemu boot assets and libkrun-compatible boot
+artifacts (`krun-kernel` + `krun-empty-initrd`) and records them in
+`manifest.json`. Building needs the Node CLI (`npx @earendil-works/gondolin
+build`); the static `gondolin` CLI uses images but does not build them.
+
+During image builds, Gondolin resolves exact-version prebuilt sandbox helper
+binaries (`sandboxd`, `sandboxfs`, `sandboxssh`, and `sandboxingress`) and
+caches them locally. Zig is not required for ordinary custom image builds.
+
+Prebuilt example config with `postBuild.commands` (installs `llm` + plugin via pip):
 
 ```bash
-GONDOLIN_IMAGE_REGISTRY_URL=https://raw.githubusercontent.com/shanginn/gondolin-firecracker/master/builtin-image-registry.json \
-  node host/bin/gondolin.ts exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
+gondolin build --config host/examples/llm.json --output ./llm-assets
+GONDOLIN_GUEST_DIR=./llm-assets gondolin exec -- llm --help
 ```
 
-When publishing from a fork, set `GONDOLIN_IMAGE_REGISTRY_URL` to that fork's
-raw `builtin-image-registry.json` until the image entry is available in the
-default upstream registry.
-
-## Minimal Config
+Use an OCI image (Docker Hub/GHCR/private registry) as the rootfs base:
 
 ```json
 {
-  "imageName": "alpine-base",
-  "arch": "x86_64",
+  "arch": "aarch64",
   "distro": "alpine",
-  "alpine": {
-    "version": "3.23.0",
-    "kernelPackage": "linux-virt",
-    "kernelImage": "vmlinuz-virt",
-    "rootfsPackages": ["linux-virt", "bash", "ca-certificates", "curl"],
-    "initramfsPackages": []
-  },
-  "rootfs": {
-    "label": "gondolin-root"
+  "oci": {
+    "image": "docker.io/library/debian:bookworm-slim"
   }
 }
 ```
 
-## Tiny Firecracker Profile
-
-For bash, VFS file edits, and mediated HTTP at the lowest measured memory floor,
-build the tiny PVH/KVM kernel first:
-
 ```bash
-scripts/build-tiny-firecracker-kernel.sh
-scripts/build-fast-agent-init.sh
-gondolin build --config images/alpine-tiny-firecracker.json --output ./guest/image/tiny
-gondolin build --config images/alpine-fast-firecracker.json --output ./guest/image/fast
-gondolin build --config images/alpine-initramfs-firecracker.json --output ./guest/image/initramfs
+gondolin build --config host/examples/oci-debian.json --output ./oci-assets
 ```
 
-The kernel build needs `build-essential`, `bc`, `bison`, `flex`, `libelf-dev`,
-`libssl-dev`, and `xz-utils` on Debian/Ubuntu hosts. The config keeps virtio
-block, virtio net, vsock, ext4, FUSE, ptys, IPv4, and shell process support,
-then drops the Firecracker initrd. On June 26, 2026, the tiny and fast profiles
-passed `20/20` smoke boots at `29M`; use `30M` for a small guard band.
+## Build Requirements
 
-This tiny profile is a Firecracker profile, not a local macOS vfkit profile.
-The checked-in config is x86_64 and the tiny kernel build targets PVH/KVM. On
-Apple Silicon, vfkit needs an aarch64 image and an arm64 kernel suitable for
-vfkit's Linux bootloader. Use `images/alpine-vfkit.json` for a working local
-macOS profile; build vfkit tiny support as a separate aarch64 image profile
-instead of reusing `images/alpine-tiny-firecracker.json`.
+Building custom images normally requires the following host tools:
 
-`images/alpine-fast-firecracker.json` additionally uses a stripped static
-`/init` built by `scripts/build-fast-agent-init.sh`. It starts only the agent
-path: mounts, optional DHCP, `sandboxfs`, and `sandboxd`.
+| Tool | Purpose |
+|------|---------|
+| **cpio** | Creating initramfs archives |
+| **lz4** | Initramfs compression |
+| **e2fsprogs** | Creating/extending ext4 rootfs images (mke2fs, debugfs) |
+| **Docker or Podman** *(optional)* | Pull/export OCI rootfs images (`oci.image`) |
 
-`images/alpine-initramfs-firecracker.json` boots the same static init directly
-from `initramfs.cpio.lz4`. It copies `sandboxd`, `sandboxfs`, bash, and
-certificates into initramfs, so it can skip the rootfs mount path. Its
-`rootfs.placeholder` setting emits only a `512`-byte raw compatibility disk.
-Firecracker-only profiles hard-link the generic kernel name to the custom
-kernel so image archives store the ELF once. The initramfs-root profile passed
-`20/20` smoke boots at `50M`; `49M` failed on the same host.
+Gondolin downloads prebuilt sandbox helper binaries automatically. Zig 0.17.0 is
+only required for contributors or custom forks that explicitly build sandbox
+helpers from source.
 
-Build config knobs:
-
-- `init.rootfsInitBinary`: copy this executable to `/init`
-- `init.initramfsRoot`: copy the root init path into initramfs `/init` instead
-  of using the default `switch_root` initramfs script
-- `rootfs.placeholder`: emit a minimal raw compatibility disk; valid only with
-  `init.initramfsRoot` and incompatible with runtime `rootfs.size`
-- `vfkitKernelPath`: use this uncompressed arm64 kernel for vfkit instead of
-  extracting one from the Alpine kernel package
-
-## Runtime Requirements
-
-- Guest architecture must match the host architecture.
-- Include `e2fsprogs` when using `rootfs.size`.
-- Include `openssh` when using `vm.enableSsh()` or `gondolin bash --ssh`.
-- Include `python3`, `nodejs`, `npm`, or `uv` only for workloads that need them.
-- Put persistent data on VFS mounts; the default rootfs is read-only.
-
-## Using Assets
+### macOS
 
 ```bash
-gondolin bash --image ./guest/image/out
+brew install lz4 e2fsprogs
 ```
 
-```ts
+The build tries to locate `mke2fs` automatically (including common Homebrew locations). If you still see `mke2fs: command not found`, make sure `mke2fs` is available on your `PATH` (you can check where Homebrew installed it with `brew --prefix e2fsprogs`).
+
+### Linux (Debian/Ubuntu)
+
+```bash
+sudo apt install lz4 cpio e2fsprogs
+
+# OCI rootfs ownership fixups may also need debugfs (Ubuntu/Debian include it in e2fsprogs)
+```
+
+## Configuration Reference
+
+The build configuration is a JSON file. To generate a starting point, run:
+
+```bash
+gondolin build --init-config > build-config.json
+```
+
+Then pass it to the builder via `--config build-config.json`.
+
+The file has the following structure:
+
+```json
+{
+  "arch": "aarch64",
+  "distro": "alpine",
+  "env": {
+    "FOO": "bar"
+  },
+  "alpine": {
+    "version": "3.23.7",
+    "kernelPackage": "linux-virt",
+    "kernelImage": "vmlinuz-virt",
+    "rootfsPackages": [
+      "linux-virt",
+      "bash",
+      "ca-certificates",
+      "ca-certificates-bundle",
+      "curl",
+      "e2fsprogs",
+      "e2fsprogs-extra",
+      "nodejs",
+      "npm",
+      "uv",
+      "python3",
+      "openssh"
+    ],
+    "initramfsPackages": [],
+    "krunfwVersion": "v5.2.1"
+  },
+  "rootfs": {
+    "label": "gondolin-root"
+  },
+  "postBuild": {
+    "copy": [
+      {
+        "src": "./dist/my-tool.tar.gz",
+        "dest": "/tmp/my-tool.tar.gz"
+      }
+    ],
+    "commands": [
+      "pip3 install llm llm-anthropic"
+    ]
+  }
+}
+```
+
+### Top-Level Options
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `arch` | `"aarch64"` \| `"x86_64"` | Target architecture |
+| `distro` | `"alpine"` | Distribution (only Alpine is currently supported) |
+| `env` | object \| string[] | Default environment variables baked into the guest image |
+| `alpine` | object | Alpine-specific configuration |
+| `oci` | object | OCI rootfs source (uses exported container filesystem as rootfs base) |
+| `rootfs` | object | Rootfs image settings |
+| `init` | object | Custom init script paths |
+| `postBuild` | object | Host file copies + post-package commands executed in the rootfs |
+| `runtimeDefaults` | object | VM defaults recorded in `manifest.json` (see [Runtime Defaults](#runtime-defaults)) |
+| `container` | object | Container build settings (for cross-platform) |
+| `sandboxdPath` | string | Path to custom sandboxd binary |
+| `sandboxfsPath` | string | Path to custom sandboxfs binary |
+| `sandboxsshPath` | string | Path to custom sandboxssh binary |
+| `sandboxingressPath` | string | Path to custom sandboxingress binary |
+
+### Sandbox Helper Binaries
+
+By default, `gondolin build` resolves published sandbox helper binaries for the
+exact installed package version and target architecture. Advanced users can
+override this in two ways:
+
+- Set `GONDOLIN_SANDBOX_HELPERS_DIR` to a directory containing
+  `bin/sandboxd`, `bin/sandboxfs`, `bin/sandboxssh`, and `bin/sandboxingress`.
+- Set all four build config fields: `sandboxdPath`, `sandboxfsPath`,
+  `sandboxsshPath`, and `sandboxingressPath`. Partial overrides are rejected to
+  avoid mixing helper versions.
+
+Contributor source builds are opt-in. To build sandbox helpers from a local
+checkout instead of using published helpers, install Zig 0.17.0 and set
+`GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1`. If running outside the checkout,
+set `GONDOLIN_GUEST_SRC` to the local `guest/` directory.
+
+Images can only use virtio-fs for guest mounts (see
+[Files and Mounts](./vfs.md#transport-virtio-fs-and-sandboxfs)) when their
+`sandboxfs` supports `--virtiofs`. Published helpers that predate it keep working over sandboxfs;
+build the helpers from source to get virtio-fs before a helper release
+includes it.
+
+#### Baked-in environment (`env`)
+
+`env` lets you bake a default environment into the image at build time.
+These variables are exported by the guest init script right before `sandboxd`
+starts, so they become the default environment for all `exec` commands unless
+explicitly overridden.
+
+Because `env` is stored in the image, **do not put real secrets here**.
+
+### Alpine Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `version` | string | `"3.23.7"` | Alpine Linux version |
+| `branch` | string | derived | Alpine branch (e.g., `"v3.23"`) |
+| `mirror` | string | official CDN | Custom mirror URL |
+| `kernelPackage` | string | `"linux-virt"` | Kernel package name |
+| `kernelImage` | string | `"vmlinuz-virt"` | Kernel image filename |
+| `rootfsPackages` | string[] | see below | Packages for the root filesystem |
+| `initramfsPackages` | string[] | `[]` | Packages for the initramfs |
+| `krunfwVersion` | string | `"v5.2.1"` | libkrunfw release tag used to fetch `krun-kernel` |
+
+Keep `e2fsprogs-extra` in `rootfsPackages` if you want to grow the root disk at
+runtime: [`rootfs.size`](./snapshots.md#root-disk-size) runs `resize2fs` in the
+guest.
+
+### OCI Support
+
+When `oci` is set, Gondolin exports the OCI image filesystem and uses it as the rootfs base.
+The Alpine minirootfs is still used for initramfs generation and kernel packaging.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image` | string | required | OCI image reference (`repo/name[:tag]` or `repo/name@sha256:...`) |
+| `runtime` | `"docker" \| "podman"` | auto-detect | Runtime used for pull/create/export |
+| `platform` | string | derived from `arch` | Platform passed to runtime (e.g. `linux/arm64`) |
+| `pullPolicy` | `"if-not-present" \| "always" \| "never"` | `"if-not-present"` | Pull behavior before export |
+
+Notes:
+
+- `alpine.rootfsPackages` is ignored when `oci` is set
+- `alpine.initramfsPackages` automatically includes the configured kernel package when `oci` is set
+- The exported rootfs must contain `/bin/sh`, or provide a custom `init.rootfsInit`
+- `container.force=true` is currently not supported together with `oci`
+
+OCI support swaps the **root filesystem contents**, not the whole image build pipeline.
+Gondolin still assembles boot artifacts from Alpine components, and then layers the
+exported OCI filesystem on top as `rootfs.ext4`.
+
+In practice, the build is split into two parts:
+
+- **Boot layer (still Alpine-based):** kernel package selection, kernel image, and initramfs generation
+- **Rootfs layer (from OCI):** userspace filesystem exported from `oci.image` (Debian, Ubuntu, etc.)
+
+That is why OCI examples still use:
+
+- `"distro": "alpine"`
+- `alpine.kernelPackage` / `alpine.kernelImage`
+- `alpine.initramfsPackages`
+
+### Rootfs Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `label` | string | `"gondolin-root"` | Filesystem volume label |
+| `sizeMb` | number | auto | Fixed size in MB (auto-calculated if omitted) |
+
+### Init Configuration
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `rootfsInit` | string | Path to custom rootfs init script |
+| `initramfsInit` | string | Path to custom initramfs init script |
+| `rootfsInitExtra` | string | Path to a shell script appended to the rootfs init before sandboxd starts |
+
+The default init scripts are generated by `host/src/alpine/init-scripts.ts`; a
+custom `rootfsInit` has to start the helpers the same way (see
+`guest/ARCHITECTURE.md`), including passing `--virtiofs TAG` to `sandboxfs`
+when the kernel command line has `sandboxfs.virtiofs=TAG`, or the VM falls
+back to sandboxfs.
+
+### Runtime Defaults
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `rootfsMode` | `"readonly" \| "memory" \| "cow"` | Default VM rootfs mode baked into `manifest.json` (see [Root Disk Modes](./snapshots.md#root-disk-modes)) |
+
+Example:
+
+```json
+{
+  "runtimeDefaults": {
+    "rootfsMode": "readonly"
+  }
+}
+```
+
+### Post-Build Configuration
+
+Copy host files into the built rootfs and run shell commands after APK packages
+are extracted.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `copy` | `{ src, dest }[]` | `[]` | Copy host file/dir `src` into absolute guest path `dest` before commands |
+| `commands` | string[] | `[]` | Commands executed in order via `/bin/sh -lc` inside chroot |
+
+Notes:
+
+- `postBuild.copy[].src` is resolved relative to the build config file path
+- `postBuild.copy[].dest` must be an absolute guest path (for example `/tmp/tool.tgz`)
+- Directory copies merge source contents into the destination directory
+- `postBuild.copy` runs before `postBuild.commands`
+- Commands run in a Linux chroot environment
+- Native Linux builds need root privileges for chroot (or use `container.force=true`)
+- On macOS, builds with `postBuild.commands` automatically use a container
+- The build runtime architecture must match `arch` when using post-build commands
+
+### Container Configuration
+
+Used for the *build environment* (e.g., building Linux images on macOS).
+This is separate from `oci`, which controls the guest rootfs source.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `force` | boolean | `false` | Force container usage even on Linux |
+| `image` | string | `"alpine:3.23"` | Container image to use |
+| `runtime` | `"docker"` \| `"podman"` | auto-detect | Container runtime |
+
+### Fixed Rootfs Size
+
+By default, the rootfs size is auto-calculated. To set a fixed size:
+
+```json
+{
+  "rootfs": {
+    "sizeMb": 2048
+  }
+}
+```
+
+## Cross-Architecture Builds
+
+Build images for a different architecture:
+
+```bash
+# Build for x86_64 on an ARM64 Mac
+gondolin build --arch x86_64 --config build-config.json --output ./x64-assets
+
+# Build for ARM64 on an x86_64 Linux host
+gondolin build --arch aarch64 --config build-config.json --output ./arm64-assets
+```
+
+Cross-architecture builds may use a container (Docker/Podman) automatically
+when native tools aren't available.
+
+Note: krun boot artifact extraction falls back to `libkrunfw-<arch>.tgz` when a
+prebuilt archive is unavailable; that fallback requires a host matching the
+target architecture.
+
+## Verifying Built Assets
+
+After building, verify the assets are valid:
+
+```bash
+gondolin build --verify ./my-assets
+```
+
+This checks the manifest and file checksums.
+
+## Using Custom Assets
+
+A built image is used like any other: by ref (`--tag`), by build id, or by
+directory. From the CLI, pass `--image my-image:latest` (or `--image
+./my-assets`, or set `GONDOLIN_GUEST_DIR=./my-assets`); from the SDK, set
+`sandbox.imagePath`:
+
+```typescript
+import { VM } from "@earendil-works/gondolin";
+
 const vm = await VM.create({
-  sandbox: { imagePath: "./guest/image/out" },
+  sandbox: {
+    imagePath: "my-image:latest", // or "./my-assets"
+  },
 });
+
+const result = await vm.exec("rustc --version");
+console.log(result.stdout);
+
+await vm.close();
 ```
+
+See [Images](./images.md) for the selector forms, the local image store
+(`gondolin image import`, `tag`, `rm`), architecture matching, and remote
+daemons (which need a selector they can resolve on their machine).
+
+### Building From the SDK
+
+`buildAssets(config, { outputDir })` runs the same build as `gondolin build`
+(with `getDefaultBuildConfig()` as a starting point); unlike the CLI it does
+not import the result, so register it yourself:
+
+```typescript
+import {
+  buildAssets,
+  getDefaultBuildConfig,
+  importImageFromDirectory,
+  setImageRef,
+} from "@earendil-works/gondolin";
+
+const config = getDefaultBuildConfig();
+config.alpine!.rootfsPackages!.push("git");
+
+const { outputDir } = await buildAssets(config, { outputDir: "./my-assets" });
+const image = importImageFromDirectory(outputDir);
+setImageRef("my-image:latest", image.buildId, image.arch);
+```
+
+`verifyAssets(dir)` checks a directory against its manifest checksums, like
+`gondolin build --verify`.
+
+## Build Output
+
+A successful build creates:
+
+```
+my-assets/
+  manifest.json        # Build metadata and checksums
+  vmlinuz-virt         # Linux kernel (qemu/default)
+  initramfs.cpio.lz4   # Compressed initramfs
+  rootfs.ext4          # Root filesystem image
+  krun-kernel          # libkrunfw-compatible kernel
+  krun-empty-initrd    # Empty initrd for krun boot
+```
+
+The `manifest.json` contains the build configuration, timestamps, SHA-256
+checksums for verification, and a deterministic `buildId` derived from those
+checksums. When `oci.image` is used, it also records `ociSource` metadata
+including the resolved image digest used during export.
+
+That `buildId` identifies the image in the local store and is used by
+[checkpoints](./snapshots.md#portability-and-guest-assets) to locate the
+correct guest assets without embedding absolute host paths (see
+[What an Image Is](./images.md#what-an-image-is)).
+
+## Troubleshooting
+
+### `mke2fs`: Command Not Found
+
+Install e2fsprogs:
+
+- macOS: `brew install e2fsprogs`
+- Linux: `sudo apt install e2fsprogs`
+
+On macOS, ensure `mke2fs` is on your `PATH` (use `brew --prefix e2fsprogs` to find where it was installed).
+
+### `debugfs`: Command Not Found (OCI builds)
+
+OCI rootfs builds run a post-processing pass to preserve tar UID/GID ownership metadata.
+That pass needs `debugfs` from e2fsprogs.
+
+- Debian/Ubuntu: included in `e2fsprogs`
+- Alpine host: install `e2fsprogs-extra`
+
+### Sandbox Helper Resolution Fails
+
+By default, `gondolin build` downloads published sandbox helpers. If that fails,
+set `GONDOLIN_SANDBOX_HELPERS_DIR` to a directory containing the four helper
+binaries, or provide all four custom helper paths in the build config.
+
+### `Cannot build sandbox helpers from source`
+
+This contributor path only runs when
+`GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1` is set. Install Zig 0.17.0 and run
+from a Gondolin checkout, or set `GONDOLIN_GUEST_SRC` to a local `guest/`
+directory. Unset the environment variable to use published helpers instead.
+
+### Build Times Out / VM Doesn't Boot
+
+Ensure the built architecture matches your host:
+
+- Apple Silicon Macs: use `aarch64`
+- Intel Macs / x86_64 Linux: use `x86_64`
+
+### Package Not Found
+
+Alpine packages are split across `main` and `community` repositories. Both are
+enabled by default. Search for packages at https://pkgs.alpinelinux.org/packages
+
+### Image Too Large
+
+- Remove unnecessary packages from `rootfsPackages`
+- The `linux-virt` kernel is smaller than `linux-lts`
+- Set a fixed `rootfs.sizeMb` to prevent over-allocation

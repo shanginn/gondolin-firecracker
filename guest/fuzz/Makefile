@@ -2,7 +2,8 @@
 	repro repro-cbor repro-protocol repro-sandbox \
 	run-cbor run-protocol run-sandbox \
 	print-cbor-last print-protocol-last print-sandbox-last \
-	run-repro-cbor run-repro-protocol run-repro-sandbox clean
+	run-repro-cbor run-repro-protocol run-repro-sandbox clean \
+	zig-version-check
 
 ZIG ?= zig
 FUZZ_OPTIMIZE ?= ReleaseSafe
@@ -41,7 +42,12 @@ REPO_ROOT := $(abspath ../..)
 OUT_DIR ?= $(abspath ./out/$(TARGET))
 CACHE_DIR ?= $(abspath ./cache)
 
-FUZZ_DEPS := $(shell find ../src -name '*.zig')
+FUZZ_DEPS := $(shell find ../src -name '*.zig') harness.zig
+
+# Every fuzzer/repro gets the shared module and sandboxd's file request code.
+ZIG_MODULES = --dep shared --dep file_requests -Mmain=$< \
+	-Mshared=../src/root.zig \
+	--dep shared -Mfile_requests=../src/sandboxd/file_requests.zig
 
 # Mount the repo read-only to avoid fuzzers accidentally modifying host files.
 # Mount the cache dir read/write at the same guest path where fuzzers store corpus/coverage.
@@ -100,38 +106,37 @@ repro-protocol: $(OUT_DIR)/protocol-repro
 
 repro-sandbox: $(OUT_DIR)/sandbox-repro
 
-$(OUT_DIR)/cbor-fuzz: cbor_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
+zig-version-check:
+	@v="$$($(ZIG) version)"; case "$$v" in 0.17.*) ;; *) echo "Zig 0.17.x is required (found $$v); install it with scripts/install-zig.sh 0.17.0" >&2; exit 1;; esac
+
+$(OUT_DIR)/cbor-fuzz: cbor_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
-		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
-$(OUT_DIR)/protocol-fuzz: protocol_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
+$(OUT_DIR)/protocol-fuzz: protocol_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
-		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
-$(OUT_DIR)/sandbox-fuzz: sandbox_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR)
+$(OUT_DIR)/sandbox-fuzz: sandbox_fuzz_test.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) test -ffuzz -O$(FUZZ_OPTIMIZE) -target $(TARGET) --test-no-exec \
-		--dep sandboxd --dep file_requests -Mmain=$< \
-		-Msandboxd=../src/root.zig \
-		--dep sandboxd -Mfile_requests=../src/sandboxd/file_requests.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
-$(OUT_DIR)/cbor-repro: cbor_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
+$(OUT_DIR)/cbor-repro: cbor_repro.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
-		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
-$(OUT_DIR)/protocol-repro: protocol_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
+$(OUT_DIR)/protocol-repro: protocol_repro.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
-		--dep sandboxd -Mmain=$< -Msandboxd=../src/root.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
-$(OUT_DIR)/sandbox-repro: sandbox_repro.zig $(FUZZ_DEPS) | $(OUT_DIR)
+$(OUT_DIR)/sandbox-repro: sandbox_repro.zig $(FUZZ_DEPS) | $(OUT_DIR) zig-version-check
 	$(ZIG) build-exe -O$(REPRO_OPTIMIZE) -target $(TARGET) \
-		--dep sandboxd --dep file_requests -Mmain=$< \
-		-Msandboxd=../src/root.zig \
-		--dep sandboxd -Mfile_requests=../src/sandboxd/file_requests.zig \
+		$(ZIG_MODULES) \
 		-lc -femit-bin=$@
 
 run-cbor: $(OUT_DIR)/cbor-fuzz

@@ -1,22 +1,76 @@
 #!/usr/bin/env node
-import { randomUUID } from "crypto";
-import fs from "fs";
-import net from "net";
-import os from "os";
-import path from "path";
-import { PassThrough } from "stream";
-import { fileURLToPath } from "url";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import readline from "node:readline/promises";
+import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 
-import { parseDiskSizeToBytes } from "../src/disk/image.ts";
-import type { VM } from "../src/vm/core.ts";
+import { VmCheckpoint } from "../src/checkpoint.ts";
+import { gondolinCacheDir } from "../src/cache.ts";
+import { parseDiskSizeToBytes } from "../src/vm/disk.ts";
+import { VM } from "../src/vm/core.ts";
+import {
+  nativeDaemonCommand,
+  resolveNativeBinary,
+} from "../src/native/binary.ts";
 import type { VirtualProvider } from "../src/vfs/node/index.ts";
-import type { IncomingMessage } from "../src/sandbox/virtio-protocol.ts";
-import type { BuildConfig } from "../src/build/config.ts";
-import type { ImageArch } from "../src/images.ts";
-import type {
-  ServerMessage,
-  SnapshotResponseMessage,
+import { RealFSProvider } from "../src/vfs/node/index.ts";
+import { nativeMounts } from "../src/native/vfs.ts";
+import { ReadonlyProvider } from "../src/vfs/readonly.ts";
+import { createHttpHooks } from "../src/http/hooks.ts";
+import {
+  createDjsHooks,
+  djsHooksOptionsFromFile,
+} from "../src/http/djs-hooks.ts";
+import type { HttpHooks } from "../src/net/types.ts";
+import { suggestHostsForSecret } from "../src/secret-host-suggestions.ts";
+import {
+  ensureTrufflehogBinary,
+  getTrufflehogStatus,
+} from "../src/build/trufflehog.ts";
+import { attachTty } from "../src/utils/tty-attach.ts";
+import {
+  getDefaultBuildConfig,
+  serializeBuildConfig,
+  parseBuildConfig,
+  type BuildConfig,
+} from "../src/build/config.ts";
+import { buildAssets, verifyAssets } from "../src/build/index.ts";
+import {
+  alpineBuildCacheDirectory,
+  inspectAlpineBuildCache,
+  removeAlpineBuildCache,
+  updateAlpineBuildCache,
+} from "../src/build/cache.ts";
+import { loadAssetManifest } from "../src/assets.ts";
+import {
+  ensureImageSelector,
+  importImageFromDirectory,
+  listImageRefs,
+  listUntaggedImages,
+  setImageRef,
+  tagImage,
+  removeImage,
+  removeUntaggedImages,
+  removeAllImages,
+  type ImageArch,
+} from "../src/images.ts";
+import {
+  connectToSession,
+  findSession,
+  gcSessions,
+  listSessions,
+} from "../src/session-registry.ts";
+import {
+  decodeOutputFrame,
+  type ServerMessage,
+  type SnapshotResponseMessage,
 } from "../src/sandbox/control-protocol.ts";
+import { errorMessage } from "../src/utils/error.ts";
 
 type Command = {
   cmd: string;
@@ -41,12 +95,7 @@ function getDefaultInteractiveShellCommand(): string[] {
 }
 
 function checkpointBaseDir(): string {
-  const cacheBase =
-    process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
-  return (
-    process.env.GONDOLIN_CHECKPOINT_DIR ??
-    path.join(cacheBase, "gondolin", "checkpoints")
-  );
+  return process.env.GONDOLIN_CHECKPOINT_DIR ?? gondolinCacheDir("checkpoints");
 }
 
 function sanitizeCheckpointName(name: string): string {
@@ -64,14 +113,13 @@ function resolveSnapshotPath(args: { output?: string; name?: string }): string {
 
   const checkpointDir = checkpointBaseDir();
   const stem = args.name ? sanitizeCheckpointName(args.name) : randomUUID();
-  return path.resolve(checkpointDir, `${stem}.raw`);
+  return path.resolve(checkpointDir, `${stem}.qcow2`);
 }
 
 async function waitForCheckpointReady(
   checkpointPath: string,
   timeoutMs = 2000,
 ): Promise<boolean> {
-  const { VmCheckpoint } = await import("../src/checkpoint.ts");
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -84,7 +132,7 @@ async function waitForCheckpointReady(
       // keep polling
     }
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await delay(50);
   }
 
   try {
@@ -119,14 +167,14 @@ function resolveResumeCheckpoint(resume: string): string {
     throw new Error(`checkpoint not found: ${value}`);
   }
 
-  const normalized = value.endsWith(".raw") ? value.slice(0, -4) : value;
+  const normalized = value.endsWith(".qcow2") ? value.slice(0, -6) : value;
   const entries = fs
     .readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".raw"))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".qcow2"))
     .map((entry) => entry.name);
 
   const matches = entries.filter((file) => {
-    const stem = file.slice(0, -4);
+    const stem = file.slice(0, -6);
     return stem === normalized || stem.startsWith(normalized);
   });
 
@@ -137,7 +185,7 @@ function resolveResumeCheckpoint(resume: string): string {
   if (matches.length > 1) {
     throw new Error(
       `ambiguous checkpoint id '${value}' matches ${matches.length} snapshots:\n` +
-        matches.map((file) => `  ${file.slice(0, -4)}`).join("\n"),
+        matches.map((file) => `  ${file.slice(0, -6)}`).join("\n"),
     );
   }
 
@@ -149,31 +197,41 @@ function renderCliError(err: unknown) {
   const binary = (err as any)?.path;
 
   if (code === "ENOENT" && typeof binary === "string") {
-    if (binary.includes("firecracker")) {
-      console.error(`Error: Firecracker binary '${binary}' not found.`);
-      console.error(
-        "Install Firecracker on a Linux/KVM host or set sandbox.firecrackerPath / GONDOLIN_FIRECRACKER.",
-      );
+    if (binary.includes("qemu")) {
+      console.error(`Error: QEMU binary '${binary}' not found.`);
+      console.error("Please install QEMU to run the sandbox.");
+      if (process.platform === "darwin") {
+        console.error("  brew install qemu");
+      } else {
+        // Debian/Ubuntu package the aarch64 and x86_64 emulators separately
+        const pkg = binary.includes("x86_64")
+          ? "qemu-system-x86"
+          : "qemu-system-arm";
+        console.error(
+          `  sudo apt install ${pkg} (Debian/Ubuntu, or equivalent for your distro)`,
+        );
+      }
       return;
     }
-    if (binary.includes("vfkit")) {
-      console.error(`Error: vfkit binary '${binary}' not found.`);
+
+    if (binary.includes("krun-runner") || binary.includes("libkrun")) {
+      console.error(`Error: krun runner binary '${binary}' not found.`);
       console.error(
-        "Install vfkit on macOS or set sandbox.vfkitPath / GONDOLIN_VFKIT.",
+        "Build/install gondolin-krun-runner (auto-detected from local build or runner package) or set sandbox.krunRunnerPath / GONDOLIN_KRUN_RUNNER.",
       );
       return;
     }
   }
 
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   console.error(message);
 }
 
 function usage() {
-  console.log("Usage: gondolin <command> [options]");
+  console.log("Usage: gondolin [engine options] <command> [options]");
   console.log("Commands:");
   console.log(
-    "  exec         Run a command via the virtio socket or in-process VM",
+    "  exec         Run a command via a session IPC socket or in-process VM",
   );
   console.log(
     "  bash         Start an interactive shell session in the VM (bash -> sh fallback)",
@@ -187,6 +245,19 @@ function usage() {
   console.log("  image        Manage local image refs and objects");
   console.log("  tools        Inspect/download managed helper tools");
   console.log("  help         Show this help");
+  console.log(
+    "  version      Print the package version and the gondolind it would use (also --version)",
+  );
+  console.log("\nEngine options (before the command):");
+  console.log(
+    "  --engine native|auto     Host engine; both select the native engine (gondolind), kept for compatibility",
+  );
+  console.log(
+    "  --native-command CMD     Start gondolind with CMD (e.g. 'ssh host gondolind')",
+  );
+  console.log(
+    "  --remote                 gondolind runs on another machine (no shared files)",
+  );
   console.log("\nRun gondolin <command> --help for command-specific flags.");
 }
 
@@ -209,18 +280,17 @@ function bashUsage() {
     "  --env KEY=VALUE                 Set environment variable (can repeat)",
   );
   console.log(
-    "  --resume ID_OR_PATH             Resume from a snapshot ID or .raw path",
+    "  --resume ID_OR_PATH             Resume from a snapshot ID or .qcow2 path",
   );
   console.log(
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
-    "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
+    "  --vmm BACKEND                   VM backend: qemu|krun|firecracker|vfkit (default: Firecracker on Linux; krun/QEMU elsewhere)",
   );
   console.log(
-    "  --vmm NAME                      VM backend: firecracker|vfkit",
+    "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
   );
-  console.log("  --vfkit PATH                    vfkit binary path");
   console.log();
   console.log("VFS Options:");
   console.log(
@@ -235,11 +305,17 @@ function bashUsage() {
   console.log();
   console.log("Network Options:");
   console.log(
-    "  --allow-host HOST                Allow HTTP(S) egress to host pattern (can repeat)",
+    "  --allow-host HOST               Allow HTTP requests to host (can repeat)",
+  );
+  console.log(
+    "  --hooks-script FILE             Tier-2 hook policy (.js script, .mjs module, .ts TypeScript)",
   );
   console.log("  --host-secret NAME[=VALUE] | NAME@HOST[,HOST...][=VALUE]");
   console.log(
     "                                  Add secret with explicit hosts or discover suggestions",
+  );
+  console.log(
+    "                                  If =VALUE is omitted, reads from $NAME",
   );
   console.log(
     "  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)",
@@ -254,19 +330,28 @@ function bashUsage() {
     "  --tcp-map SPEC                  Map guest HOST[:PORT] to upstream HOST:PORT",
   );
   console.log(
+    "                                  Format: GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT",
+  );
+  console.log(
     "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
   );
   console.log(
-    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth",
+    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)",
   );
   console.log(
-    "  --ssh-known-hosts PATH          Upstream SSH known_hosts file (repeatable)",
+    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)",
   );
   console.log(
     "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)",
   );
   console.log(
+    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=...",
+  );
+  console.log(
     "  --disable-websockets            Disable WebSocket upgrades (egress + ingress)",
+  );
+  console.log(
+    "  --print-configure               Print the native engine's session configuration (JSON) and exit",
   );
   console.log();
   console.log("Ingress:");
@@ -291,11 +376,14 @@ function bashUsage() {
   console.log(
     "  gondolin bash --mount-hostfs /data:/data:ro --mount-memfs /tmp",
   );
-  console.log("  gondolin bash --cmd claude --cwd /workspace");
+  console.log("  gondolin bash --allow-host api.github.com");
+  console.log("  gondolin bash --host-secret GITHUB_TOKEN@api.github.com");
+  console.log("  gondolin bash --cwd /workspace -- claude");
   console.log("  gondolin bash --listen");
   console.log("  gondolin bash --listen 127.0.0.1:3000");
   console.log("  gondolin bash --resume 4a8f2b0c");
-  console.log("  gondolin bash --resume /tmp/my-snapshot.raw");
+  console.log("  gondolin bash --resume /tmp/my-snapshot.qcow2");
+  console.log("  gondolin bash --vmm krun");
   console.log("  gondolin bash --ssh");
 }
 
@@ -334,7 +422,7 @@ function snapshotUsage() {
   console.log();
   console.log("Options:");
   console.log(
-    "  --output PATH   Absolute or relative path for the snapshot .raw file",
+    "  --output PATH   Absolute or relative path for the snapshot .qcow2 file",
   );
   console.log("  --name NAME     Snapshot name (default output path only)");
   console.log("  --help, -h      Show this help");
@@ -342,14 +430,17 @@ function snapshotUsage() {
 
 function execUsage() {
   console.log("Usage:");
-  console.log("  gondolin exec --sock PATH -- CMD [ARGS...]");
+  console.log("  gondolin exec --sock PATH|ID -- CMD [ARGS...]");
   console.log(
-    "  gondolin exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]",
+    "  gondolin exec --sock PATH|ID --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]",
   );
   console.log(
     "  gondolin exec [options] -- CMD [ARGS...]  (in-process VM mode, no --sock)",
   );
   console.log();
+  console.log(
+    "  --sock PATH|ID uses a Gondolin session IPC socket path or session id.",
+  );
   console.log("Use -- to pass a command and its arguments directly.");
   console.log("Arguments apply to the most recent --cmd.");
   console.log();
@@ -364,16 +455,16 @@ function execUsage() {
     "  --image IMAGE                   Guest image selector (asset dir, build id, or name:tag)",
   );
   console.log(
+    "  --vmm BACKEND                   VM backend: qemu|krun|firecracker|vfkit (default: Firecracker on Linux; krun/QEMU elsewhere)",
+  );
+  console.log(
     "  --rootfs-size SIZE              Ensure rootfs virtual disk is at least SIZE",
   );
-  console.log(
-    "  --vmm NAME                      VM backend: firecracker|vfkit",
-  );
-  console.log("  --vfkit PATH                    vfkit binary path");
   console.log();
   console.log("Network Options (VM mode only):");
+  console.log("  --allow-host HOST               Allow HTTP requests to host");
   console.log(
-    "  --allow-host HOST                Allow HTTP(S) egress to host pattern (can repeat)",
+    "  --hooks-script FILE             Tier-2 hook policy (.js script, .mjs module, .ts TypeScript)",
   );
   console.log("  --host-secret NAME[=VALUE] | NAME@HOST[,HOST...][=VALUE]");
   console.log(
@@ -392,19 +483,28 @@ function execUsage() {
     "  --tcp-map SPEC                  Map guest HOST[:PORT] to upstream HOST:PORT",
   );
   console.log(
+    "                                  Format: GUEST_HOST[:PORT]=UPSTREAM_HOST:PORT",
+  );
+  console.log(
     "  --ssh-allow-host HOST[:PORT]     Allow outbound SSH to host (repeatable; default port: 22)",
   );
   console.log(
-    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth",
+    "  --ssh-agent [SOCK]              Use ssh-agent for host-side SSH auth (defaults to $SSH_AUTH_SOCK)",
   );
   console.log(
-    "  --ssh-known-hosts PATH          Upstream SSH known_hosts file (repeatable)",
+    "  --ssh-known-hosts PATH          OpenSSH known_hosts file for upstream verification (repeatable)",
   );
   console.log(
     "  --ssh-credential SPEC           Host-side SSH key (HOST[:PORT]=PATH or USER@HOST[:PORT]=PATH)",
   );
   console.log(
+    "                                  Optional: append ,passphrase-env=ENV or ,passphrase=...",
+  );
+  console.log(
     "  --disable-websockets            Disable WebSocket upgrades (egress + ingress)",
+  );
+  console.log(
+    "  --print-configure               Print the native engine's session configuration (JSON) and exit",
   );
 }
 
@@ -416,15 +516,15 @@ type MountSpec = {
 
 type SecretSpec = {
   name: string;
-  hosts: string[];
   value: string;
+  hosts: string[];
 };
 
 type SshCredentialSpec = {
   host: string;
   username?: string;
   keyPath: string;
-  /** private key passphrase */
+  /** private key passphrase (optional) */
   passphrase?: string;
 };
 
@@ -434,14 +534,14 @@ type CommonOptions = {
   allowedHosts: string[];
   secrets: SecretSpec[];
 
-  /** VM backend */
-  vmm?: "firecracker" | "vfkit";
-
-  /** vfkit binary path */
-  vfkitPath?: string;
+  /** tier-2 hook policy file (`createDjsHooks`) */
+  hooksScript?: string;
 
   /** image selector (asset dir, build id, or name:tag) */
   image?: string;
+
+  /** vm backend selection */
+  vmm?: "qemu" | "krun" | "firecracker" | "vfkit";
 
   /** minimum rootfs virtual disk size */
   rootfsSize?: string;
@@ -467,11 +567,14 @@ type CommonOptions = {
   /** ssh-agent socket path (defaults to $SSH_AUTH_SOCK) */
   sshAgent?: string;
 
-  /** OpenSSH known_hosts file paths for upstream verification */
+  /** OpenSSH known_hosts file paths for upstream host key verification */
   sshKnownHostsFiles: string[];
 
   /** ssh credentials for host-side proxy auth */
   sshCredentials: SshCredentialSpec[];
+
+  /** print the native engine's configure payload instead of starting a VM */
+  printConfigure?: boolean;
 
   /** enable ssh (bash command only) */
   ssh?: boolean;
@@ -538,10 +641,8 @@ function parseHostSecret(spec: string): SecretSpec {
   if (atIndex === -1) {
     const eqIndex = spec.indexOf("=");
     const name = (eqIndex === -1 ? spec : spec.slice(0, eqIndex)).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-      throw new Error(
-        `Invalid host-secret format: expected an environment name`,
-      );
+    if (!name) {
+      throw new Error(`Invalid host-secret format: ${spec} (empty name)`);
     }
 
     const value = eqIndex === -1 ? process.env[name] : spec.slice(eqIndex + 1);
@@ -553,8 +654,8 @@ function parseHostSecret(spec: string): SecretSpec {
   }
 
   const name = spec.slice(0, atIndex);
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-    throw new Error(`Invalid host-secret format: expected an environment name`);
+  if (!name) {
+    throw new Error(`Invalid host-secret format: ${spec} (empty name)`);
   }
 
   const afterAt = spec.slice(atIndex + 1);
@@ -577,7 +678,7 @@ function parseHostSecret(spec: string): SecretSpec {
 
   const hosts = hostsStr.split(",").filter(Boolean);
   if (hosts.length === 0) {
-    throw new Error(`Invalid host-secret format: no hosts specified`);
+    throw new Error(`Invalid host-secret format: ${spec} (no hosts specified)`);
   }
 
   return { name, value, hosts };
@@ -593,55 +694,62 @@ async function promptForSuggestedSecretHosts(
     count: number;
   }>,
 ): Promise<string[]> {
-  assertInteractiveSecretHostDiscovery(secret.name);
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw new Error(
+      `Suggested hosts were found for ${secret.name}, but interactive confirmation requires a TTY. Re-run with --host-secret ${secret.name}@HOST[,HOST...]`,
+    );
+  }
 
   process.stderr.write(`Suggested hosts for ${secret.name}:\n`);
   suggestions.forEach((suggestion, index) => {
     process.stderr.write(
       `  [${index + 1}] ${suggestion.host}  (${suggestion.file}:${suggestion.line}, hits=${suggestion.count})\n`,
     );
+    if (suggestion.snippet) {
+      process.stderr.write(`      ${suggestion.snippet}\n`);
+    }
   });
 
-  const { createInterface } = await import("node:readline/promises");
-  const rl = createInterface({
+  const rl = readline.createInterface({
     input: process.stdin,
     output: process.stderr,
   });
   try {
-    const answer = await rl.question(
-      "Select host numbers (comma-separated; blank cancels): ",
-    );
-    return selectSuggestedSecretHosts(answer, suggestions);
+    const answer = (
+      await rl.question(
+        "Accept all suggested hosts? [Y/n] (or enter comma-separated numbers): ",
+      )
+    )
+      .trim()
+      .toLowerCase();
+
+    if (!answer || answer === "y" || answer === "yes" || answer === "a") {
+      return suggestions.map((suggestion) => suggestion.host);
+    }
+    if (answer === "n" || answer === "no") {
+      return [];
+    }
+
+    const indexes = answer
+      .split(",")
+      .map((part) => Number(part.trim()))
+      .filter((value) => Number.isInteger(value));
+    if (indexes.length === 0) {
+      return [];
+    }
+
+    const selected = new Set<string>();
+    for (const index of indexes) {
+      const suggestion = suggestions[index - 1];
+      if (!suggestion) {
+        return [];
+      }
+      selected.add(suggestion.host);
+    }
+    return [...selected];
   } finally {
     rl.close();
   }
-}
-
-function assertInteractiveSecretHostDiscovery(
-  secretName: string,
-  stdinIsTTY: boolean = Boolean(process.stdin.isTTY),
-  stderrIsTTY: boolean = Boolean(process.stderr.isTTY),
-): void {
-  if (stdinIsTTY && stderrIsTTY) return;
-  throw new Error(
-    `Host discovery for ${secretName} requires an interactive TTY. Re-run with --host-secret ${secretName}@HOST[,HOST...]`,
-  );
-}
-
-function selectSuggestedSecretHosts(
-  answer: string,
-  suggestions: Array<{ host: string }>,
-): string[] {
-  const trimmed = answer.trim();
-  if (!/^\d+(?:\s*,\s*\d+)*$/.test(trimmed)) return [];
-
-  const selected = new Set<string>();
-  for (const part of trimmed.split(",")) {
-    const suggestion = suggestions[Number(part.trim()) - 1];
-    if (!suggestion) return [];
-    selected.add(suggestion.host);
-  }
-  return [...selected];
 }
 
 async function resolveSecretHosts(
@@ -655,13 +763,9 @@ async function resolveSecretHosts(
       continue;
     }
 
-    assertInteractiveSecretHostDiscovery(secret.name);
-
     process.stderr.write(
       `Discovering suggested hosts for secret ${secret.name} with trufflehog...\n`,
     );
-    const { suggestHostsForSecret } =
-      await import("../src/secret-host-suggestions.ts");
     const suggestions = await suggestHostsForSecret({
       secretValue: secret.value,
     });
@@ -692,6 +796,11 @@ async function resolveSecretHosts(
 }
 
 function parseSshCredential(spec: string): SshCredentialSpec {
+  // Format:
+  //   HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV]
+  //   USER@HOST=KEY_PATH[,passphrase=...][,passphrase-env=ENV]
+  //
+  // Prefer passphrase-env to avoid leaking secrets into shell history.
   const eq = spec.indexOf("=");
   if (eq === -1) {
     throw new Error(
@@ -721,6 +830,7 @@ function parseSshCredential(spec: string): SshCredentialSpec {
   for (const optRaw of opts) {
     const opt = optRaw.trim();
     if (!opt) continue;
+
     if (opt.startsWith("passphrase-env=")) {
       passphraseEnv = opt.slice("passphrase-env=".length);
       if (!passphraseEnv) {
@@ -730,15 +840,18 @@ function parseSshCredential(spec: string): SshCredentialSpec {
       }
       continue;
     }
+
     if (opt === "passphrase-ask") {
       throw new Error(
         `Invalid --ssh-credential option: ${opt} (interactive prompting is not supported; use passphrase-env=ENV)`,
       );
     }
+
     if (opt.startsWith("passphrase=")) {
       passphrase = opt.slice("passphrase=".length);
       continue;
     }
+
     throw new Error(`Invalid --ssh-credential option: ${opt}`);
   }
 
@@ -747,6 +860,7 @@ function parseSshCredential(spec: string): SshCredentialSpec {
       `Invalid --ssh-credential format: ${spec} (cannot combine passphrase and passphrase-env)`,
     );
   }
+
   if (passphraseEnv) {
     const envValue = process.env[passphraseEnv];
     if (envValue === undefined) {
@@ -758,7 +872,9 @@ function parseSshCredential(spec: string): SshCredentialSpec {
   }
 
   const at = left.indexOf("@");
-  if (at === -1) return { host: left, keyPath, passphrase };
+  if (at === -1) {
+    return { host: left, keyPath, passphrase };
+  }
 
   const username = left.slice(0, at).trim();
   const host = left.slice(at + 1).trim();
@@ -799,6 +915,21 @@ function resolveSshAgent(explicit?: string): string {
   return sock;
 }
 
+function parseVmmOption(
+  value: string,
+): "qemu" | "krun" | "firecracker" | "vfkit" {
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "qemu" ||
+    normalized === "krun" ||
+    normalized === "firecracker" ||
+    normalized === "vfkit"
+  ) {
+    return normalized;
+  }
+  throw new Error("--vmm must be one of: qemu, krun, firecracker, vfkit");
+}
+
 function parseRootfsSizeOption(
   value: string | undefined,
   fail: (message: string) => never,
@@ -807,7 +938,7 @@ function parseRootfsSizeOption(
   try {
     parseDiskSizeToBytes(value);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     fail(`invalid --rootfs-size: ${message}`);
   }
   return value;
@@ -857,17 +988,13 @@ function parseListenSpec(spec: string): { host: string; port: number } {
   return { host, port };
 }
 
-async function buildVmOptions(common: CommonOptions) {
-  const mounts: Record<string, VirtualProvider> = {};
+/** `--hooks-script FILE`: a tier-2 policy (`.mjs` module, `.ts`/`.mts` TypeScript), with its relative imports */
+function loadHooksScript(file: string): HttpHooks {
+  return createDjsHooks(djsHooksOptionsFromFile(file));
+}
 
-  const needsProviders =
-    common.mounts.length > 0 || common.memoryMounts.length > 0;
-  const providers = needsProviders
-    ? await import("../src/vfs/node/index.ts")
-    : null;
-  const readonlyProvider = common.mounts.some((mount) => mount.readonly)
-    ? await import("../src/vfs/readonly.ts")
-    : null;
+function buildVmOptions(common: CommonOptions) {
+  const mounts: Record<string, VirtualProvider> = {};
 
   // Add host filesystem mounts
   for (const mount of common.mounts) {
@@ -881,25 +1008,27 @@ async function buildVmOptions(common: CommonOptions) {
       throw new Error(`Host path is not a directory: ${mount.hostPath}`);
     }
 
-    let provider: VirtualProvider = new providers!.RealFSProvider(
-      resolvedHostPath,
-    );
+    let provider: VirtualProvider = new RealFSProvider(resolvedHostPath);
     if (mount.readonly) {
-      provider = new readonlyProvider!.ReadonlyProvider(provider);
+      provider = new ReadonlyProvider(provider);
     }
     mounts[mount.guestPath] = provider;
   }
 
   // Add memory mounts
   for (const path of common.memoryMounts) {
-    mounts[path] = new providers!.MemoryProvider();
+    // a daemon-side memory filesystem on the native engine
+    mounts[path] = nativeMounts.memory();
   }
 
-  let httpHooks;
+  // Build HTTP hooks if we have network options
+  let httpHooks: HttpHooks | undefined;
   let env: Record<string, string> | undefined;
 
+  const djsHooks = common.hooksScript
+    ? loadHooksScript(common.hooksScript)
+    : undefined;
   if (common.allowedHosts.length > 0 || common.secrets.length > 0) {
-    const { createHttpHooks } = await import("../src/http/hooks.ts");
     const secrets: Record<string, { hosts: string[]; value: string }> = {};
     for (const secret of common.secrets) {
       secrets[secret.name] = { hosts: secret.hosts, value: secret.value };
@@ -909,9 +1038,12 @@ async function buildVmOptions(common: CommonOptions) {
       allowedHosts:
         common.allowedHosts.length > 0 ? common.allowedHosts : undefined,
       secrets,
+      ...djsHooks,
     });
     httpHooks = result.httpHooks;
     env = result.env;
+  } else if (djsHooks) {
+    httpHooks = djsHooks;
   }
 
   if (common.dnsTrustedServers.length > 0) {
@@ -951,16 +1083,24 @@ async function buildVmOptions(common: CommonOptions) {
     if (common.dnsMode && common.dnsMode !== "synthetic") {
       throw new Error("--ssh-allow-host requires --dns synthetic");
     }
-    common.dnsMode ??= "synthetic";
-    common.dnsSyntheticHostMapping ??= "per-host";
+    if (!common.dnsMode) {
+      common.dnsMode = "synthetic";
+    }
+    if (!common.dnsSyntheticHostMapping) {
+      common.dnsSyntheticHostMapping = "per-host";
+    }
   }
 
   if (Object.keys(common.tcpHostMappings).length > 0) {
     if (common.dnsMode && common.dnsMode !== "synthetic") {
       throw new Error("--tcp-map requires --dns synthetic");
     }
-    common.dnsMode ??= "synthetic";
-    common.dnsSyntheticHostMapping ??= "per-host";
+    if (!common.dnsMode) {
+      common.dnsMode = "synthetic";
+    }
+    if (!common.dnsSyntheticHostMapping) {
+      common.dnsSyntheticHostMapping = "per-host";
+    }
   }
 
   const sshCredentials =
@@ -995,11 +1135,6 @@ async function buildVmOptions(common: CommonOptions) {
           syntheticHostMapping: common.dnsSyntheticHostMapping,
         }
       : undefined;
-  const hasEgressOptions =
-    Boolean(httpHooks) ||
-    Boolean(dns) ||
-    common.sshAllowedHosts.length > 0 ||
-    Object.keys(common.tcpHostMappings).length > 0;
 
   const vmOptions: any = {
     vfs: Object.keys(mounts).length > 0 ? { mounts } : undefined,
@@ -1026,24 +1161,13 @@ async function buildVmOptions(common: CommonOptions) {
     env,
   };
 
-  if (common.image) {
+  if (httpHooks || dns || vmOptions.ssh || vmOptions.tcp)
+    vmOptions.sandbox = { netEnabled: true };
+  if (common.image || common.vmm) {
     vmOptions.sandbox = {
       ...(vmOptions.sandbox ?? {}),
-      imagePath: common.image,
-    };
-  }
-
-  if (common.vmm) {
-    vmOptions.sandbox = {
-      ...(vmOptions.sandbox ?? {}),
-      vmm: common.vmm,
-    };
-  }
-
-  if (common.vfkitPath) {
-    vmOptions.sandbox = {
-      ...(vmOptions.sandbox ?? {}),
-      vfkitPath: common.vfkitPath,
+      ...(common.image ? { imagePath: common.image } : {}),
+      ...(common.vmm ? { vmm: common.vmm } : {}),
     };
   }
 
@@ -1054,7 +1178,7 @@ async function buildVmOptions(common: CommonOptions) {
     };
   }
 
-  if (common.disableWebSockets && hasEgressOptions) {
+  if (common.disableWebSockets) {
     vmOptions.allowWebSockets = false;
   }
 
@@ -1096,6 +1220,11 @@ function parseExecArgs(argv: string[]): ExecArgs {
   const parseCommonOption = (optionArgs: string[], i: number): number => {
     const arg = optionArgs[i];
 
+    if (arg.startsWith("--vmm=")) {
+      const raw = arg.slice("--vmm=".length);
+      args.common.vmm = parseVmmOption(raw);
+      return i;
+    }
     if (arg.startsWith("--rootfs-size=")) {
       args.common.rootfsSize = parseRootfsSizeOption(
         arg.slice("--rootfs-size=".length),
@@ -1124,27 +1253,29 @@ function parseExecArgs(argv: string[]): ExecArgs {
         return i;
       }
       case "--vmm": {
-        const vmm = optionArgs[++i] as any;
-        if (vmm !== "firecracker" && vmm !== "vfkit") {
-          fail("--vmm must be one of: firecracker, vfkit");
-        }
-        args.common.vmm = vmm;
-        return i;
-      }
-      case "--vfkit": {
-        const vfkitPath = optionArgs[++i];
-        if (!vfkitPath) fail("--vfkit requires a path argument");
-        args.common.vfkitPath = vfkitPath;
+        const value = optionArgs[++i];
+        if (!value) fail("--vmm requires an argument");
+        args.common.vmm = parseVmmOption(value);
         return i;
       }
       case "--rootfs-size": {
         args.common.rootfsSize = parseRootfsSizeOption(optionArgs[++i], fail);
         return i;
       }
+      case "--print-configure": {
+        args.common.printConfigure = true;
+        return i;
+      }
       case "--allow-host": {
         const host = optionArgs[++i];
         if (!host) fail("--allow-host requires a host argument");
         args.common.allowedHosts.push(host);
+        return i;
+      }
+      case "--hooks-script": {
+        const file = optionArgs[++i];
+        if (!file) fail("--hooks-script requires a file argument");
+        args.common.hooksScript = file;
         return i;
       }
       case "--host-secret": {
@@ -1184,7 +1315,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
           const mapping = parseTcpMapSpec(spec);
           args.common.tcpHostMappings[mapping.key] = mapping.value;
         } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
+          fail(errorMessage(err));
         }
         return i;
       }
@@ -1216,7 +1347,7 @@ function parseExecArgs(argv: string[]): ExecArgs {
         try {
           args.common.sshCredentials.push(parseSshCredential(spec));
         } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
+          fail(errorMessage(err));
         }
         return i;
       }
@@ -1348,11 +1479,68 @@ function buildCommandPayload(command: Command) {
   return payload;
 }
 
+/**
+ * Print the native engine's `configure` payload and default guest env for
+ * the given VM options without starting a VM (`--print-configure`; the
+ * static native CLI prints the same, see `test/cli-configure-parity.test.ts`).
+ * Byte strings are printed as `{ "$base64": "..." }`; the MITM CA key and
+ * secret values as `"<redacted>"`.
+ */
+async function printNativeConfigure(
+  vmOptions: Record<string, unknown>,
+  resume?: string,
+) {
+  let vm: VM | null = null;
+  try {
+    if (resume) {
+      const checkpoint = VmCheckpoint.load(resolveResumeCheckpoint(resume));
+      vm = (await checkpoint.resume({
+        ...vmOptions,
+        engine: "native",
+        autoStart: false,
+      } as any)) as VM;
+    } else {
+      vm = await VM.create({ ...vmOptions, engine: "native" });
+    }
+    const described = await vm.describeNativeConfigure();
+    const text = `${JSON.stringify(
+      described,
+      function (this: any, key: string, value: unknown) {
+        const raw = this[key];
+        // secrets: the MITM CA key and secret values
+        if (
+          (key === "key_pem" || key === "value" || key === "revoked_values") &&
+          raw !== undefined
+        ) {
+          return "<redacted>";
+        }
+        if (raw instanceof Uint8Array) {
+          return { $base64: Buffer.from(raw).toString("base64") };
+        }
+        return value;
+      },
+      2,
+    )}\n`;
+    // flushed before the caller exits (pipes are asynchronous)
+    await new Promise<void>((resolve) =>
+      process.stdout.write(text, () => resolve()),
+    );
+  } finally {
+    await vm?.close();
+  }
+}
+
 async function runExecVm(args: ExecArgs) {
-  const [{ VM }, vmOptions] = await Promise.all([
-    import("../src/vm/core.ts"),
-    buildVmOptions(args.common),
-  ]);
+  const vmOptions = buildVmOptions(args.common);
+  if (args.common.printConfigure) {
+    try {
+      await printNativeConfigure(vmOptions);
+    } catch (err) {
+      renderCliError(err);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
   let vm: VM | null = null;
   let exitCode = 0;
 
@@ -1395,98 +1583,131 @@ async function runExecVm(args: ExecArgs) {
   process.exit(exitCode);
 }
 
-async function runExecSocket(args: ExecArgs) {
-  const { FrameReader, buildExecRequest, decodeMessage, encodeFrame } =
-    await import("../src/sandbox/virtio-protocol.ts");
-  const socket = net.createConnection({ path: args.sock! });
-  const reader = new FrameReader();
+const EXEC_OUTPUT_WINDOW_BYTES = 1024 * 1024;
+
+function runExecSocket(args: ExecArgs, sockPath: string) {
+  // The session socket uses the 5-byte framed JSON/binary IPC protocol, not virtio CBOR.
   let currentIndex = 0;
   let inflightId: number | null = null;
   let exitCode = 0;
   let closing = false;
 
-  const sendNext = () => {
-    const command = args.commands[currentIndex];
-    inflightId = command.id;
-    const payload = buildCommandPayload(command);
-    const message = buildExecRequest(command.id, payload);
-    socket.write(encodeFrame(message));
-  };
-
   const finish = (code?: number) => {
     if (code !== undefined && exitCode === 0) exitCode = code;
     if (closing) return;
     closing = true;
-    socket.end();
+    process.exitCode = exitCode;
+    client.close();
   };
 
-  socket.on("connect", () => {
-    console.log(`connected to ${args.sock}`);
-    sendNext();
-  });
+  const sendNext = () => {
+    if (currentIndex >= args.commands.length) {
+      finish();
+      return;
+    }
+    const command = args.commands[currentIndex]!;
+    inflightId = command.id;
+    const payload = buildCommandPayload(command);
+    client.send({
+      type: "exec",
+      id: command.id,
+      cmd: payload.cmd,
+      ...(payload.argv ? { argv: payload.argv } : {}),
+      ...(payload.env ? { env: payload.env } : {}),
+      ...(payload.cwd ? { cwd: payload.cwd } : {}),
+      stdout_window: EXEC_OUTPUT_WINDOW_BYTES,
+      stderr_window: EXEC_OUTPUT_WINDOW_BYTES,
+    });
+  };
 
-  socket.on("data", (chunk) => {
-    reader.push(chunk, (frame) => {
-      const message = decodeMessage(frame) as IncomingMessage;
-      if (message.t === "exec_output") {
-        const data = message.p.data;
-        if (message.p.stream === "stdout") {
-          process.stdout.write(data);
-        } else {
-          process.stderr.write(data);
-        }
-      } else if (message.t === "exec_response") {
-        if (inflightId !== null && message.id !== inflightId) {
-          console.error(
-            `unexpected response id ${message.id} (expected ${inflightId})`,
-          );
-          finish(1);
-          return;
-        }
-        const code = message.p.exit_code ?? 1;
-        const signal = message.p.signal;
+  const client = connectToSession(sockPath, {
+    onConnect() {
+      sendNext();
+    },
+    onJson(message: ServerMessage) {
+      if (closing) return;
+      if (message.type === "status") return;
+      if (message.type === "exec_response") {
+        if (inflightId === null || message.id !== inflightId) return;
+        const code = message.exit_code ?? 1;
+        const signal = message.signal;
         if (signal !== undefined) {
           console.error(`process exited due to signal ${signal}`);
         }
         if (code !== 0 && exitCode === 0) exitCode = code;
         currentIndex += 1;
+        inflightId = null;
         if (currentIndex < args.commands.length) {
           sendNext();
         } else {
           finish();
         }
-      } else if (message.t === "error") {
-        console.error(`error ${message.p.code}: ${message.p.message}`);
-        finish(1);
+        return;
       }
-    });
+      if (message.type === "error") {
+        if (message.id !== undefined && message.id !== inflightId) return;
+        console.error(`error ${message.code}: ${message.message}`);
+        finish(1);
+        return;
+      }
+    },
+    onBinary(frame: Buffer) {
+      if (closing) return;
+      const decoded = decodeOutputFrame(frame);
+      if (inflightId === null || decoded.id !== inflightId) return;
+      if (decoded.stream === "stdout") {
+        process.stdout.write(decoded.data);
+        client.send({
+          type: "exec_window",
+          id: decoded.id,
+          stdout: decoded.data.length,
+        });
+      } else {
+        process.stderr.write(decoded.data);
+        client.send({
+          type: "exec_window",
+          id: decoded.id,
+          stderr: decoded.data.length,
+        });
+      }
+    },
+    onClose(err?: Error) {
+      if (closing) return;
+      if (err) {
+        console.error(`socket error: ${err.message}`);
+        finish(1);
+        return;
+      }
+      console.error("session connection closed before the command finished");
+      finish(1);
+    },
   });
+}
 
-  socket.on("error", (err) => {
-    console.error(`socket error: ${err.message}`);
-    finish(1);
+/** Resolve `--sock` as a socket path, falling back to a session id (or prefix) */
+async function resolveExecSocketPath(value: string): Promise<string> {
+  if (value.includes("/") || fs.existsSync(value)) return value;
+  await gcSessions().catch(() => {
+    // ignore
   });
-
-  socket.on("end", () => {
-    if (!closing && exitCode === 0) exitCode = 1;
-  });
-
-  socket.on("close", () => {
-    process.exit(exitCode);
-  });
+  const session = await findSession(value);
+  if (!session?.alive) {
+    throw new Error(`session not found or not running: ${value}`);
+  }
+  return session.socketPath;
 }
 
 async function runExec(argv: string[] = process.argv.slice(2)) {
   const args = parseExecArgs(argv);
 
-  if (args.commands.length === 0) {
+  if (args.commands.length === 0 && !args.common.printConfigure) {
     execUsage();
     process.exit(1);
   }
 
   if (args.sock) {
-    // Socket mode (direct virtio connection)
-    await runExecSocket(args);
+    // Socket mode (session IPC)
+    runExecSocket(args, await resolveExecSocketPath(args.sock));
   } else {
     args.common.secrets = await resolveSecretHosts(args.common.secrets);
 
@@ -1538,6 +1759,17 @@ function parseBashArgs(argv: string[]): BashArgs {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
 
+    if (arg.startsWith("--vmm=")) {
+      const raw = arg.slice("--vmm=".length);
+      try {
+        args.vmm = parseVmmOption(raw);
+      } catch (err) {
+        console.error(errorMessage(err));
+        process.exit(1);
+      }
+      continue;
+    }
+
     if (arg.startsWith("--rootfs-size=")) {
       args.rootfsSize = parseRootfsSizeOption(
         arg.slice("--rootfs-size=".length),
@@ -1583,25 +1815,25 @@ function parseBashArgs(argv: string[]): BashArgs {
         break;
       }
       case "--vmm": {
-        const vmm = argv[++i] as any;
-        if (vmm !== "firecracker" && vmm !== "vfkit") {
-          console.error("--vmm must be one of: firecracker, vfkit");
+        const value = argv[++i];
+        if (!value) {
+          console.error("--vmm requires an argument");
           process.exit(1);
         }
-        args.vmm = vmm;
-        break;
-      }
-      case "--vfkit": {
-        const vfkitPath = argv[++i];
-        if (!vfkitPath) {
-          console.error("--vfkit requires a path argument");
+        try {
+          args.vmm = parseVmmOption(value);
+        } catch (err) {
+          console.error(errorMessage(err));
           process.exit(1);
         }
-        args.vfkitPath = vfkitPath;
         break;
       }
       case "--rootfs-size": {
         args.rootfsSize = parseRootfsSizeOption(argv[++i], fail);
+        break;
+      }
+      case "--print-configure": {
+        args.printConfigure = true;
         break;
       }
       case "--allow-host": {
@@ -1611,6 +1843,15 @@ function parseBashArgs(argv: string[]): BashArgs {
           process.exit(1);
         }
         args.allowedHosts.push(host);
+        break;
+      }
+      case "--hooks-script": {
+        const file = argv[++i];
+        if (!file) {
+          console.error("--hooks-script requires a file argument");
+          process.exit(1);
+        }
+        args.hooksScript = file;
         break;
       }
       case "--host-secret": {
@@ -1665,7 +1906,7 @@ function parseBashArgs(argv: string[]): BashArgs {
           const mapping = parseTcpMapSpec(spec);
           args.tcpHostMappings[mapping.key] = mapping.value;
         } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
+          console.error(errorMessage(err));
           process.exit(1);
         }
         break;
@@ -1707,7 +1948,7 @@ function parseBashArgs(argv: string[]): BashArgs {
         try {
           args.sshCredentials.push(parseSshCredential(spec));
         } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
+          console.error(errorMessage(err));
           process.exit(1);
         }
         break;
@@ -1811,11 +2052,16 @@ function parseBashArgs(argv: string[]): BashArgs {
 async function runBash(argv: string[]) {
   const args = parseBashArgs(argv);
   args.secrets = await resolveSecretHosts(args.secrets);
-  const [{ VM }, { attachTty }, vmOptions] = await Promise.all([
-    import("../src/vm/core.ts"),
-    import("../src/utils/tty-attach.ts"),
-    buildVmOptions(args),
-  ]);
+  const vmOptions = buildVmOptions(args);
+  if (args.printConfigure) {
+    try {
+      await printNativeConfigure(vmOptions, args.resume);
+    } catch (err) {
+      renderCliError(err);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
   let vm: VM | null = null;
   let ingressAccess: { url: string; close(): Promise<void> } | null = null;
   let exitCode = 1;
@@ -1823,7 +2069,6 @@ async function runBash(argv: string[]) {
   try {
     if (args.resume) {
       const checkpointPath = resolveResumeCheckpoint(args.resume);
-      const { VmCheckpoint } = await import("../src/checkpoint.ts");
       const checkpoint = VmCheckpoint.load(checkpointPath);
       vm = (await checkpoint.resume(vmOptions)) as VM;
     } else {
@@ -1869,10 +2114,8 @@ async function runBash(argv: string[]) {
 
     const ESCAPE_BYTE = 0x1d; // Ctrl-]
 
-    let resolveEscape!: () => void;
-    const escapePromise = new Promise<void>((resolve) => {
-      resolveEscape = resolve;
-    });
+    const { promise: escapePromise, resolve: resolveEscape } =
+      Promise.withResolvers<void>();
 
     // This intentionally shares logic with ExecProcess.attach() via attachTty()
     // to minimize drift while still allowing the CLI-local Ctrl-] escape hatch.
@@ -2001,8 +2244,6 @@ function formatAge(createdAt: string): string {
 
 async function runList(argv: string[]) {
   const args = parseListArgs(argv);
-  const { gcSessions, listSessions } =
-    await import("../src/session-registry.ts");
 
   // Best-effort cleanup first.
   await gcSessions().catch(() => {
@@ -2123,21 +2364,13 @@ function parseAttachArgs(argv: string[]): AttachArgs {
 
 async function runAttach(argv: string[]) {
   const args = parseAttachArgs(argv);
-  const [sessionRegistry, controlProtocol, tty] = await Promise.all([
-    import("../src/session-registry.ts"),
-    import("../src/sandbox/control-protocol.ts"),
-    import("../src/utils/tty-attach.ts"),
-  ]);
-  const { connectToSession, findSession, gcSessions } = sessionRegistry;
-  const { decodeOutputFrame } = controlProtocol;
-  const { attachTty } = tty;
 
   await gcSessions().catch(() => {
     // ignore
   });
 
   const session = await findSession(args.sessionId);
-  if (!session || !session.alive) {
+  if (!session?.alive) {
     throw new Error(`session not found or not running: ${args.sessionId}`);
   }
 
@@ -2373,15 +2606,13 @@ function parseSnapshotArgs(argv: string[]): SnapshotArgs {
 
 async function runSnapshot(argv: string[]) {
   const args = parseSnapshotArgs(argv);
-  const { connectToSession, findSession, gcSessions } =
-    await import("../src/session-registry.ts");
 
   await gcSessions().catch(() => {
     // ignore
   });
 
   const session = await findSession(args.sessionId);
-  if (!session || !session.alive) {
+  if (!session?.alive) {
     throw new Error(`session not found or not running: ${args.sessionId}`);
   }
 
@@ -2474,6 +2705,7 @@ async function runSnapshot(argv: string[]) {
 
 function buildUsage() {
   console.log("Usage: gondolin build [options]");
+  console.log("       gondolin build cache <info|rm|update> [options]");
   console.log();
   console.log("Build custom guest assets (kernel, initramfs, rootfs).");
   console.log();
@@ -2521,6 +2753,11 @@ function buildUsage() {
   console.log();
   console.log("Verify built assets:");
   console.log("  gondolin build --verify ./my-assets");
+  console.log();
+  console.log("Manage the Alpine build cache:");
+  console.log("  gondolin build cache info");
+  console.log("  gondolin build cache rm [--yes]");
+  console.log("  gondolin build cache update [--config FILE] [--arch ARCH]");
 }
 
 type BuildArgs = {
@@ -2609,13 +2846,169 @@ function parseBuildArgs(argv: string[]): BuildArgs {
   return args;
 }
 
+/** Ask for a yes/no confirmation on the terminal (defaults to no) */
+async function confirmDestructive(
+  question: string,
+  assumeYes: boolean,
+): Promise<boolean> {
+  if (assumeYes) return true;
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = await rl.question(`${question} [y/N] `);
+    if (/^(?:y|yes)$/i.test(answer.trim())) return true;
+    console.log("Aborted.");
+    return false;
+  } finally {
+    rl.close();
+  }
+}
+
+function formatByteSize(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
+}
+
+async function runBuildCache(argv: string[]) {
+  const [subcommand, ...rest] = argv;
+
+  if (!subcommand || subcommand === "--help" || subcommand === "-h") {
+    buildUsage();
+    return;
+  }
+
+  if (subcommand === "info") {
+    if (rest.length > 0) {
+      throw new Error(`unexpected argument for build cache info: ${rest[0]}`);
+    }
+    const info = inspectAlpineBuildCache();
+    console.log(`Alpine build cache: ${info.cacheDir}`);
+    console.log(`Size: ${formatByteSize(info.sizeBytes)}`);
+    console.log(`Package archives: ${info.packageArchiveCount}`);
+
+    if (info.minirootfs.length === 0) {
+      console.log("Minirootfs: none");
+    } else {
+      console.log("Minirootfs:");
+      for (const entry of info.minirootfs) {
+        console.log(
+          `  Alpine ${entry.version} (${entry.arch}), cached ${entry.modifiedAt}`,
+        );
+      }
+    }
+
+    if (info.indexes.length === 0) {
+      console.log("Repository indexes: none");
+    } else {
+      console.log("Repository indexes:");
+      for (const index of info.indexes) {
+        console.log(`  ${index.file}, cached ${index.modifiedAt}`);
+        for (const pkg of index.kernelPackages) {
+          console.log(`    ${pkg.name}: ${pkg.version}`);
+        }
+      }
+    }
+    return;
+  }
+
+  if (subcommand === "rm") {
+    let assumeYes = false;
+    for (const arg of rest) {
+      if (arg === "--yes" || arg === "-y") {
+        assumeYes = true;
+        continue;
+      }
+      throw new Error(`unexpected argument for build cache rm: ${arg}`);
+    }
+
+    if (
+      !(await confirmDestructive(
+        `Remove Alpine build cache at ${alpineBuildCacheDirectory()}?`,
+        assumeYes,
+      ))
+    ) {
+      return;
+    }
+
+    const removed = removeAlpineBuildCache();
+    console.log(
+      `Removed ${removed.removedEntries} cache entries (${formatByteSize(removed.removedBytes)}).`,
+    );
+    return;
+  }
+
+  if (subcommand === "update") {
+    let configFile: string | undefined;
+    let arch: "aarch64" | "x86_64" | undefined;
+    for (let i = 0; i < rest.length; i += 1) {
+      const arg = rest[i]!;
+      if (arg === "--config") {
+        const value = rest[++i];
+        if (!value) throw new Error("--config requires a file path");
+        configFile = value;
+        continue;
+      }
+      if (arg === "--arch") {
+        const value = rest[++i];
+        if (value !== "aarch64" && value !== "x86_64") {
+          throw new Error("--arch must be aarch64 or x86_64");
+        }
+        arch = value;
+        continue;
+      }
+      throw new Error(`unexpected argument for build cache update: ${arg}`);
+    }
+
+    let config = getDefaultBuildConfig();
+    if (configFile) {
+      const configPath = path.resolve(configFile);
+      if (!fs.existsSync(configPath)) {
+        throw new Error(`Config file not found: ${configPath}`);
+      }
+      config = parseBuildConfig(fs.readFileSync(configPath, "utf8"));
+    }
+    if (config.distro !== "alpine") {
+      throw new Error("build cache update currently supports Alpine only");
+    }
+    if (arch) config.arch = arch;
+
+    const alpine = config.alpine ?? { version: "3.23.7" };
+    console.log(
+      `Updating Alpine ${alpine.branch ?? alpine.version} package indexes for ${config.arch}...`,
+    );
+    const indexes = await updateAlpineBuildCache({
+      arch: config.arch,
+      version: alpine.version,
+      branch: alpine.branch,
+      mirror: alpine.mirror,
+    });
+    for (const index of indexes) {
+      console.log(`Updated ${index}`);
+    }
+    return;
+  }
+
+  throw new Error(`unknown build cache command: ${subcommand}`);
+}
+
 async function runBuild(argv: string[]) {
+  if (argv[0] === "cache") {
+    await runBuildCache(argv.slice(1));
+    return;
+  }
+
   const args = parseBuildArgs(argv);
 
   // Handle --init-config
   if (args.initConfig) {
-    const { getDefaultBuildConfig, serializeBuildConfig } =
-      await import("../src/build/config.ts");
     const config = getDefaultBuildConfig();
     if (args.arch) {
       config.arch = args.arch;
@@ -2626,10 +3019,6 @@ async function runBuild(argv: string[]) {
 
   // Handle --verify
   if (args.verify) {
-    const [{ loadAssetManifest }, { verifyAssets }] = await Promise.all([
-      import("../src/assets.ts"),
-      import("../src/build/index.ts"),
-    ]);
     const assetDir = path.resolve(args.verify);
     const manifest = loadAssetManifest(assetDir);
 
@@ -2653,8 +3042,6 @@ async function runBuild(argv: string[]) {
   }
 
   // Load or create config
-  const { getDefaultBuildConfig, parseBuildConfig } =
-    await import("../src/build/config.ts");
   let config: BuildConfig;
   let configDir: string | undefined;
   if (args.configFile) {
@@ -2668,7 +3055,7 @@ async function runBuild(argv: string[]) {
     try {
       config = parseBuildConfig(configContent);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       console.error(`Failed to parse config: ${message}`);
       process.exit(1);
     }
@@ -2688,11 +3075,6 @@ async function runBuild(argv: string[]) {
 
   // Run the build
   try {
-    const [{ buildAssets }, imageStore] = await Promise.all([
-      import("../src/build/index.ts"),
-      import("../src/images.ts"),
-    ]);
-    const { importImageFromDirectory, setImageRef } = imageStore;
     const result = await buildAssets(config, {
       outputDir,
       configDir,
@@ -2736,7 +3118,7 @@ async function runBuild(argv: string[]) {
       }
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     throw new Error(`Build failed: ${message}`);
   } finally {
     if (cleanupOutputDir) {
@@ -2789,9 +3171,6 @@ async function runTools(argv: string[]) {
         }
         throw new Error(`unexpected argument for tools trufflehog: ${arg}`);
       }
-
-      const { ensureTrufflehogBinary, getTrufflehogStatus } =
-        await import("../src/build/trufflehog.ts");
 
       if (install) {
         await ensureTrufflehogBinary({
@@ -2858,6 +3237,11 @@ function imageUsage() {
   console.log("  tag <SOURCE> <TARGET> [--arch aarch64|x86_64]");
   console.log("      Create or update a ref to point at an image");
   console.log();
+  console.log(
+    "  rm <BUILD_ID|REF> [--force] [--yes] | rm --untagged [--yes] | rm --all [--yes]",
+  );
+  console.log("      Remove local image tags or objects after confirmation");
+  console.log();
   console.log("  inspect <SELECTOR> [--arch aarch64|x86_64]");
   console.log(
     "      Show details for a path, build id, or ref (pulls from registry if needed)",
@@ -2889,14 +3273,6 @@ async function runImage(argv: string[]) {
     process.exit(subcommand ? 0 : 1);
   }
 
-  const {
-    ensureImageSelector,
-    importImageFromDirectory,
-    listImageRefs,
-    setImageRef,
-    tagImage,
-  } = await import("../src/images.ts");
-
   switch (subcommand) {
     case "ls": {
       if (rest.includes("--help") || rest.includes("-h")) {
@@ -2904,8 +3280,9 @@ async function runImage(argv: string[]) {
         return;
       }
       const refs = listImageRefs();
-      if (refs.length === 0) {
-        console.log("No local image refs found.");
+      const untagged = listUntaggedImages();
+      if (refs.length === 0 && untagged.length === 0) {
+        console.log("No local images found.");
         return;
       }
       for (const ref of refs) {
@@ -2916,6 +3293,9 @@ async function runImage(argv: string[]) {
           .filter(Boolean)
           .join(" ");
         console.log(`${ref.reference}${targets ? `  ${targets}` : ""}`);
+      }
+      for (const image of untagged) {
+        console.log(`<untagged>  ${image.arch}=${image.buildId}`);
       }
       return;
     }
@@ -3011,6 +3391,74 @@ async function runImage(argv: string[]) {
       return;
     }
 
+    case "rm": {
+      let selector: string | undefined;
+      let force = false;
+      let assumeYes = false;
+      let untagged = false;
+      let all = false;
+
+      for (const arg of rest) {
+        if (arg === "--help" || arg === "-h") {
+          imageUsage();
+          return;
+        }
+        if (arg === "--force" || arg === "-f") {
+          force = true;
+          continue;
+        }
+        if (arg === "--yes" || arg === "-y") {
+          assumeYes = true;
+          continue;
+        }
+        if (arg === "--untagged") {
+          untagged = true;
+          continue;
+        }
+        if (arg === "--all") {
+          all = true;
+          continue;
+        }
+        if (!selector) {
+          selector = arg;
+          continue;
+        }
+        throw new Error(`unexpected argument for image rm: ${arg}`);
+      }
+
+      const modes = Number(Boolean(selector)) + Number(untagged) + Number(all);
+      if (modes !== 1) {
+        throw new Error(
+          "image rm requires exactly one of <BUILD_ID|REF>, --untagged, or --all",
+        );
+      }
+      if (force && !selector) {
+        throw new Error("--force requires a build id or image ref");
+      }
+
+      const description = all
+        ? "all local images"
+        : untagged
+          ? "all untagged local images"
+          : `local image ${selector}`;
+      if (!(await confirmDestructive(`Remove ${description}?`, assumeYes))) {
+        return;
+      }
+
+      const removed = all
+        ? removeAllImages()
+        : untagged
+          ? { removedRefs: [], ...removeUntaggedImages() }
+          : removeImage(selector!, { force });
+      for (const ref of removed.removedRefs) {
+        console.log(`Untagged: ${ref.reference} (${ref.arch})`);
+      }
+      for (const buildId of removed.removedBuildIds) {
+        console.log(`Deleted: ${buildId}`);
+      }
+      return;
+    }
+
     case "inspect": {
       let selector: string | undefined;
       let arch: ImageArch | undefined;
@@ -3043,7 +3491,6 @@ async function runImage(argv: string[]) {
       }
 
       const resolved = await ensureImageSelector(selector, arch);
-      const { loadAssetManifest } = await import("../src/assets.ts");
       const manifest = loadAssetManifest(resolved.assetDir);
 
       console.log(`selector: ${resolved.selector}`);
@@ -3111,8 +3558,87 @@ async function runImage(argv: string[]) {
   }
 }
 
+/**
+ * Global engine flags (before the command): `--engine native|auto`,
+ * `--native-command CMD`, `--remote`. They are applied through the
+ * environment (`GONDOLIN_ENGINE`, `GONDOLIN_NATIVE_COMMAND`,
+ * `GONDOLIN_NATIVE_REMOTE`) so every VM the command creates (including
+ * checkpoint resumes) uses them.
+ */
+function applyGlobalEngineFlags(argv: string[]): string[] {
+  const rest = [...argv];
+  const fail = (message: string): never => {
+    console.error(message);
+    usage();
+    process.exit(1);
+  };
+  while (rest.length > 0 && rest[0]!.startsWith("--")) {
+    const arg = rest[0]!;
+    const [name, inline] = arg.includes("=")
+      ? [arg.slice(0, arg.indexOf("=")), arg.slice(arg.indexOf("=") + 1)]
+      : [arg, undefined];
+    const takeValue = (): string => {
+      if (inline !== undefined) return inline;
+      const value = rest[1];
+      if (value === undefined || value.startsWith("--")) {
+        fail(`${name} requires an argument`);
+      }
+      rest.shift();
+      return value!;
+    };
+    if (name === "--engine") {
+      const engine = takeValue().trim().toLowerCase();
+      if (engine === "node") {
+        fail(
+          "--engine node: the node engine has been removed; Gondolin always uses the native engine",
+        );
+      }
+      if (engine !== "native" && engine !== "auto") {
+        fail(`invalid --engine: ${engine} (expected native or auto)`);
+      }
+      process.env.GONDOLIN_ENGINE = engine;
+    } else if (name === "--native-command") {
+      process.env.GONDOLIN_NATIVE_COMMAND = takeValue();
+    } else if (name === "--remote") {
+      process.env.GONDOLIN_NATIVE_REMOTE = "1";
+    } else {
+      break;
+    }
+    rest.shift();
+  }
+  return rest;
+}
+
+/** `gondolin --version`: package version plus the gondolind it resolves. */
+function runVersion() {
+  let version = "unknown";
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 6; i++) {
+    const pkgPath = path.join(dir, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+        name?: string;
+        version?: string;
+      };
+      if (pkg.name === "@earendil-works/gondolin" && pkg.version) {
+        version = pkg.version;
+        break;
+      }
+    }
+    dir = path.dirname(dir);
+  }
+  console.log(`gondolin ${version}`);
+  let native: string;
+  try {
+    native = nativeDaemonCommand(resolveNativeBinary()).join(" ");
+  } catch (err) {
+    native = `not available (${err instanceof Error ? err.message : String(err)})`;
+  }
+  console.log(`gondolind: ${native}`);
+}
+
 async function main() {
-  const [command, ...args] = process.argv.slice(2);
+  const [command, ...args] = applyGlobalEngineFlags(process.argv.slice(2));
 
   if (
     !command ||
@@ -3125,6 +3651,11 @@ async function main() {
   }
 
   switch (command) {
+    case "version":
+    case "--version":
+    case "-V":
+      runVersion();
+      return;
     case "exec":
       await runExec(args);
       return;
@@ -3170,8 +3701,6 @@ function isMainModule(moduleUrl: string): boolean {
 export const __test = {
   buildVmOptions,
   parseHostSecret,
-  assertInteractiveSecretHostDiscovery,
-  selectSuggestedSecretHosts,
 };
 
 if (isMainModule(import.meta.url)) {

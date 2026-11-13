@@ -7,13 +7,16 @@ import test, { afterEach } from "node:test";
 
 import { computeAssetBuildId } from "../src/assets.ts";
 import {
-  __test,
   ensureImageSelector,
   importImageFromDirectory,
   listImageRefs,
+  listUntaggedImages,
   resolveImageSelector,
   setImageRef,
   tagImage,
+  removeImage,
+  removeUntaggedImages,
+  removeAllImages,
 } from "../src/images.ts";
 import { resolveSandboxServerOptions } from "../src/sandbox/server-options.ts";
 
@@ -32,31 +35,21 @@ type FakeAssets = {
   buildId: string;
 };
 
-function hostManifestArch(): "aarch64" | "x86_64" {
-  return process.arch === "arm64" ? "aarch64" : "x86_64";
-}
-
 function createFakeAssets(arch: "aarch64" | "x86_64"): FakeAssets {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-images-assets-"));
 
   const kernel = path.join(dir, "vmlinuz-virt");
   const initramfs = path.join(dir, "initramfs.cpio.lz4");
   const rootfs = path.join(dir, "rootfs.ext4");
-  const firecrackerKernel = path.join(dir, "firecracker-kernel");
-  const vfkitKernel = path.join(dir, "vfkit-kernel");
 
   fs.writeFileSync(kernel, `kernel-${arch}`);
   fs.writeFileSync(initramfs, `initramfs-${arch}`);
   fs.writeFileSync(rootfs, `rootfs-${arch}`);
-  fs.writeFileSync(firecrackerKernel, `firecracker-kernel-${arch}`);
-  fs.writeFileSync(vfkitKernel, `vfkit-kernel-${arch}`);
 
   const checksums = {
     kernel: `k-${arch}`,
     initramfs: `i-${arch}`,
     rootfs: `r-${arch}`,
-    firecrackerKernel: `fc-${arch}`,
-    vfkitKernel: `vfkit-${arch}`,
   };
 
   const buildId = computeAssetBuildId({ checksums, arch });
@@ -76,8 +69,6 @@ function createFakeAssets(arch: "aarch64" | "x86_64"): FakeAssets {
       kernel: "vmlinuz-virt",
       initramfs: "initramfs.cpio.lz4",
       rootfs: "rootfs.ext4",
-      firecrackerKernel: "firecracker-kernel",
-      vfkitKernel: "vfkit-kernel",
     },
     checksums,
   };
@@ -106,9 +97,8 @@ function patchManifestAssets(
     kernel?: string;
     initramfs?: string;
     rootfs?: string;
-    firecrackerKernel?: string;
-    firecrackerInitrd?: string | null;
-    vfkitKernel?: string;
+    krunKernel?: string;
+    krunInitrd?: string;
   },
 ): void {
   patchManifest(dir, (manifest) => {
@@ -152,127 +142,33 @@ test("images: import and resolve by build id", () => {
   }
 });
 
-test("images: import preserves hard-linked image assets", () => {
-  const storeDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "gondolin-images-store-"),
-  );
-  process.env.GONDOLIN_IMAGE_STORE = storeDir;
-
-  const assets = createFakeAssets("x86_64");
-  const kernel = path.join(assets.dir, "vmlinuz-virt");
-  const firecrackerKernel = path.join(assets.dir, "firecracker-kernel");
-  fs.rmSync(firecrackerKernel);
-  fs.linkSync(kernel, firecrackerKernel);
-
-  try {
-    const imported = importImageFromDirectory(assets.dir);
-    const importedKernel = fs.statSync(
-      path.join(imported.assetDir, "vmlinuz-virt"),
-    );
-    const importedFirecrackerKernel = fs.statSync(
-      path.join(imported.assetDir, "firecracker-kernel"),
-    );
-
-    assert.equal(importedKernel.dev, importedFirecrackerKernel.dev);
-    assert.equal(importedKernel.ino, importedFirecrackerKernel.ino);
-  } finally {
-    fs.rmSync(storeDir, { recursive: true, force: true });
-    fs.rmSync(assets.dir, { recursive: true, force: true });
-  }
-});
-
-test("images: inode identity remains exact above Number.MAX_SAFE_INTEGER", () => {
-  const inode = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
-  assert.equal(Number(inode), Number(inode + 1n));
-  assert.equal(
-    __test.sameFileIdentity(
-      { dev: 1n, ino: inode },
-      { dev: 1n, ino: inode + 1n },
-    ),
-    false,
-  );
-  assert.equal(
-    __test.sameFileIdentity({ dev: 1n, ino: inode }, { dev: 1n, ino: inode }),
-    true,
-  );
-});
-
-test("images: import preserves optional Firecracker initrd from manifest", () => {
+test("images: import preserves optional krun assets from manifest", () => {
   const storeDir = fs.mkdtempSync(
     path.join(os.tmpdir(), "gondolin-images-store-"),
   );
   process.env.GONDOLIN_IMAGE_STORE = storeDir;
 
   const assets = createFakeAssets("aarch64");
-  const firecrackerInitrd = path.join(assets.dir, "firecracker-initrd");
-  fs.writeFileSync(firecrackerInitrd, "");
+  const krunKernel = path.join(assets.dir, "krun-kernel");
+  const krunInitrd = path.join(assets.dir, "krun-initrd");
+  fs.writeFileSync(krunKernel, "krun-kernel");
+  fs.writeFileSync(krunInitrd, "");
 
   patchManifestAssets(assets.dir, {
-    firecrackerInitrd: "firecracker-initrd",
+    krunKernel: "krun-kernel",
+    krunInitrd: "krun-initrd",
   });
 
   try {
     const imported = importImageFromDirectory(assets.dir);
 
     assert.equal(
-      fs.readFileSync(
-        path.join(imported.assetDir, "firecracker-kernel"),
-        "utf8",
-      ),
-      "firecracker-kernel-aarch64",
+      fs.readFileSync(path.join(imported.assetDir, "krun-kernel"), "utf8"),
+      "krun-kernel",
     );
     assert.equal(
-      fs.existsSync(path.join(imported.assetDir, "firecracker-initrd")),
+      fs.existsSync(path.join(imported.assetDir, "krun-initrd")),
       true,
-    );
-  } finally {
-    fs.rmSync(storeDir, { recursive: true, force: true });
-    fs.rmSync(assets.dir, { recursive: true, force: true });
-  }
-});
-
-test("images: import preserves disabled Firecracker initrd from manifest", () => {
-  const storeDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "gondolin-images-store-"),
-  );
-  process.env.GONDOLIN_IMAGE_STORE = storeDir;
-
-  const assets = createFakeAssets("aarch64");
-  patchManifestAssets(assets.dir, {
-    firecrackerInitrd: null,
-  });
-
-  try {
-    const imported = importImageFromDirectory(assets.dir);
-    const manifest = JSON.parse(
-      fs.readFileSync(path.join(imported.assetDir, "manifest.json"), "utf8"),
-    );
-
-    assert.equal(manifest.assets.firecrackerInitrd, null);
-    assert.equal(
-      fs.existsSync(path.join(imported.assetDir, "firecracker-initrd")),
-      false,
-    );
-  } finally {
-    fs.rmSync(storeDir, { recursive: true, force: true });
-    fs.rmSync(assets.dir, { recursive: true, force: true });
-  }
-});
-
-test("images: import preserves optional vfkit kernel from manifest", () => {
-  const storeDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "gondolin-images-store-"),
-  );
-  process.env.GONDOLIN_IMAGE_STORE = storeDir;
-
-  const assets = createFakeAssets("aarch64");
-
-  try {
-    const imported = importImageFromDirectory(assets.dir);
-
-    assert.equal(
-      fs.readFileSync(path.join(imported.assetDir, "vfkit-kernel"), "utf8"),
-      "vfkit-kernel-aarch64",
     );
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
@@ -324,6 +220,208 @@ test("images: tagImage can tag from asset directory selectors", () => {
 
     const resolved = resolveImageSelector("tooling:dev", "x86_64");
     assert.equal(resolved.buildId, imported.buildId);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: listUntaggedImages excludes objects referenced by tags", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const taggedAssets = createFakeAssets("aarch64");
+  const untaggedAssets = createFakeAssets("x86_64");
+
+  try {
+    const tagged = importImageFromDirectory(taggedAssets.dir);
+    const untagged = importImageFromDirectory(untaggedAssets.dir);
+    setImageRef("tooling:tagged", tagged.buildId, tagged.arch);
+
+    const images = listUntaggedImages();
+    assert.deepEqual(
+      images.map((image) => ({ buildId: image.buildId, arch: image.arch })),
+      [{ buildId: untagged.buildId, arch: "x86_64" }],
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(taggedAssets.dir, { recursive: true, force: true });
+    fs.rmSync(untaggedAssets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeUntaggedImages preserves tagged objects", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const taggedAssets = createFakeAssets("aarch64");
+  const untaggedAssets = createFakeAssets("x86_64");
+
+  try {
+    const tagged = importImageFromDirectory(taggedAssets.dir);
+    const untagged = importImageFromDirectory(untaggedAssets.dir);
+    setImageRef("tooling:tagged", tagged.buildId, tagged.arch);
+
+    const removed = removeUntaggedImages();
+    assert.deepEqual(removed.removedBuildIds, [untagged.buildId]);
+    assert.equal(fs.existsSync(tagged.assetDir), true);
+    assert.equal(fs.existsSync(untagged.assetDir), false);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(taggedAssets.dir, { recursive: true, force: true });
+    fs.rmSync(untaggedAssets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeAllImages clears refs and objects", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const taggedAssets = createFakeAssets("aarch64");
+  const untaggedAssets = createFakeAssets("x86_64");
+
+  try {
+    const tagged = importImageFromDirectory(taggedAssets.dir);
+    const untagged = importImageFromDirectory(untaggedAssets.dir);
+    setImageRef("tooling:tagged", tagged.buildId, tagged.arch);
+
+    const removed = removeAllImages();
+    assert.deepEqual(removed.removedRefs, [
+      { reference: "tooling:tagged", arch: "aarch64" },
+    ]);
+    assert.deepEqual(
+      new Set(removed.removedBuildIds),
+      new Set([tagged.buildId, untagged.buildId]),
+    );
+    assert.equal(listImageRefs().length, 0);
+    assert.equal(listUntaggedImages().length, 0);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(taggedAssets.dir, { recursive: true, force: true });
+    fs.rmSync(untaggedAssets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeImage deletes an object after removing its last tag", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    setImageRef("tooling:dev", imported.buildId, imported.arch);
+
+    const removed = removeImage("tooling:dev");
+
+    assert.deepEqual(removed.removedRefs, [
+      { reference: "tooling:dev", arch: "x86_64" },
+    ]);
+    assert.deepEqual(removed.removedBuildIds, [imported.buildId]);
+    assert.equal(fs.existsSync(imported.assetDir), false);
+    assert.equal(listImageRefs().length, 0);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeImage keeps objects referenced by another tag", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("aarch64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    setImageRef("tooling:first", imported.buildId, imported.arch);
+    setImageRef("tooling:second", imported.buildId, imported.arch);
+
+    const first = removeImage("tooling:first");
+    assert.deepEqual(first.removedBuildIds, []);
+    assert.equal(fs.existsSync(imported.assetDir), true);
+    assert.equal(
+      resolveImageSelector("tooling:second", "aarch64").buildId,
+      imported.buildId,
+    );
+
+    const second = removeImage("tooling:second");
+    assert.deepEqual(second.removedBuildIds, [imported.buildId]);
+    assert.equal(fs.existsSync(imported.assetDir), false);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeImage removes every architecture associated with a tag", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const armAssets = createFakeAssets("aarch64");
+  const x64Assets = createFakeAssets("x86_64");
+
+  try {
+    const armImage = importImageFromDirectory(armAssets.dir);
+    const x64Image = importImageFromDirectory(x64Assets.dir);
+    setImageRef("tooling:multi", armImage.buildId, armImage.arch);
+    setImageRef("tooling:multi", x64Image.buildId, x64Image.arch);
+
+    const removed = removeImage("tooling:multi");
+
+    assert.deepEqual(removed.removedRefs, [
+      { reference: "tooling:multi", arch: "aarch64" },
+      { reference: "tooling:multi", arch: "x86_64" },
+    ]);
+    assert.deepEqual(
+      new Set(removed.removedBuildIds),
+      new Set([armImage.buildId, x64Image.buildId]),
+    );
+    assert.equal(fs.existsSync(armImage.assetDir), false);
+    assert.equal(fs.existsSync(x64Image.assetDir), false);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    fs.rmSync(armAssets.dir, { recursive: true, force: true });
+    fs.rmSync(x64Assets.dir, { recursive: true, force: true });
+  }
+});
+
+test("images: removeImage requires force to delete a tagged build id", () => {
+  const storeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gondolin-images-store-"),
+  );
+  process.env.GONDOLIN_IMAGE_STORE = storeDir;
+
+  const assets = createFakeAssets("x86_64");
+
+  try {
+    const imported = importImageFromDirectory(assets.dir);
+    setImageRef("tooling:dev", imported.buildId, imported.arch);
+
+    assert.throws(
+      () => removeImage(imported.buildId),
+      /remove those tags first or use --force/,
+    );
+
+    const removed = removeImage(imported.buildId, { force: true });
+    assert.deepEqual(removed.removedRefs, [
+      { reference: "tooling:dev", arch: "x86_64" },
+    ]);
+    assert.deepEqual(removed.removedBuildIds, [imported.buildId]);
+    assert.equal(fs.existsSync(imported.assetDir), false);
+    assert.equal(listImageRefs().length, 0);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });
@@ -649,8 +747,6 @@ test("images: ensureImageSelector pulls refs from builtin registry", async () =>
         "vmlinuz-virt",
         "initramfs.cpio.lz4",
         "rootfs.ext4",
-        "firecracker-kernel",
-        "vfkit-kernel",
       ],
       { cwd: assets.dir, stdio: "pipe" },
     );
@@ -773,23 +869,21 @@ test("images: sandbox server options accept image refs", () => {
   );
   process.env.GONDOLIN_IMAGE_STORE = storeDir;
 
-  const assets = createFakeAssets(hostManifestArch());
+  const assets = createFakeAssets("aarch64");
 
   try {
     const imported = importImageFromDirectory(assets.dir);
     setImageRef("default:latest", imported.buildId, imported.arch);
 
-    const resolved = resolveSandboxServerOptions(
-      {
-        imagePath: "default:latest",
-        netEnabled: false,
-      },
-      undefined,
-      { platform: "linux" },
-    );
+    const resolved = resolveSandboxServerOptions({
+      imagePath: "default:latest",
+      vmm: "qemu",
+      qemuPath: "qemu-system-aarch64",
+      netEnabled: false,
+    });
 
     assert.equal(path.dirname(resolved.rootfsPath), imported.assetDir);
-    assert.equal(path.basename(resolved.kernelPath), "firecracker-kernel");
+    assert.equal(path.dirname(resolved.kernelPath), imported.assetDir);
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
     fs.rmSync(assets.dir, { recursive: true, force: true });

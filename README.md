@@ -1,271 +1,181 @@
-# Gondolin Firecracker Sandbox
+# Gondolin Firecracker — Native Engine
 
-**Linux micro-VMs for agent workloads.**
+**Local Linux micro-VMs with programmable network and filesystem control.**
 
-Gondolin runs untrusted code inside a small Linux VM and exposes a host control
-plane for command execution, VFS mounts, optional host-to-guest SSH, ingress,
-and disk checkpoints. The default runtime is Firecracker on Linux/KVM. An
-experimental `vfkit` backend is available on macOS for local Apple Silicon
-development.
+AI agents increasingly run generated code without human review.  That code often
+needs network access and credentials, which creates exfiltration risk.
 
-## Quick Start
+This fork runs that code inside a local Linux micro-VM (Firecracker by default
+on Linux; libkrun/QEMU on macOS, with explicit vfkit support) while keeping network and filesystem access under
+host-side policy control.  That policy layer can be
+customized via JavaScript.
+
+## Fork Status
+
+The runtime is now upstream's Rust engine, integrating upstream main through
+`761ebfe` and the native Firecracker branch through `7171f8e`. The TypeScript
+SDK remains, but the former Node engine is removed. This is an unreleased
+checkout migration, not a new npm release.
+
+Preserved fork features: Linux Firecracker defaults (84 MB, one vCPU, networking
+off), macOS vfkit, startup timing records, raw disk checkpoints, same-host
+Firecracker VM-state snapshots, tiny/fast/initramfs image profiles and the
+multitenant simulator. Snapshot host-state format is new: old Node-engine
+VM-state snapshots cannot be imported. See [migration notes](docs/upgrading.md),
+[backends](docs/backends.md) and [snapshots](docs/snapshots.md).
+
+Build the native runtime with `make native`, then rebuild custom guest images
+with Zig 0.17.0 and the current guest helpers
+(`GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1 make -C guest build`). Existing performance figures
+for tiny images are historical; remeasure them with this engine.
+
+## Quick Example
+
+```ts
+import { VM, createHttpHooks } from "@earendil-works/gondolin";
+
+const { httpHooks, env } = createHttpHooks({
+  allowedHosts: ["api.github.com"],
+  secrets: {
+    GITHUB_TOKEN: {
+      hosts: ["api.github.com"],
+      value: process.env.GITHUB_TOKEN!,
+    },
+  },
+});
+
+const vm = await VM.create({ httpHooks, env, sandbox: { netEnabled: true } });
+
+// String form runs in /bin/sh -lc "..."
+const result = await vm.exec(`
+  curl -sS -f \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    https://api.github.com/user
+`);
+
+console.log("exitCode:", result.exitCode);
+console.log("stdout:\n", result.stdout);
+console.log("stderr:\n", result.stderr);
+
+await vm.close();
+```
+
+The guest only sees a placeholder token. The real secret is injected by the
+host only for allowed destinations (including `Authorization: Basic ...` flows).
+
+## CLI Quick Start
 
 ```bash
 npx @earendil-works/gondolin bash
 ```
 
-Useful commands:
+Useful session commands:
 
 ```bash
+# List running sessions
 npx @earendil-works/gondolin list
+
+# Attach to an existing session
 npx @earendil-works/gondolin attach <session-id>
+
+# Snapshot a running session (stops it)
 npx @earendil-works/gondolin snapshot <session-id>
-npx @earendil-works/gondolin bash --resume <snapshot-id-or-raw-path>
+
+# Resume from snapshot id/path
+npx @earendil-works/gondolin bash --resume <snapshot-id-or-path>
 ```
+
+Guest images (~200MB+) are downloaded on first use from the builtin registry
+and cached locally (default: `alpine-base:latest`).
 
 ## Requirements
 
-- Firecracker backend: Linux host with `/dev/kvm`
-- Firecracker backend: Firecracker binary on `PATH` or `GONDOLIN_FIRECRACKER=/path/to/firecracker`
-- vfkit backend: macOS with `vfkit` on `PATH` or `GONDOLIN_VFKIT=/path/to/vfkit`
-- Python 3 and `ip` from iproute2 when mediated guest egress is enabled
-- `/dev/net/tun` plus `CAP_NET_ADMIN`/`CAP_NET_RAW` when mediated guest egress is enabled
-- Node.js `>=23.6`
-- Firecracker images with `manifest.assets.firecrackerKernel`
-- vfkit images with `manifest.assets.vfkitKernel`
+For this fork on Linux, install Firecracker 1.18+ and provide KVM (or explicitly
+select QEMU/krun). For vfkit, use Apple Silicon macOS, install vfkit, build
+`images/alpine-vfkit.json`, and set `GONDOLIN_VMM=vfkit`. vfkit has no mediated
+guest networking. The table below describes upstream npm packages, not a
+published build of this fork.
 
-Defaults are tuned for low memory and startup cost: `1` vCPU, `84M`, no serial
-console, no guest network device unless `netEnabled` is set, and read-only base
-rootfs. Use VFS mounts for workspace data. Use `rootfs.mode="cow"` only when the
-workload must write into the root disk.
+| Host                                 | VM backend | Install                                                    |
+| ------------------------------------ | ---------- | ---------------------------------------------------------- |
+| macOS, Apple silicon                 | krun       | Node.js only (`brew install node`)                         |
+| Linux x86_64 with `/dev/kvm`         | krun       | Node.js only                                               |
+| macOS, Intel                         | QEMU       | `brew install qemu node`                                   |
+| Linux arm64 (Debian/Ubuntu)          | QEMU       | `sudo apt install qemu-system-arm nodejs npm`              |
+| Linux x86_64 without `/dev/kvm`      | QEMU (TCG) | `sudo apt install qemu-system-x86 nodejs npm`              |
 
-The default Alpine image keeps the guest base intentionally small:
-`linux-virt`, `bash`, `ca-certificates`, and `curl`. Add packages such as
-`openssh`, `python3`, `nodejs`, `npm`, `uv`, or `e2fsprogs` through a custom
-image when a workload actually needs them.
+Node.js 22.19 or newer. `npm install @earendil-works/gondolin` also installs
+the platform packages with the Gondolin daemon (`gondolind`, macOS and Linux on
+arm64 and x64) and, on macOS arm64 and Linux x86_64, the krun runner. VMs run
+on libkrun where it can (Apple silicon, Linux x86_64 with read/write
+`/dev/kvm`) and on QEMU otherwise, so QEMU is only needed on the other hosts
+or when you select the `qemu` backend. See
+[Installation](https://earendil-works.github.io/gondolin/install/) for the
+details, krun on Linux arm64, the static CLI without Node.js, and building
+from a checkout.
 
-On macOS, select the vfkit backend explicitly. The current npm package
-`@earendil-works/gondolin@0.12.0` does not include this backend yet, so run the
-checked-out fork CLI until the next package release:
+## Feature Highlights
 
-```bash
-brew install vfkit
-git clone https://github.com/shanginn/gondolin-firecracker.git
-cd gondolin-firecracker
-corepack enable
-pnpm install
-GONDOLIN_IMAGE_REGISTRY_URL=https://raw.githubusercontent.com/shanginn/gondolin-firecracker/master/builtin-image-registry.json \
-  node host/bin/gondolin.ts exec --vmm vfkit --image alpine-vfkit:latest -- uname -m
-```
-
-The vfkit backend uses `vfkitKernel`/`initramfs`/`rootfs` image assets and
-guest-to-host vsock sockets. Build a local Apple Silicon image with Docker
-Desktop, or publish it from CI with the Image Release workflow:
-
-```bash
-gondolin build --config images/alpine-vfkit.json --output ./guest/image/vfkit --tag alpine-vfkit:local
-gondolin exec --vmm vfkit --image alpine-vfkit:local -- uname -m
-gh workflow run image-release.yml -f image_tag=0.1.0 -f build_config=images/alpine-vfkit.json
-```
-
-When consuming a fork-hosted image release before its registry entry is
-available in the default upstream registry, set `GONDOLIN_IMAGE_REGISTRY_URL` to
-that fork's raw `builtin-image-registry.json`.
-
-Mediated guest egress, Firecracker VM-state snapshots, and the current x86_64
-tiny Firecracker kernel profile are not supported by vfkit.
-
-For lower cold-start and memory floors, the repo also includes:
-
-- `scripts/build-fast-agent-init.sh`: builds a stripped static `/init` for the
-  agent profile
-- `images/alpine-fast-firecracker.json`: tiny kernel, static init, ext4 rootfs,
-  no Firecracker initrd
-- `images/alpine-initramfs-firecracker.json`: tiny kernel plus static init
-  running directly from initramfs
-- `VM#getStartupTimings()`, `VM#createFirecrackerSnapshot()`, and
-  `VM.restoreFirecrackerSnapshot()` for phase timing and same-host idle
-  VM-state restore
-
-## SDK Example
-
-```ts
-import { VM, MemoryProvider } from "@earendil-works/gondolin";
-
-const vm = await VM.create({
-  vfs: {
-    mounts: { "/workspace": new MemoryProvider() },
-  },
-});
-
-const result = await vm.exec("echo hello from $(uname -m)");
-console.log(result.stdout);
-
-await vm.close();
-```
-
-## Network Model
-
-Guest egress is disabled by default. With the Firecracker backend, enabling
-egress attaches a short-lived TAP device and Gondolin mediates DHCP, DNS, TCP,
-HTTP(S), mapped TCP, and outbound SSH in the host process. Gondolin does not
-install host NAT rules; guest packets only leave through the configured policy
-hooks. Host-to-guest ingress and host-to-guest SSH use vsock-backed forwarders.
-The vfkit backend does not support mediated guest egress yet.
-
-## Benchmark Snapshot
-
-### July 10 optimization verification
-
-Measured on bare-metal Debian Linux `6.12.94+deb13-amd64`, an Intel Xeon
-E5-2699 v4, Firecracker `v1.16.0`, and Node.js `v24.14.0`. Values are medians
-from real KVM boots with warm assets. This end-to-end comparison intentionally
-combines the original shell-init tiny profile at commit `b761a40` (`32M`) with
-the optimized initramfs-root profile (`52M`); use the isolated measurements
-below for host-code-only effects.
-
-| Metric                       | Original tiny | Optimized initramfs root | Change |
-| ---------------------------- | ------------: | -----------------------: | -----: |
-| VM object creation           |     `7.28 ms` |                `2.13 ms` | `-71%` |
-| `VM.start()` with VFS ready  |      `689 ms` |                 `108 ms` | `-84%` |
-| First `/bin/true` exec       |     `16.4 ms` |                `14.3 ms` | `-13%` |
-| Cold create/start/first exec |      `712 ms` |                 `124 ms` | `-83%` |
-| Warm `/bin/true` exec p50    |     `16.0 ms` |                `12.1 ms` | `-24%` |
-
-With VFS disabled, the optimized profile's median cold total is `67.5 ms`.
-Twenty consecutive boots of the final stripped image passed. Isolated host
-measurements showed:
-
-- Firecracker spawn-to-API readiness: `28.0 ms` to `5.57 ms` (`-80%`)
-- Four-request Firecracker configuration sequence: `2.35 ms` to `1.82 ms`
-  (`-23%`)
-- Native config-file cold launch versus API-driven setup: `-7.5 ms` (`-6%`)
-- Writable COW `VM.create()` copy increment: `49.9 ms` to `38.6 ms` (`-23%`)
-
-Additional same-host measurements on a 1-vCPU Linux VPS showed CLI help startup
-falling from `274 ms` to `40.5 ms` (`-85%`) and a warm `make check` falling
-from `14.0 s` to `2.92 s` (`-79%`). The npm package fell from `561,166` to
-`358,335` compressed bytes (`-36%`), from `2,927,971` to `1,736,463`
-unpacked bytes (`-41%`), and from `372` to `204` entries (`-45%`).
-
-An 11-run Apple Silicon vfkit comparison reduced cold total from `529 ms` to
-`431 ms` (`-18%`); APFS clone-based VM creation fell from `83.2 ms` to
-`3.21 ms`.
-
-The initramfs-root asset directory fell from `49 MiB` to `19 MiB` (`-61%`).
-An equivalent gzip tarball fell from `24,505,613` to `7,428,596` bytes
-(`-70%`) by stripping the kernel, storing its compatibility name as a hard
-link, and replacing the unused ext4 root with a `512`-byte raw placeholder.
-
-Run repeatable backend and allocation-sensitive host benchmarks with:
-
-```bash
-node host/examples/backend-benchmark.ts --runs 11 --iterations 8 --image /path/to/image --memory 52M
-node host/examples/host-hot-path-benchmark.ts --rounds 9 --iterations 100000
-```
-
-### June 26 profile comparison
-
-Measured on a single-vCPU KVM VPS on June 26, 2026 with warm guest assets:
-Debian Linux `6.12.85+deb13-amd64`, `1` vCPU (`AMD EPYC 7543` under KVM),
-`1.9 GiB` RAM, Firecracker `v1.16.0`, QEMU `10.0.8`, Node.js `v26.4.0`,
-Zig `0.16.0`.
-
-Firecracker values are medians of `5` runs with `1` vCPU, no serial console,
-guest networking disabled, and `50` warm `/bin/true` execs per run. The QEMU
-column is a fresh `3`-run comparison against the original Gondolin/QEMU runtime
-from `@earendil-works/gondolin@0.12.0`, using `256M` and the rebuilt
-`images/alpine-base.json` x86_64 image. The QEMU package does not expose the
-same explicit start split, so its cold path is `VM.create()` plus the first
-successful exec.
-
-| Metric                       | Tiny (`29M`) | Fast static init (`29M`) | Initramfs root (`50M`) | QEMU original (`256M`) |
-| ---------------------------- | -----------: | -----------------------: | ---------------------: | ---------------------: |
-| VM object creation           |     `2.0 ms` |                 `1.3 ms` |               `1.7 ms` |                    n/a |
-| Host-side `VM.start()`       |    `43.2 ms` |                `40.2 ms` |              `41.5 ms` |                    n/a |
-| First `/bin/true` exec       |     `976 ms` |                 `943 ms` |               `180 ms` |              `11.14 s` |
-| Cold create/start/first exec |     `1.01 s` |                 `985 ms` |               `223 ms` |              `11.14 s` |
-| Warm `/bin/true` exec p50    |    `16.0 ms` |                `15.9 ms` |              `16.0 ms` |              `15.3 ms` |
-| Warm `/bin/true` exec p95    |    `17.0 ms` |                `17.7 ms` |              `17.5 ms` |              `24.8 ms` |
-| VMM RSS after warm execs     |   `30.3 MiB` |               `30.3 MiB` |             `54.7 MiB` |            `176.9 MiB` |
-| VMM VSZ after warm execs     |   `37.1 MiB` |               `37.1 MiB` |             `58.1 MiB` |            `723.0 MiB` |
-| VM close                     |    `37.4 ms` |                `38.5 ms` |              `33.2 ms` |              `30.1 ms` |
-
-The default Alpine-derived Firecracker image is still the conservative
-published baseline at `84M`; it keeps the larger distro kernel and package set.
-The optimized profiles above use the tiny custom kernel. The initramfs-root
-profile is the cold-start winner, but `50M` is the measured floor for the full
-agent smoke path and its median cold create/start/first exec is still just above
-`200 ms` on this host.
-
-Sub-`50M` is not a supported target for the default Alpine image. On x86_64,
-Firecracker boots an uncompressed ELF kernel; the current Alpine-derived
-Firecracker kernel asset is `38M` before the initramfs and guest userspace are
-loaded. A June 25, 2026 sweep with VFS disabled (`vfs: null`) still failed at
-`48M`, `50M`, `52M`, `56M`, `60M`, `64M`, and `72M`, then passed at `80M`.
-Booting the compressed Alpine `vmlinuz-virt` directly failed, and stripping BTF
-metadata from the ELF produced a smaller kernel that hung at `80M`.
-
-For the agent-sandbox floor, build the tiny Firecracker kernel and disable the
-Firecracker initrd in the image manifest:
-
-```bash
-scripts/build-tiny-firecracker-kernel.sh
-scripts/build-fast-agent-init.sh
-gondolin build --config images/alpine-tiny-firecracker.json --output ./guest/image/tiny
-gondolin build --config images/alpine-fast-firecracker.json --output ./guest/image/fast
-gondolin build --config images/alpine-initramfs-firecracker.json --output ./guest/image/initramfs
-```
-
-The tiny profile uses a Linux `6.1.142` `tinyconfig`-derived PVH/KVM guest
-kernel (`13M` stripped ELF) with virtio block, virtio net, vsock, ext4,
-FUSE, ptys, IPv4, and bash-capable process support built in. It keeps
-`bash` and `ca-certificates` in the rootfs and sets
-`manifest.assets.firecrackerInitrd` to `null`. The fast profile swaps the shell
-init script for the static init. The initramfs profile copies `sandboxd`,
-`sandboxfs`, bash, and certificates into initramfs and skips `switch_root`.
-
-A June 26, 2026 smoke sweep on the same KVM host used `netEnabled: true`, a
-VFS-backed file write/read, `/bin/bash`, and an outbound HTTP fetch. Tiny and
-fast static-init both passed `29M` for `20/20` boots with `MemTotal` around
-`18.3 MiB`; `28M` timed out. Initramfs-root passed `50M` for `20/20` boots with
-`MemTotal` around `38.8 MiB`; `49M` and `48M` exited before guest readiness.
-Use `30M` for tiny/fast, `50M` for the current initramfs-root floor, and `84M`
-for the default published image.
-
-Firecracker VM-state snapshots are supported for idle same-host restore through
-`VM#createFirecrackerSnapshot()` and `VM.restoreFirecrackerSnapshot()`. Snapshot
-creation waits for active exec, file, VFS, and network work to drain, rejects new
-guest work during capture, and records the VFS RPC inode map needed by restored
-FUSE mounts. A June 26, 2026 KVM smoke restored control exec, host/guest VFS
-read/write, and bash `/dev/tcp` HTTP egress from the restored VM. Treat this as
-a fast same-host resume path, not cross-host live migration; keep disk
-checkpoints, VFS providers, or external storage as the durable persistence
-boundary.
-
-This benchmark isolates VM lifecycle and tiny command latency. Network, VFS, and
-agent workload benchmarks should be measured separately.
-
-## Development
-
-```bash
-make build
-make check
-make test
-```
-
-Repo layout:
-
-- `guest/` - Zig guest daemons and Alpine image build
-- `host/` - TypeScript host controller, SDK, and CLI
-- `docs/` - operating notes and API docs
-- `examples/` - usage examples
+- **Local disposable micro-VMs** for agent turns/tasks
+- **Programmable HTTP/TLS egress policy** (allowlists + request/response hooks)
+- **Secret injection without guest exposure** via placeholders
+- **Programmable VFS mounts** that allow you to write custom file system behavior in JavaScript.
+- **Ingress gateway** to expose guest HTTP services on host (`--listen`, `vm.enableIngress()`)
+- **Attaching** allows you to attach a shell to an already running VM
+- **SSH support**
+  - host -> guest access (`vm.enableSsh()`)
+  - optional guest -> upstream allowlisted SSH egress (proxied, exec-oriented)
+- **Disk checkpoints (snapshots)** with resume support
+- **Custom image builds** (Alpine-based build pipeline, optional OCI rootfs source)
+- **Remote machines**: the VM runs under a static Rust daemon (`gondolind`) that also works on another machine without Node.js, while policy, hooks and credentials stay local; the same binary is a static CLI
+- **Daemon-side policies**: self-contained JavaScript policies (`createDjsHooks()`, `--hooks-script`) that run inside the daemon without a round trip to your process
+- **Configurable DNS behavior** (`synthetic`, `trusted`, `open`), rootfs modes (`readonly`, `memory`, `cow`), and runtime rootfs sizing
 
 ## Documentation
 
-- [CLI](docs/cli.md)
-- [SDK](docs/sdk.md)
-- [Architecture](docs/architecture.md)
-- [Kubernetes](docs/kubernetes.md)
-- [Security](docs/security.md)
-- [Limitations](docs/limitations.md)
+- [Installation](https://earendil-works.github.io/gondolin/install/) and [Quick Start](https://earendil-works.github.io/gondolin/quickstart/)
+- [Running Commands](https://earendil-works.github.io/gondolin/exec/)
+- [Network Access](https://earendil-works.github.io/gondolin/network-access/), [HTTP Hooks and Policies](https://earendil-works.github.io/gondolin/hooks/) and [Secrets](https://earendil-works.github.io/gondolin/secrets/)
+- [Files and Mounts](https://earendil-works.github.io/gondolin/vfs/) and [Persistence and Snapshots](https://earendil-works.github.io/gondolin/snapshots/)
+- [Ingress](https://earendil-works.github.io/gondolin/ingress/) and [SSH](https://earendil-works.github.io/gondolin/ssh/)
+- [Images](https://earendil-works.github.io/gondolin/images/) and [Building Custom Images](https://earendil-works.github.io/gondolin/custom-images/)
+- [Remote Machines](https://earendil-works.github.io/gondolin/remote/)
+- [CLI Reference](https://earendil-works.github.io/gondolin/cli/), [SDK Reference](https://earendil-works.github.io/gondolin/sdk/) and [Environment Variables](https://earendil-works.github.io/gondolin/environment/)
+- [Architecture](https://earendil-works.github.io/gondolin/architecture/), [Security Design](https://earendil-works.github.io/gondolin/security/) and [Limitations](https://earendil-works.github.io/gondolin/limitations/)
+- [Upgrading](https://earendil-works.github.io/gondolin/upgrading/)
+
+## Repository Guides
+
+- [Host package](host/README.md): installation, CLI usage, and SDK examples
+- [Guest sandbox](guest/README.md): Zig build and image/initramfs pipeline
+- [`images/`](images): canonical image release build configs (used by image-release workflow)
+- [Examples](host/examples): end-to-end integration examples
+
+
+## Pi Extension
+
+There is a [Pi + Gondolin extension](host/examples/pi-gondolin.ts) that runs
+pi tools inside a micro-VM and mounts your project at `/workspace`.
+
+## Browser Use
+
+There is a [Browser Use example](host/examples/browser-use.ts) that runs
+Chromium inside a micro-VM and drives it from a [Browser
+Use](https://github.com/browser-use/browser-use) agent on the host through the
+ingress gateway.  Only the guest-local Chrome DevTools endpoint is exposed:
+
+```bash
+node host/bin/gondolin.ts build --config host/examples/chromium.json --tag browser-use:latest
+OPENAI_API_KEY=... node host/examples/browser-use.ts
+```
+
+## AI Use Disclaimer
+
+This codebase has been built with the support of coding agents.
+
+## License and Links
+
+- [Documentation](https://earendil-works.github.io/gondolin/)
+- [Issue Tracker](https://github.com/earendil-works/gondolin/issues)
+- License: [Apache-2.0](https://github.com/earendil-works/gondolin/blob/main/LICENSE)

@@ -1,5 +1,5 @@
-import fs from "fs";
-import zlib from "zlib";
+import fs from "node:fs";
+import zlib from "node:zlib";
 
 import type { Architecture } from "./config.ts";
 
@@ -58,7 +58,10 @@ export function materializeVfkitKernel(
 function arm64ImagePayload(payload: Buffer): boolean {
   const start = ARM64_IMAGE_MAGIC_OFFSET;
   const end = start + ARM64_IMAGE_MAGIC.length;
-  return payload.length >= end && payload.subarray(start, end).equals(ARM64_IMAGE_MAGIC);
+  return (
+    payload.length >= end &&
+    payload.subarray(start, end).equals(ARM64_IMAGE_MAGIC)
+  );
 }
 
 function findMagicOffsets(source: Buffer, magic: Buffer): number[] {

@@ -10,6 +10,7 @@ require = patchRequire(require);
 
 const {
   DateNow,
+  MathMax,
   MathMin,
   Symbol,
 } = primordials;
@@ -292,6 +293,46 @@ class MemoryFileHandle extends VirtualFileHandle {
     }
   }
 
+  // XXX(patch): GONDOLIN_VENDORED_NODE_VFS_PATCH
+  // The entry is the source of truth for static content.  Re-read it before
+  // every operation so a handle observes truncates and resizes done through
+  // the path or through other handles instead of resurrecting stale bytes
+  // from its own snapshot on the next write.
+  #syncFromEntry() {
+    const entry = this.#entry;
+    if (!entry || (entry.isDynamic && entry.isDynamic())) return;
+    if (entry.content !== null && entry.content !== undefined) {
+      this.#content = entry.content;
+    }
+  }
+
+  // XXX(patch): GONDOLIN_VENDORED_NODE_VFS_PATCH
+  // Extending the file grows a capacity buffer geometrically (kept on the
+  // entry) and exposes the content as a prefix view of it, so a file written
+  // in small appends costs O(n) copying instead of O(n^2) (a 64 MiB file used
+  // to reallocate and copy the whole buffer on every write). Bytes between
+  // the old and the new length are zeroed (the backing may hold data from
+  // before a truncate).
+  #growTo(newLength) {
+    const content = this.#content;
+    const holder = this.#entry ?? this;
+    const backing = holder.vfsBacking;
+    const isPrefixView =
+      backing !== undefined &&
+      content.buffer === backing.buffer &&
+      content.byteOffset === backing.byteOffset;
+    if (isPrefixView && newLength <= backing.length) {
+      backing.fill(0, content.length, newLength);
+      this.#content = backing.subarray(0, newLength);
+      return;
+    }
+    const capacity = MathMax(newLength, content.length * 2, 4096);
+    const grown = Buffer.alloc(capacity);
+    content.copy(grown, 0, 0, content.length);
+    holder.vfsBacking = grown;
+    this.#content = grown.subarray(0, newLength);
+  }
+
   /**
    * Gets the current content synchronously.
    * For dynamic content providers, this gets fresh content from the entry.
@@ -302,6 +343,7 @@ class MemoryFileHandle extends VirtualFileHandle {
     if (this.#entry?.isDynamic && this.#entry.isDynamic()) {
       return this.#entry.getContentSync();
     }
+    this.#syncFromEntry();
     return this.#content;
   }
 
@@ -315,6 +357,7 @@ class MemoryFileHandle extends VirtualFileHandle {
     if (this.#entry?.getContentAsync) {
       return this.#entry.getContentAsync();
     }
+    this.#syncFromEntry();
     return this.#content;
   }
 
@@ -380,15 +423,14 @@ class MemoryFileHandle extends VirtualFileHandle {
    */
   writeSync(buffer, offset, length, position) {
     this._checkClosed();
+    this.#syncFromEntry();
 
     const writePos = position !== null && position !== undefined ? position : this.position;
     const data = buffer.subarray(offset, offset + length);
 
     // Expand content if needed
     if (writePos + length > this.#content.length) {
-      const newContent = Buffer.alloc(writePos + length);
-      this.#content.copy(newContent, 0, 0, this.#content.length);
-      this.#content = newContent;
+      this.#growTo(writePos + length);
     }
 
     // Write the data
@@ -467,11 +509,11 @@ class MemoryFileHandle extends VirtualFileHandle {
     const buffer = typeof data === 'string' ? Buffer.from(data, options?.encoding) : data;
 
     // In append mode, append to existing content
+    this.#syncFromEntry();
     if (this.flags === 'a' || this.flags === 'a+') {
-      const newContent = Buffer.alloc(this.#content.length + buffer.length);
-      this.#content.copy(newContent, 0);
-      buffer.copy(newContent, this.#content.length);
-      this.#content = newContent;
+      const oldLength = this.#content.length;
+      this.#growTo(oldLength + buffer.length);
+      buffer.copy(this.#content, oldLength);
     } else {
       this.#content = Buffer.from(buffer);
     }
@@ -502,6 +544,7 @@ class MemoryFileHandle extends VirtualFileHandle {
    */
   statSync(options) {
     this._checkClosed();
+    this.#syncFromEntry();
     if (this.#getStats) {
       return this.#getStats(this.#content.length);
     }
@@ -523,13 +566,12 @@ class MemoryFileHandle extends VirtualFileHandle {
    */
   truncateSync(len = 0) {
     this._checkClosed();
+    this.#syncFromEntry();
 
     if (len < this.#content.length) {
       this.#content = this.#content.subarray(0, len);
     } else if (len > this.#content.length) {
-      const newContent = Buffer.alloc(len);
-      this.#content.copy(newContent, 0, 0, this.#content.length);
-      this.#content = newContent;
+      this.#growTo(len);
     }
 
     // Update the entry's content and mtime

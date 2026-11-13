@@ -43,6 +43,14 @@ Useful env caps:
 - `SIM_VM_NET_ENABLED`, default `false`
 - `SIM_VM_CPU_WORK_KIB`, default `64`
 
+## Native Engine Migration
+
+The container builds and includes `gondolind` and pins Firecracker 1.18.0.
+The simulator's TypeScript controller uses that Rust engine. The container
+sets `GONDOLIN_JAILER=0`: it is a trusted load-test harness, not a production
+tenant-isolation deployment. Rebuild its guest image with current helpers
+and remeasure sizing; old 30 MB figures are not new-engine guarantees.
+
 ## Build Image
 
 Build from the repo root:
