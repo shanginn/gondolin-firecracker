@@ -120,7 +120,8 @@ sync_repo() {
 }
 
 image() {
-  in_vm "cd $WORK && GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1 make -C guest build"
+  in_vm "cd $WORK && GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1 \
+    make -C guest build GONDOLIN_BUILD_CONFIG=../host/test/fixtures/ci-image.json"
 }
 
 # Nested guests boot ~10x slower than under HVF (every exit costs >= 30 us,

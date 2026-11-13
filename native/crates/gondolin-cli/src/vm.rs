@@ -299,7 +299,7 @@ pub struct Vm {
 impl Vm {
     /// Configures, boots and waits for the guest (and its mounts).
     pub async fn start(prepared: Prepared) -> Result<Arc<Vm>, String> {
-        check_vmm(&prepared)?;
+        check_vmm(&prepared.configure["vm"])?;
         let engine = Engine::start();
         let etc = Arc::new(EtcStore::new());
         if prepared.etc_mount_id.is_some() {
@@ -581,10 +581,9 @@ fn escape_proc_mounts(p: &str) -> String {
 }
 
 /// `ensureVmmAvailable`: the VMM binary must run.
-fn check_vmm(prepared: &Prepared) -> Result<(), String> {
-    let vm = &prepared.configure["vm"];
+fn check_vmm(vm: &gondolin_wire::Value) -> Result<(), String> {
     let krun = vm["vmm"].as_text() == Some("krun");
-    if vm["vmm"].as_text() == Some("firecracker") {
+    if matches!(vm["vmm"].as_text(), Some("firecracker" | "vfkit")) {
         // the daemon checks the binary (and reports a missing one) at start
         return Ok(());
     }
@@ -636,6 +635,16 @@ async fn wait_running(engine: &Engine, client: &Client) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_backends_delegate_binary_checks_to_the_daemon() {
+        for backend in ["firecracker", "vfkit"] {
+            let vm =
+                gondolin_wire::json::parse(&format!(r#"{{"vmm":"{backend}","qemu_path":""}}"#))
+                    .unwrap();
+            assert!(check_vmm(&vm).is_ok());
+        }
+    }
 
     #[test]
     fn env_merge() {

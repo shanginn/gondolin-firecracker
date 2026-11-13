@@ -372,14 +372,10 @@ pub fn prepare(
     Ok(created)
 }
 
-/// [`prepare`] for VMMs that only attach raw disks (Firecracker). The
-/// writable modes (`auto`, `cow`, `memory`) discard their writes with the
-/// session: the base is attached as a `snapshot` (read-only, the guest keeps
-/// its writes in a tmpfs overlay, see [`crate::firecracker::config`]), so
-/// nothing is copied and every VM shares the base's page cache. With
-/// `rootfs.size` the disk must grow, so it gets a raw copy in `dir` instead.
-/// `readonly` attaches the base itself. Checkpoints need a qcow2 overlay, so
-/// `checkpoint` is refused and a prepared disk is never exportable.
+/// [`prepare`] for raw-only VMMs (Firecracker/vfkit), without an imported
+/// checkpoint. Memory mode shares the readonly base with a guest tmpfs
+/// overlay; cow/auto use an exportable private copy. A size request in
+/// memory mode also uses a private copy. Readonly attaches the base itself.
 pub fn prepare_raw(vm: &mut VmConfig, dir: &Path) -> Result<(), String> {
     prepare_raw_checkpoint(vm, dir, None).map(|_| ())
 }

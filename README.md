@@ -29,6 +29,17 @@ with Zig 0.17.0 and the current guest helpers
 (`GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1 make -C guest build`). Existing performance figures
 for tiny images are historical; remeasure them with this engine.
 
+The complete VM test suite needs Python, SSH and filesystem utilities. Build its
+dedicated image with:
+
+```bash
+GONDOLIN_BUILD_SANDBOX_HELPERS_FROM_SOURCE=1 make -C guest build \
+  GONDOLIN_BUILD_CONFIG=../host/test/fixtures/ci-image.json
+```
+
+The production default image remains small; the extra tools are only installed
+by this test profile.
+
 ## Quick Example
 
 ```ts

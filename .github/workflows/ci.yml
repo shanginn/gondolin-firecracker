@@ -159,6 +159,7 @@ jobs:
           cd guest
           ALPINE_ARCH=${{ matrix.arch }} \
             GONDOLIN_SANDBOX_HELPERS_DIR="$PWD/zig-out" \
+            GONDOLIN_BUILD_CONFIG=../host/test/fixtures/ci-image.json \
             make build NODE="$NODE_BIN"
 
       - name: Package assets

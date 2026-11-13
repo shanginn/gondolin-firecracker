@@ -177,26 +177,13 @@ test("checkpoint resume rebases qcow2 backing to resolved rootfs", {
     fs.symlinkSync(assets.initrdPath, path.join(dir, initrdName));
     fs.symlinkSync(assets.rootfsPath, path.join(dir, rootfsName));
 
-    if (sourceManifest.assets?.krunKernel) {
-      const sourceKrunKernel = path.join(
-        sourceDir,
-        sourceManifest.assets.krunKernel,
-      );
-      fs.symlinkSync(
-        sourceKrunKernel,
-        path.join(dir, sourceManifest.assets.krunKernel),
-      );
-    }
-
-    if (sourceManifest.assets?.krunInitrd) {
-      const sourceKrunInitrd = path.join(
-        sourceDir,
-        sourceManifest.assets.krunInitrd,
-      );
-      fs.symlinkSync(
-        sourceKrunInitrd,
-        path.join(dir, sourceManifest.assets.krunInitrd),
-      );
+    // Keep every optional backend asset declared by the copied manifest.
+    for (const name of new Set(Object.values(sourceManifest.assets ?? {}))) {
+      if (typeof name !== "string" || fs.existsSync(path.join(dir, name))) {
+        continue;
+      }
+      fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+      fs.symlinkSync(path.join(sourceDir, name), path.join(dir, name));
     }
 
     fs.writeFileSync(

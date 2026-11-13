@@ -22,6 +22,17 @@ NODE=${NODE:-node}
 echo "==> firecracker backend check (jailed VMM, vsock, overlay root, sandboxfs)"
 "$NODE" scripts/check-firecracker.ts
 
+# Same-host VM snapshots use the private API socket (not available in a jail).
+if [ "${GONDOLIN_NITRO_MODE:-off}" = off ]; then
+  # Snapshot files are private to the daemon uid; run this isolated test's
+  # controller under the same uid, without the sudo-daemon wrapper.
+  sudo -n env PATH="$PATH" \
+    GONDOLIN_NATIVE_BIN="$GONDOLIN_DAEMON_BIN" \
+    GONDOLIN_GUEST_DIR="$GONDOLIN_GUEST_DIR" \
+    GONDOLIN_VMM=firecracker GONDOLIN_JAILER=0 GONDOLIN_FORCE_VM_TESTS=1 \
+    "$(command -v "$NODE")" --test test/native-fork-vm.test.ts
+fi
+
 tests=(
   backpressure checkpoint djs-hooks-vm exec exec-stdin-backpressure
   firecracker-options host-pid-stats http-hooks ingress-forwarding
@@ -33,14 +44,3 @@ files=()
 for t in "${tests[@]}"; do files+=("test/$t.test.ts"); done
 echo "==> host tests on firecracker: ${tests[*]}"
 "$NODE" --test --test-concurrency=2 "${files[@]}"
-
-# Same-host VM snapshots use the private API socket (not available in a jail).
-if [ "${GONDOLIN_NITRO_MODE:-off}" = off ]; then
-  # Snapshot files are private to the daemon uid; run this isolated test's
-  # controller under the same uid, without the sudo-daemon wrapper.
-  sudo -n env PATH="$PATH" \
-    GONDOLIN_NATIVE_BIN="$GONDOLIN_DAEMON_BIN" \
-    GONDOLIN_GUEST_DIR="$GONDOLIN_GUEST_DIR" \
-    GONDOLIN_VMM=firecracker GONDOLIN_JAILER=0 GONDOLIN_FORCE_VM_TESTS=1 \
-    "$(command -v "$NODE")" --test test/native-fork-vm.test.ts
-fi

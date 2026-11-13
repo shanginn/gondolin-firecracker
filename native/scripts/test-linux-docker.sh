@@ -34,7 +34,7 @@
 # (`docker volume rm $(docker volume ls -q -f name=gondolin-lt-)` resets).
 # The VM phases need an aarch64 guest image in guest/image/out (built with
 # helpers from source: `cd guest && GONDOLIN_SANDBOX_HELPERS_DIR=$PWD/zig-out
-# make build`) or GUEST_IMAGE=<dir>.
+# make build GONDOLIN_BUILD_CONFIG=../host/test/fixtures/ci-image.json`) or GUEST_IMAGE=<dir>.
 # shellcheck disable=SC2016 # JavaScript in single quotes
 set -euo pipefail
 

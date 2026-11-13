@@ -43,7 +43,9 @@ jobs:
           pnpm install
           cd guest
           zig build -Doptimize=ReleaseSmall
-          GONDOLIN_SANDBOX_HELPERS_DIR="$PWD/zig-out" make assets NODE="$(command -v node)"
+          GONDOLIN_SANDBOX_HELPERS_DIR="$PWD/zig-out" \
+            GONDOLIN_BUILD_CONFIG=../host/test/fixtures/ci-image.json \
+            make assets NODE="$(command -v node)"
           chmod -R o+rX image/out
 
       - name: Run host tests on a Nitro Sandbox

@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { parseBuildConfig, validateBuildConfig } from "../src/build/config.ts";
+
+test("build-config: CI image includes the VM suite's guest tools", () => {
+  const config = parseBuildConfig(
+    readFileSync(new URL("./fixtures/ci-image.json", import.meta.url), "utf8"),
+  );
+  for (const pkg of ["python3", "openssh", "e2fsprogs-extra", "nodejs"]) {
+    assert.ok(config.alpine?.rootfsPackages?.includes(pkg), `missing ${pkg}`);
+  }
+});
 
 test("build-config: accepts postBuild.commands", () => {
   const cfg = {
