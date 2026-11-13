@@ -102,7 +102,11 @@ test("native Firecracker snapshot restores guest RAM and native VFS inodes", {
     "ramvfs",
   );
   assert.equal(
-    (await vm.exec("printf changed >/tmp/ram-state; printf changed >/data/scratch/file")).exitCode,
+    (
+      await vm.exec(
+        "printf changed >/tmp/ram-state; printf changed >/data/scratch/file",
+      )
+    ).exitCode,
     0,
   );
   await vm.close();
