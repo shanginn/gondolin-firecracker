@@ -73,12 +73,15 @@ test("native Firecracker snapshot restores guest RAM and native VFS inodes", {
       vmm: "firecracker" as const,
       netEnabled: false,
       nitro: false as const,
+      debug: ["protocol", "timing"] as const,
     },
+    startTimeoutMs: 30000,
     rootfs: { mode: "memory" as const },
     vfs: { mounts: { "/scratch": nativeMounts.memory() } },
   };
   const vm = await VM.create(options);
   vms.push(vm);
+  t.diagnostic("booting and populating the snapshot source");
   assert.equal(
     (
       await vm.exec(
@@ -88,14 +91,18 @@ test("native Firecracker snapshot restores guest RAM and native VFS inodes", {
     0,
   );
   const inode = (await vm.exec("stat -c %i /data/scratch/file")).stdout;
+  t.diagnostic("capturing guest RAM and native VFS state");
   const snapshot = await vm.createFirecrackerSnapshot(
     path.join(dir, "snapshot"),
   );
   assert.equal(fs.statSync(snapshot.memPath).mode & 0o777, 0o600);
+  t.diagnostic("checking the source resumed after capture");
   assert.equal((await vm.exec("cat /tmp/ram-state")).stdout, "ram");
   await vm.close();
+  t.diagnostic("restoring into a new host session");
   const restored = await VM.restoreFirecrackerSnapshot(snapshot, options);
   vms.push(restored);
+  t.diagnostic("checking restored RAM, hard links and inode identity");
   assert.equal(
     (await restored.exec("cat /tmp/ram-state /data/scratch/link")).stdout,
     "ramvfs",

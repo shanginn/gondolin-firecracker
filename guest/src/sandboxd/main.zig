@@ -2,7 +2,7 @@
 //!
 //! Serves the `virtio-port` control channel: runs commands (`exec_*`), moves
 //! files in and out of the guest (`file_*`), sets the clock (`time_sync`) and
-//! reports the VFS mount status once at startup (`vfs_ready`/`vfs_error`).
+//! reports the VFS mount status at startup and reconnect (`vfs_ready`/`vfs_error`).
 //!
 //! Architecture: one thread, one `poll(2)` loop.  Each iteration polls
 //!   - the virtio port (input always, output while the outbox is non-empty),
@@ -156,11 +156,17 @@ const Daemon = struct {
                 }
             }
 
-            _ = self.channel.probeReconnect();
+            self.probeReconnect();
             if (self.readAllowed()) try self.transfers.pumpReads(self.outbox());
             try self.finishSessions();
             _ = self.channel.flush();
         }
+    }
+
+    fn probeReconnect(self: *Daemon) void {
+        // A restored VM connects to a new host session, which has not
+        // seen this guest's readiness/features announcement yet.
+        if (!self.channel.connected and self.channel.probeReconnect()) self.sendVfsStatus();
     }
 
     fn pollTimeout(self: *Daemon) i32 {
@@ -333,6 +339,40 @@ const Daemon = struct {
         });
     }
 };
+
+test "reconnected control channel reannounces readiness exactly once" {
+    const testing = std.testing;
+    const fds = try sys.pipe(true);
+    defer sys.close(fds[0]);
+    defer sys.close(fds[1]);
+    var daemon: Daemon = .{
+        .gpa = testing.allocator,
+        .channel = .init(testing.allocator, fds[1]),
+        .sigchld_fd = -1,
+        .spawn_ctx = undefined,
+        .transfers = undefined,
+        .arena = undefined,
+    };
+    defer daemon.channel.deinit(testing.allocator);
+    daemon.channel.connected = false;
+    daemon.probeReconnect();
+    try testing.expect(daemon.channel.connected);
+    try testing.expect(daemon.outbox().pending() > 0);
+    const queued = daemon.outbox().pending();
+    daemon.probeReconnect();
+    try testing.expectEqual(queued, daemon.outbox().pending());
+
+    try daemon.outbox().flush(fds[1]);
+    var reader: shared.framing.FrameReader = .{};
+    defer reader.deinit(testing.allocator);
+    _ = try reader.fill(testing.allocator, fds[0]);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const message = try protocol.Envelope.decode(arena.allocator(), (try reader.next()).?);
+    try testing.expect(message.tag() == .vfs_ready or message.tag() == .vfs_error);
+    try testing.expectEqual(@as(u32, 0), try message.id());
+    try testing.expect(try reader.next() == null);
+}
 
 /// Parse `id` and the payload of an incoming message.
 fn parse(env: protocol.Envelope, arena: Allocator, comptime tag: protocol.Tag) !struct { u32, protocol.Payload(tag) } {
